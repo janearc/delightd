@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -25,10 +27,16 @@ projects:
 		t.Fatalf("failed to write mock config: %v", err)
 	}
 
-	// Change working directory to tmpDir to simulate local config lookup
 	origWD, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(origWD)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", "/tmp/nonexistent")
+	defer os.Setenv("HOME", origHome)
+
+	// Reset viper for tests since it's global
+	viper.Reset()
 
 	cfg, err := Load(context.Background())
 	if err != nil {

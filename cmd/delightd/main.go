@@ -17,6 +17,7 @@ import (
 	"delightd/config"
 	"delightd/pkg/backup"
 	"delightd/pkg/exports"
+	"delightd/pkg/metrics"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 	"delightd/pkg/watcher"
@@ -146,6 +147,7 @@ func main() {
 					mu.RUnlock()
 
 					if machine.GetState() == state.StateFallow || machine.GetState() == state.StateMonitoring {
+						metrics.Inc(fmt.Sprintf(`delightd_git_churn_checks_total{project="%s"}`, p.Name))
 						churn, err := watcher.HasChurn(ctx, p.Path)
 						if err != nil {
 							slog.Error("failed to poll git oracle", "project", p.Name, "error", err)
@@ -171,9 +173,11 @@ func main() {
 
 						archivePath, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, *dryRun)
 						if err != nil {
+							metrics.Inc(fmt.Sprintf(`delightd_backup_failures_total{project="%s"}`, p.Name))
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
 							machine.Transition(ctx, state.EventBackupFail)
 						} else {
+							metrics.Inc(fmt.Sprintf(`delightd_backup_success_total{project="%s"}`, p.Name))
 							slog.Info("backup pipeline succeeded", "project", p.Name, "archive", archivePath)
 							machine.Transition(ctx, state.EventBackupSuccess)
 						}
@@ -195,6 +199,8 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status":"ok", "active_projects":%d, "dry_run":%t}`, len(cfg.Projects), *dryRun)
 	})
+
+	mux.HandleFunc("GET /metrics", metrics.Handler())
 
 	mux.HandleFunc("GET /projects/{name}/state", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
