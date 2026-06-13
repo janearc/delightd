@@ -1,5 +1,5 @@
 # Stage 1: Build the static binary
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Ensure we have git to pull module dependencies if needed
 RUN apk add --no-cache git
