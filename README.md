@@ -1,4 +1,4 @@
-# delightd
+# 😋 delightd
 
 `delightd` is the daemon responsible for fleet checkpointing and interface aggregation. It evaluates git repositories for churn, manages local `.tgz` snapshot archives, and exposes binary paths to the host environment.
 
