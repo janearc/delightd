@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev-fleet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delightd
+  namespace: dev-fleet
+  labels:
+    app: delightd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: delightd
+  template:
+    metadata:
+      labels:
+        app: delightd
+    spec:
+      # Fleet nodes dynamically pull the container, but dev nodes use locally built images
+      containers:
+      - name: delightd
+        image: delightd:latest
+        imagePullPolicy: IfNotPresent
+        command: ["/usr/local/bin/delightd", "--immediate", "--dry-run"]
+        ports:
+        - containerPort: 8080
+          name: control-port
+        securityContext:
+          # Strict UID/GID enforcement at the Kubelet level
+          runAsUser: 1000
+          runAsGroup: 1000
+        volumeMounts:
+        - name: host-workspace
+          mountPath: /work
+        - name: host-config
+          mountPath: /etc/delightd
+          readOnly: true
+        env:
+        - name: DELIGHT_SYSTEM_ROOT
+          value: "/work/backups"
+      volumes:
+      # Hyperscaler local-dev pattern: hostPath mounts mapped directly to the Pod
+      - name: host-workspace
+        hostPath:
+          path: /Users/jane/work
+          type: Directory
+      - name: host-config
+        hostPath:
+          path: /Users/jane/etc/delightd
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: delightd
+  namespace: dev-fleet
+spec:
+  # Native Kube Service Discovery (replaces Traefik/Envoy need inside the cluster)
+  selector:
+    app: delightd
+  ports:
+  - port: 8080
+    targetPort: control-port
+    name: http

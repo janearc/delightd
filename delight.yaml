@@ -1,0 +1,14 @@
+system:
+  root: "~/var"
+  config_root: "~/etc"
+  daemon:
+    control_port: 8080
+    pid_file: "~/var/run/delightd.pid"
+
+projects:
+  - name: "paling"
+    path: "~/work/paling"
+    backup:
+      check_interval: "15m"
+      rotation:
+        max_archives: 48

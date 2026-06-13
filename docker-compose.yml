@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  # --------------------------------------------------------
+  # THE CORE DAEMON (Agnostic backend, pure static binary)
+  # --------------------------------------------------------
+  delightd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # FLEET STANDARD: Bind the container's execution user to the host engineer's ID.
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ~/work:/work:rw
+      - ~/etc/delightd:/etc/delightd:ro
+    environment:
+      - DELIGHT_SYSTEM_ROOT=/work/backups
+    command: ["--immediate"]
+    restart: unless-stopped
+    # Dynamic labeling for Traefik discovery (Envoy ignores these)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.delightd.rule=Host(`delightd.local`)"
+      - "traefik.http.services.delightd.loadbalancer.server.port=8080"
+
+  # --------------------------------------------------------
+  # TRAEFIK PROFILE (Dynamic Reverse Proxy + Endpoint Registry)
+  # --------------------------------------------------------
+  traefik:
+    image: traefik:v2.10
+    profiles: ["traefik"]
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:8081:8080" # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # --------------------------------------------------------
+  # ENVOY PROFILE (Static Reverse Proxy + Endpoint Registry)
+  # --------------------------------------------------------
+  envoy:
+    image: envoyproxy/envoy:v1.27-latest
+    profiles: ["envoy"]
+    ports:
+      - "127.0.0.1:80:8000" # Envoy listens on 8000 internally
+      - "127.0.0.1:9901:9901" # Envoy admin port
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      - delightd
