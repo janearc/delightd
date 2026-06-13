@@ -15,9 +15,15 @@ type DaemonConfig struct {
 }
 
 type SystemConfig struct {
-	Root       string       `mapstructure:"root"`
-	ConfigRoot string       `mapstructure:"config_root"`
-	Daemon     DaemonConfig `mapstructure:"daemon"`
+	Root        string            `mapstructure:"root"`
+	ConfigRoot  string            `mapstructure:"config_root"`
+	AgentSkills AgentSkillsConfig `mapstructure:"agent_skills"`
+	Daemon      DaemonConfig      `mapstructure:"daemon"`
+}
+
+type AgentSkillsConfig struct {
+	Enabled   bool     `mapstructure:"enabled"`
+	ExposeVia []string `mapstructure:"expose_via"`
 }
 
 type BackupRotationConfig struct {
@@ -45,11 +51,11 @@ type DelightConfig struct {
 func Load(ctx context.Context) (*DelightConfig, error) {
 	viper.SetConfigName("delight")
 	viper.SetConfigType("yaml")
-	
+
 	// Agnostic resolution paths
 	viper.AddConfigPath("$HOME/etc/delightd")
 	viper.AddConfigPath(".")
-	
+
 	// Enable 12-factor environment variable overrides (e.g. DELIGHT_SYSTEM_ROOT)
 	viper.SetEnvPrefix("delight")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

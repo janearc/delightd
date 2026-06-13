@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"delightd/config"
 	"delightd/pkg/backup"
+	"delightd/pkg/exports"
+	"delightd/pkg/skills"
 	"delightd/pkg/state"
 	"delightd/pkg/watcher"
 )
@@ -48,6 +51,62 @@ func main() {
 
 	slog.Info("configuration loaded successfully", "projects_count", len(cfg.Projects))
 
+	workDir := os.ExpandEnv("$HOME/work")
+	exportEngine := exports.NewEngine(workDir)
+	var knownProjects []string
+	for _, proj := range cfg.Projects {
+		knownProjects = append(knownProjects, proj.Name)
+	}
+
+	if err := exportEngine.Sync(ctx, knownProjects, *dryRun); err != nil {
+		slog.Error("initial export sync failed", "error", err)
+	}
+
+	skillAggregator := skills.NewAggregator(workDir)
+
+	syncSkills := func() {
+		if !cfg.System.AgentSkills.Enabled {
+			return
+		}
+		if err := skillAggregator.ScanProjects(knownProjects); err != nil {
+			slog.Error("failed to scan skills", "error", err)
+		}
+
+		// Handle CLI Generation
+		for _, method := range cfg.System.AgentSkills.ExposeVia {
+			if method == "cli" && !*dryRun {
+				varBinDir := os.Getenv("DELIGHT_EXPORTS_BIN")
+				if varBinDir == "" {
+					home, _ := os.UserHomeDir()
+					varBinDir = filepath.Join(home, "var", "bin")
+				}
+				if err := skills.GenerateCLIWrapper(varBinDir, skillAggregator.GetTools()); err != nil {
+					slog.Error("failed to generate cli wrapper", "error", err)
+				} else {
+					slog.Info("regenerated fleet CLI wrapper", "tools_count", len(skillAggregator.GetTools()))
+				}
+			}
+		}
+	}
+
+	// Initial skill sync
+	syncSkills()
+
+	go func() {
+		slog.Info("starting periodic export sync engine")
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				exportEngine.Sync(ctx, knownProjects, *dryRun)
+				syncSkills()
+			}
+		}
+	}()
+
 	for _, proj := range cfg.Projects {
 		go func(p config.ProjectConfig) {
 			if *immediate {
@@ -70,10 +129,10 @@ func main() {
 				slog.Error("invalid check_interval, defaulting to 15m", "project", p.Name)
 				interval = 15 * time.Minute
 			}
-			
+
 			pollTicker := time.NewTicker(interval)
 			defer pollTicker.Stop()
-			
+
 			evalTicker := time.NewTicker(2 * time.Second)
 			defer evalTicker.Stop()
 
@@ -109,7 +168,7 @@ func main() {
 
 					if machine.GetState() == state.StateBackingUp {
 						slog.Info("executing backup pipeline", "project", p.Name)
-						
+
 						archivePath, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, *dryRun)
 						if err != nil {
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
@@ -119,7 +178,7 @@ func main() {
 							machine.Transition(ctx, state.EventBackupSuccess)
 						}
 					}
-					
+
 					if machine.GetState() == state.StateError && machine.CanRetry() {
 						slog.Info("backoff period expired, triggering retry", "project", p.Name)
 						machine.Transition(ctx, state.EventTriggerBackup)
@@ -130,7 +189,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	
+
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -142,12 +201,12 @@ func main() {
 		mu.RLock()
 		machine, ok := machines[name]
 		mu.RUnlock()
-		
+
 		if !ok {
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(machine.GetDiagnostics())
 	})
@@ -157,17 +216,17 @@ func main() {
 		mu.RLock()
 		machine, ok := machines[name]
 		mu.RUnlock()
-		
+
 		if !ok {
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
 		}
-		
+
 		if err := machine.Transition(ctx, state.EventTriggerBackup); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusConflict)
 			return
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"backup_triggered", "project":"%s"}`, name)
 	})
@@ -177,20 +236,30 @@ func main() {
 		mu.RLock()
 		machine, ok := machines[name]
 		mu.RUnlock()
-		
+
 		if !ok {
 			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
 			return
 		}
-		
+
 		if err := machine.Transition(ctx, state.EventClearError); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusConflict)
 			return
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"error_cleared", "project":"%s"}`, name)
 	})
+
+	if cfg.System.AgentSkills.Enabled {
+		for _, method := range cfg.System.AgentSkills.ExposeVia {
+			if method == "mcp" {
+				mux.HandleFunc("POST /mcp", skillAggregator.HandleMCP)
+				slog.Info("MCP Server exposed on POST /mcp")
+				break
+			}
+		}
+	}
 
 	port := cfg.System.Daemon.ControlPort
 	if port == 0 {

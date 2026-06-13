@@ -32,7 +32,9 @@ func CreateCheckpoint(ctx context.Context, projectName, projectPath, backupRoot 
 		// We can still run the WalkDir to prove it works without writing the tar
 		fileCount := 0
 		err := filepath.WalkDir(projectPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil { return err }
+			if err != nil {
+				return err
+			}
 			if d.IsDir() {
 				name := d.Name()
 				if name == ".git" || name == ".venv" || name == "node_modules" || name == "__pycache__" {

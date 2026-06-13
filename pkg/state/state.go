@@ -78,7 +78,7 @@ func (m *Machine) Transition(ctx context.Context, e Event) error {
 		if m.CurrentState == StateBackingUp {
 			m.CurrentState = StateError
 			m.ErrorCount++
-			
+
 			// Exponential backoff with random Jitter to prevent Thundering Herds on retry
 			baseWait := time.Minute * time.Duration(math.Pow(2, float64(m.ErrorCount)))
 			if baseWait > time.Hour {
@@ -86,10 +86,10 @@ func (m *Machine) Transition(ctx context.Context, e Event) error {
 			}
 			jitter := time.Duration(rand.Intn(60)) * time.Second
 			m.NextRetryAt = time.Now().Add(baseWait).Add(jitter)
-			
-			slog.Warn("backup failed, entering de-escalating backoff", 
-				"project", m.ProjectName, 
-				"error_count", m.ErrorCount, 
+
+			slog.Warn("backup failed, entering de-escalating backoff",
+				"project", m.ProjectName,
+				"error_count", m.ErrorCount,
 				"next_retry", m.NextRetryAt)
 		}
 	case EventClearError:
@@ -105,10 +105,10 @@ func (m *Machine) Transition(ctx context.Context, e Event) error {
 
 	if prevState != m.CurrentState {
 		m.LastActivity = time.Now()
-		slog.Info("state transition", 
-			"project", m.ProjectName, 
-			"event", e, 
-			"from", prevState, 
+		slog.Info("state transition",
+			"project", m.ProjectName,
+			"event", e,
+			"from", prevState,
 			"to", m.CurrentState)
 	}
 

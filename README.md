@@ -10,22 +10,33 @@ In modern fleet architectures, the daemon itself is strictly decoupled from Endp
 
 We provide out-of-the-box Infrastructure-as-Code profiles for the two industry standards: **Traefik** and **Envoy**.
 
-### Starting the Fleet Stack
+See [INSTALL.md](INSTALL.md) for detailed deployment profiles, and [DEVELOPERS.md](DEVELOPERS.md) for instructions on how to integrate your projects with the daemon.
 
-You can inject the endpoint registry of your choice at runtime without altering the underlying Go binary:
+## Binary & Docker Exports Engine
 
-#### 1. Traefik (The Dynamic Auto-Discovery Route)
-Traefik binds to the Docker socket and automatically registers `delightd` dynamically via container labels. No bespoke configuration files required.
-```bash
-docker-compose --profile traefik up -d
-```
-*Agents can route traffic directly through `http://delightd.local`.*
+In addition to backups, `delightd` autonomously exposes executables and Docker shims from `~/work` into your `$PATH` via `~/var/bin`.
 
-#### 2. Envoy (The Explicit Hyperscaler Route)
-For fleets standardizing on Envoy proxying and rigid configurations.
-```bash
-docker-compose --profile envoy up -d
-```
+### Sensible Defaults (Zero-Touch)
+`delightd` natively scans every managed project directory. If it finds a `bin/` subdirectory containing executable files, it automatically creates a direct symlink in `~/var/bin` pointing to them.
 
-### Mount Invariants & Root Protection
-The container strictly bounds its execution user to your host `UID/GID`. This ensures all `.tgz` archives it creates in `/work/backups` are safely owned by your specific host user and never by `root`, preventing local workstation permissions corruption.
+### Docker Wrappers (Shims)
+For commands isolated inside Docker, `delightd` avoids polluting your `$PATH` with opaque binaries. Instead, it generates readable Bash scripts in its state directory (`~/var/runtime/delightd/exports/`) and symlinks those into `~/var/bin`. 
+
+This provides a "procfs" like experience—you can simply `cat $(which my-docker-cli)` to see the exact syntax `delightd` is using to invoke the tool.
+
+There are two supported Docker modes (configured in `~/etc/delight-registry.yaml`):
+
+1. **`docker-run`**: Ephemeral execution (e.g. compilers/linters). The generated shim takes the form:
+   ```bash
+   #!/usr/bin/env bash
+   exec docker run --rm -i -v "$(pwd):/workspace" -w /workspace <image> "$@"
+   ```
+
+2. **`docker-exec`**: Connecting to a running service (e.g. database cli). The generated shim takes the form:
+   ```bash
+   #!/usr/bin/env bash
+   exec docker exec -i <container> <command> "$@"
+   ```
+
+### Idempotency & Archival
+`delightd` never recklessly `rm`s footprints. If an export is removed, its symlink is archived to `~/var/archive/delightd/exports/<timestamp>/`, ensuring zero unintentional data loss while keeping `~/var/bin` clean.

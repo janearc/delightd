@@ -13,8 +13,15 @@ services:
     volumes:
       - ~/work:/work:rw
       - ~/etc/delightd:/etc/delightd:ro
+      - ~/var:/var:rw
+    ports:
+      - "127.0.0.1:8088:8088"
     environment:
       - DELIGHT_SYSTEM_ROOT=/work/backups
+      - DELIGHT_EXPORTS_REGISTRY=/etc/delightd/delight-registry.yaml
+      - DELIGHT_EXPORTS_BIN=/var/bin
+      - DELIGHT_EXPORTS_STATE=/var/runtime/delightd/exports
+      - DELIGHT_EXPORTS_ARCHIVE=/var/archive/delightd/exports
     command: ["--immediate"]
     restart: unless-stopped
     # Dynamic labeling for Traefik discovery (Envoy ignores these)
