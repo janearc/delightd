@@ -1,42 +1,43 @@
-# Delightd: Autonomous Hyperscale Checkpoint Daemon
+# delightd
 
-`delightd` is a lightweight, zero-dependency Go daemon designed to continuously poll massive Git repositories natively in-memory, evaluate churn, and compress local `.tgz` snapshot archives to prevent catastrophic data loss during autonomous burst coding.
+`delightd` is the daemon responsible for fleet checkpointing and interface aggregation. It evaluates git repositories for churn, manages local `.tgz` snapshot archives, and exposes binary paths to the host environment.
 
-## Architectural Philosophy: The Agnostic Daemon
+## Architecture
 
-In modern fleet architectures, the daemon itself is strictly decoupled from Endpoint Registries, API Routing, and Service Meshes. 
+The daemon is integrated directly into the service mesh. It exposes an HTTP control port for metrics and Model Context Protocol (MCP) telemetry.
 
-`delightd` compiles into a purely static, 15MB Go binary serving standard HTTP/REST. **It contains zero routing SDK bloat.** Because it is perfectly agnostic, it natively integrates with any API Gateway or Service Mesh your infrastructure prefers. 
+It is compiled as a static 15MB Go binary. It intentionally omits network routing SDKs, delegating ingress to external infrastructure profiles (Traefik or Envoy).
 
-We provide out-of-the-box Infrastructure-as-Code profiles for the two industry standards: **Traefik** and **Envoy**.
+See `INSTALL.md` for deployment constraints. See `DEVELOPERS.md` for project integration invariants.
 
-See [INSTALL.md](INSTALL.md) for detailed deployment profiles, and [DEVELOPERS.md](DEVELOPERS.md) for instructions on how to integrate your projects with the daemon.
+## Interface Exports
 
-## Binary & Docker Exports Engine
+The daemon scans managed projects in `~/work` and enforces executable paths into the host `$PATH` at `~/var/bin`.
 
-In addition to backups, `delightd` autonomously exposes executables and Docker shims from `~/work` into your `$PATH` via `~/var/bin`.
+### Static Execution
 
-### Sensible Defaults (Zero-Touch)
-`delightd` natively scans every managed project directory. If it finds a `bin/` subdirectory containing executable files, it automatically creates a direct symlink in `~/var/bin` pointing to them.
+Executables located in `~/work/<project>/bin/` are symlinked into `~/var/bin`.
 
-### Docker Wrappers (Shims)
-For commands isolated inside Docker, `delightd` avoids polluting your `$PATH` with opaque binaries. Instead, it generates readable Bash scripts in its state directory (`~/var/runtime/delightd/exports/`) and symlinks those into `~/var/bin`. 
+### Docker Shims
 
-This provides a "procfs" like experience—you can simply `cat $(which my-docker-cli)` to see the exact syntax `delightd` is using to invoke the tool.
+To bridge the gap between host-level orchestration and strict containerized isolation, the daemon dynamically writes transparent shell wrapper scripts to `~/var/runtime/delightd/exports/` and symlinks them. This allows the host to execute standard shell commands that transparently proxy into Docker boundaries. Execution modes are defined in `~/etc/delight-registry.yaml`.
 
-There are two supported Docker modes (configured in `~/etc/delight-registry.yaml`):
+**docker-run (Ephemeral):**
+```bash
+#!/usr/bin/env bash
+exec docker run --rm -i -v "$(pwd):/workspace" -w /workspace <image> "$@"
+```
 
-1. **`docker-run`**: Ephemeral execution (e.g. compilers/linters). The generated shim takes the form:
-   ```bash
-   #!/usr/bin/env bash
-   exec docker run --rm -i -v "$(pwd):/workspace" -w /workspace <image> "$@"
-   ```
+**docker-exec (Persistent):**
+```bash
+#!/usr/bin/env bash
+exec docker exec -i <container> <command> "$@"
+```
 
-2. **`docker-exec`**: Connecting to a running service (e.g. database cli). The generated shim takes the form:
-   ```bash
-   #!/usr/bin/env bash
-   exec docker exec -i <container> <command> "$@"
-   ```
+The daemon provides idempotent cleanup. Unlinked exports are archived to `~/var/archive/delightd/exports/<timestamp>/`.
 
-### Idempotency & Archival
-`delightd` never recklessly `rm`s footprints. If an export is removed, its symlink is archived to `~/var/archive/delightd/exports/<timestamp>/`, ensuring zero unintentional data loss while keeping `~/var/bin` clean.
+## Execution
+
+```bash
+docker compose up -d
+```
