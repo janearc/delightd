@@ -94,20 +94,18 @@ func checkLlamaCpp(ctx context.Context, baseURL string) ModelSource {
 	resp, err := client.Do(req)
 	if err == nil {
 		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			source.Healthy = true
-			// Getting exact models from llama.cpp depends on startup flags.
-			// Often it only loads a single model per port, so we leave the models list empty
-			// or we could add a placeholder indicating the server is alive.
-			source.Models = append(source.Models, "unknown-llama-model")
-		}
+	}
+
+	if err == nil && resp.StatusCode == http.StatusOK {
+		source.Healthy = true
+		source.Models = append(source.Models, "unknown-llama-model")
 	} else {
 		// Fallback: try /v1/models for OpenAI API compatible servers
 		req, _ = http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
-		resp, err = client.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
+		resp2, err2 := client.Do(req)
+		if err2 == nil {
+			defer resp2.Body.Close()
+			if resp2.StatusCode == http.StatusOK {
 				source.Healthy = true
 				source.Models = append(source.Models, "openai-compatible-model")
 			}
