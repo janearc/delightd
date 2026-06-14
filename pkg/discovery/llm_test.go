@@ -63,7 +63,7 @@ func TestCheckOllama(t *testing.T) {
 			tc.expected.URL = server.URL // dynamically update URL
 
 			ctx := context.Background()
-			result := checkOllama(ctx, server.URL)
+			result := checkOllama(ctx, server.URL, "ollama")
 
 			if !reflect.DeepEqual(result, tc.expected) {
 				t.Errorf("expected %+v, got %+v", tc.expected, result)
@@ -84,10 +84,10 @@ func TestCheckOllama_Errors(t *testing.T) {
 	// To trigger http.NewRequestWithContext error inside checkOllama, we can use an invalid URL control character
 	// But it uses: http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/tags", nil)
 	// Passing an unparseable URL will do it.
-	result := checkOllama(ctx, "http://192.168.0.%31/")
+	result := checkOllama(ctx, "http://192.168.0.%31/", "ollama")
 	
 	// Check client do error using port 0
-	result2 := checkOllama(ctx, "http://localhost:0")
+	result2 := checkOllama(ctx, "http://localhost:0", "ollama")
 	if result2.Healthy {
 		t.Errorf("expected unhealthy")
 	}
@@ -153,7 +153,7 @@ func TestCheckLlamaCpp(t *testing.T) {
 			tc.expected.URL = server.URL // dynamically update URL
 
 			ctx := context.Background()
-			result := checkLlamaCpp(ctx, server.URL)
+			result := checkLlamaCpp(ctx, server.URL, "llama.cpp")
 
 			if !reflect.DeepEqual(result, tc.expected) {
 				t.Errorf("expected %+v, got %+v", tc.expected, result)
@@ -165,7 +165,7 @@ func TestCheckLlamaCpp(t *testing.T) {
 func TestCheckLlamaCpp_Errors(t *testing.T) {
 	ctx := context.Background()
 	// Test client do error using port 0
-	result := checkLlamaCpp(ctx, "http://localhost:0")
+	result := checkLlamaCpp(ctx, "http://localhost:0", "llama.cpp")
 	if result.Healthy {
 		t.Errorf("expected unhealthy")
 	}
