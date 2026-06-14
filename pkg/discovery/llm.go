@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"delightd/config"
 )
 
 // ModelSource represents a discovered LLM service provider and its available models.
@@ -23,19 +25,34 @@ type OllamaTagsResponse struct {
 	} `json:"models"`
 }
 
-// DiscoverLocalLLMs checks standard ports for known local LLM servers.
-func DiscoverLocalLLMs(ctx context.Context) []ModelSource {
+// DiscoverLocalLLMs checks standard ports for known local LLM servers or uses configured providers.
+func DiscoverLocalLLMs(ctx context.Context, cfg *config.DelightConfig) []ModelSource {
 	var sources []ModelSource
 
-	// 1. Check Ollama (default port 11434)
-	if ollama := checkOllama(ctx, "http://localhost:11434"); ollama.Healthy {
+	if cfg != nil && len(cfg.System.LLMDiscovery.Providers) > 0 {
+		for _, p := range cfg.System.LLMDiscovery.Providers {
+			if p.Type == "ollama" {
+				if ollama := checkOllama(ctx, p.URL, p.Name); ollama.Healthy {
+					sources = append(sources, ollama)
+				}
+			} else if p.Type == "llama_cpp" || p.Type == "openai" || p.Type == "apfel" {
+				if llamaCpp := checkLlamaCpp(ctx, p.URL, p.Name); llamaCpp.Healthy {
+					sources = append(sources, llamaCpp)
+				}
+			}
+		}
+		return sources
+	}
+
+	// 1. Check Ollama (default port 11434 via host.docker.internal)
+	if ollama := checkOllama(ctx, "http://host.docker.internal:11434", "ollama"); ollama.Healthy {
 		sources = append(sources, ollama)
 	}
 
 	// 2. Check llama.cpp or compatible OpenAI endpoints (common ports 8000-8020)
 	for port := 8000; port <= 8020; port++ {
-		url := fmt.Sprintf("http://localhost:%d", port)
-		if llamaCpp := checkLlamaCpp(ctx, url); llamaCpp.Healthy {
+		url := fmt.Sprintf("http://host.docker.internal:%d", port)
+		if llamaCpp := checkLlamaCpp(ctx, url, "llama.cpp"); llamaCpp.Healthy {
 			sources = append(sources, llamaCpp)
 		}
 	}
@@ -43,9 +60,9 @@ func DiscoverLocalLLMs(ctx context.Context) []ModelSource {
 	return sources
 }
 
-func checkOllama(ctx context.Context, baseURL string) ModelSource {
+func checkOllama(ctx context.Context, baseURL string, name string) ModelSource {
 	source := ModelSource{
-		Provider: "ollama",
+		Provider: name,
 		URL:      baseURL,
 		Healthy:  false,
 		Models:   []string{},
@@ -75,9 +92,9 @@ func checkOllama(ctx context.Context, baseURL string) ModelSource {
 	return source
 }
 
-func checkLlamaCpp(ctx context.Context, baseURL string) ModelSource {
+func checkLlamaCpp(ctx context.Context, baseURL string, name string) ModelSource {
 	source := ModelSource{
-		Provider: "llama.cpp",
+		Provider: name,
 		URL:      baseURL,
 		Healthy:  false,
 		Models:   []string{},

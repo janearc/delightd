@@ -116,7 +116,7 @@ func main() {
 		defer ticker.Stop()
 		
 		// Initial sync
-		sources := discovery.DiscoverLocalLLMs(ctx)
+		sources := discovery.DiscoverLocalLLMs(ctx, cfg)
 		if err := traefik.SyncLLMRoutes(sources); err != nil {
 			slog.Error("initial LLM traefik sync failed", "error", err)
 		}
@@ -126,7 +126,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sources := discovery.DiscoverLocalLLMs(ctx)
+				sources := discovery.DiscoverLocalLLMs(ctx, cfg)
 				if err := traefik.SyncLLMRoutes(sources); err != nil {
 					slog.Error("failed to sync LLM routes to traefik", "error", err)
 				}
@@ -231,7 +231,7 @@ func main() {
 	mux.HandleFunc("GET /discovery/llms", func(w http.ResponseWriter, r *http.Request) {
 		// Discover local LLMs on the fly.
 		// In a production setup this might run periodically and cache the results.
-		sources := discovery.DiscoverLocalLLMs(r.Context())
+		sources := discovery.DiscoverLocalLLMs(r.Context(), cfg)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "ok",

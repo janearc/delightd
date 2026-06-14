@@ -14,11 +14,22 @@ type DaemonConfig struct {
 	PidFile     string `mapstructure:"pid_file"`
 }
 
+type LLMProviderConfig struct {
+	Name string `mapstructure:"name"`
+	Type string `mapstructure:"type"`
+	URL  string `mapstructure:"url"`
+}
+
+type LLMDiscoveryConfig struct {
+	Providers []LLMProviderConfig `mapstructure:"providers"`
+}
+
 type SystemConfig struct {
-	Root        string            `mapstructure:"root"`
-	ConfigRoot  string            `mapstructure:"config_root"`
-	AgentSkills AgentSkillsConfig `mapstructure:"agent_skills"`
-	Daemon      DaemonConfig      `mapstructure:"daemon"`
+	Root         string             `mapstructure:"root"`
+	ConfigRoot   string             `mapstructure:"config_root"`
+	AgentSkills  AgentSkillsConfig  `mapstructure:"agent_skills"`
+	Daemon       DaemonConfig       `mapstructure:"daemon"`
+	LLMDiscovery LLMDiscoveryConfig `mapstructure:"llm_discovery"`
 }
 
 type AgentSkillsConfig struct {

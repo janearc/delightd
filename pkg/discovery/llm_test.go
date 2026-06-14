@@ -173,7 +173,7 @@ func TestCheckLlamaCpp_Errors(t *testing.T) {
 
 func TestDiscoverLocalLLMs(t *testing.T) {
 	ctx := context.Background()
-	sources := DiscoverLocalLLMs(ctx)
+	sources := DiscoverLocalLLMs(ctx, nil)
 	if len(sources) > 0 {
 		t.Logf("found %d sources", len(sources))
 	}
