@@ -21,6 +21,8 @@ import (
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 	"delightd/pkg/watcher"
+	"delightd/pkg/discovery"
+	"delightd/pkg/traefik"
 )
 
 func main() {
@@ -104,6 +106,30 @@ func main() {
 			case <-ticker.C:
 				exportEngine.Sync(ctx, knownProjects, *dryRun)
 				syncSkills()
+			}
+		}
+	}()
+
+	go func() {
+		slog.Info("starting periodic active control plane (LLM discovery)")
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		
+		// Initial sync
+		sources := discovery.DiscoverLocalLLMs(ctx)
+		if err := traefik.SyncLLMRoutes(sources); err != nil {
+			slog.Error("initial LLM traefik sync failed", "error", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sources := discovery.DiscoverLocalLLMs(ctx)
+				if err := traefik.SyncLLMRoutes(sources); err != nil {
+					slog.Error("failed to sync LLM routes to traefik", "error", err)
+				}
 			}
 		}
 	}()
@@ -201,6 +227,17 @@ func main() {
 	})
 
 	mux.HandleFunc("GET /metrics", metrics.Handler())
+
+	mux.HandleFunc("GET /discovery/llms", func(w http.ResponseWriter, r *http.Request) {
+		// Discover local LLMs on the fly.
+		// In a production setup this might run periodically and cache the results.
+		sources := discovery.DiscoverLocalLLMs(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+			"sources": sources,
+		})
+	})
 
 	mux.HandleFunc("GET /projects/{name}/state", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")

@@ -1,12 +1,12 @@
 # 😋 delightd
 
-`delightd` is the daemon responsible for fleet checkpointing and interface aggregation. It evaluates git repositories for churn, manages local `.tgz` snapshot archives, and exposes binary paths to the host environment.
+`delightd` is the daemon responsible for fleet checkpointing, interface aggregation, and active control plane duties. It evaluates git repositories for churn, manages local `.tgz` snapshot archives, dynamically discovers local LLMs, registers them to `traefik`, and is controlled externally via `fleet-svc`.
 
 ## Architecture
 
-The daemon is integrated directly into the service mesh. It exposes an HTTP control port for metrics and Model Context Protocol (MCP) telemetry.
+The daemon is integrated directly into the service mesh. It exposes an HTTP control port for metrics, LLM telemetry, and Model Context Protocol (MCP).
 
-It is compiled as a static 15MB Go binary. It intentionally omits network routing SDKs, delegating ingress to external infrastructure profiles (Traefik or Envoy).
+It is compiled as a static 15MB Go binary. It generates dynamic routing configurations for Traefik to pull newly discovered local services (like `llama-server`) into the mesh automatically.
 
 See `INSTALL.md` for deployment constraints. See `DEVELOPERS.md` for project integration invariants.
 

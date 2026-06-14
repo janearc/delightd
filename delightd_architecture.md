@@ -1,7 +1,9 @@
 # Architectural Invariants: delightd
 
 ## 1. Overview
-`delightd` is a continuous agentic checkpointing (CAC) state machine. It mitigates destructive AI failures by orchestrating manifest-driven `.tgz` archiving based on filesystem churn metrics. 
+`delightd` serves dual roles:
+1. **Continuous Agentic Checkpointing (CAC)**: A state machine that mitigates destructive AI failures by orchestrating manifest-driven `.tgz` archiving based on filesystem churn metrics.
+2. **Active Control Plane**: An active service mesh monitor that dynamically discovers rogue or standalone local LLMs (like `llama-server` or `ollama`), automatically registers them with `traefik` for routing, and exposes telemetry to dashboards. It is externally controlled via the `fleet-svc` tooling.
 
 ## 2. Infrastructure
 - **Implementation**: Statically compiled Go binary (~15MB).
