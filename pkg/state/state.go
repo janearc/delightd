@@ -143,3 +143,30 @@ func (m *Machine) CanRetry() bool {
 	}
 	return time.Now().After(m.NextRetryAt)
 }
+
+// WatchesForChurn reports whether the machine is in a state that should poll the
+// git oracle for changes. Only fallow and monitoring watch; while backing up or
+// in error backoff there is nothing to react to, so polling is skipped.
+func (m *Machine) WatchesForChurn() bool {
+	switch m.GetState() {
+	case StateFallow, StateMonitoring:
+		return true
+	default:
+		return false
+	}
+}
+
+// AdvanceOnChurn transitions the machine in response to detected git churn,
+// selecting the correct event for the current state. It encapsulates the
+// fallow->monitoring->backing_up progression so callers do not branch on state
+// themselves. It is a no-op for states that do not react to churn.
+func (m *Machine) AdvanceOnChurn(ctx context.Context) error {
+	switch m.GetState() {
+	case StateFallow:
+		return m.Transition(ctx, EventChurnDetected)
+	case StateMonitoring:
+		return m.Transition(ctx, EventTriggerBackup)
+	default:
+		return nil
+	}
+}

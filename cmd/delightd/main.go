@@ -168,20 +168,23 @@ func main() {
 				case <-pollTicker.C:
 					machine := machines[p.Name]
 
-					if machine.GetState() == state.StateFallow || machine.GetState() == state.StateMonitoring {
-						metrics.Inc(fmt.Sprintf(`delightd_git_churn_checks_total{project="%s"}`, p.Name))
-						churn, err := watcher.HasChurn(ctx, p.Path)
-						if err != nil {
-							slog.Error("failed to poll git oracle", "project", p.Name, "error", err)
-							continue
-						}
+					// only poll the git oracle while idle or monitoring; while a
+					// backup is running or in error backoff there is nothing to react to.
+					if !machine.WatchesForChurn() {
+						continue
+					}
 
-						if churn {
-							if machine.GetState() == state.StateFallow {
-								machine.Transition(ctx, state.EventChurnDetected)
-							} else if machine.GetState() == state.StateMonitoring {
-								machine.Transition(ctx, state.EventTriggerBackup)
-							}
+					metrics.Inc(fmt.Sprintf(`delightd_git_churn_checks_total{project="%s"}`, p.Name))
+					churn, err := watcher.HasChurn(ctx, p.Path)
+					if err != nil {
+						slog.Error("failed to poll git oracle", "project", p.Name, "error", err)
+						continue
+					}
+
+					// the machine decides the right transition for its state.
+					if churn {
+						if err := machine.AdvanceOnChurn(ctx); err != nil {
+							slog.Error("failed to advance state on churn", "project", p.Name, "error", err)
 						}
 					}
 
