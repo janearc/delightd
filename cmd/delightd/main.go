@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -18,7 +16,7 @@ import (
 	"delightd/pkg/backup"
 	"delightd/pkg/discovery"
 	"delightd/pkg/exports"
-	"delightd/pkg/introspect"
+	"delightd/pkg/httpapi"
 	"delightd/pkg/metrics"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
@@ -47,7 +45,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	var mu sync.RWMutex
+	// machines is built once here and only read afterwards (control loop and
+	// HTTP handlers), so it needs no lock; each Machine guards its own state.
 	machines := make(map[string]*state.Machine)
 	for _, proj := range cfg.Projects {
 		machines[proj.Name] = state.NewMachine(proj.Name)
@@ -139,9 +138,7 @@ func main() {
 		go func(p config.ProjectConfig) {
 			if *immediate {
 				slog.Info("executing immediate startup evaluation", "project", p.Name)
-				mu.RLock()
 				machine := machines[p.Name]
-				mu.RUnlock()
 
 				churn, err := watcher.HasChurn(ctx, p.Path)
 				if err != nil {
@@ -169,9 +166,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-pollTicker.C:
-					mu.RLock()
 					machine := machines[p.Name]
-					mu.RUnlock()
 
 					if machine.GetState() == state.StateFallow || machine.GetState() == state.StateMonitoring {
 						metrics.Inc(fmt.Sprintf(`delightd_git_churn_checks_total{project="%s"}`, p.Name))
@@ -191,9 +186,7 @@ func main() {
 					}
 
 				case <-evalTicker.C:
-					mu.RLock()
 					machine := machines[p.Name]
-					mu.RUnlock()
 
 					if machine.GetState() == state.StateBackingUp {
 						slog.Info("executing backup pipeline", "project", p.Name)
@@ -219,98 +212,10 @@ func main() {
 		}(proj)
 	}
 
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok", "active_projects":%d, "dry_run":%t}`, len(cfg.Projects), *dryRun)
-	})
-
-	mux.HandleFunc("GET /metrics", metrics.Handler())
-
-	mux.HandleFunc("GET /discovery/llms", func(w http.ResponseWriter, r *http.Request) {
-		// Discover local LLMs on the fly.
-		// In a production setup this might run periodically and cache the results.
-		sources := discovery.DiscoverLocalLLMs(r.Context(), cfg)
-		w.Header().Set("Content-Type", "application/json")
-		// response envelope: {"status":"ok","sources":[...discovered llm endpoints...]}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "ok",
-			"sources": sources,
-		})
-	})
-
-	mux.HandleFunc("GET /projects/{name}/state", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		mu.RLock()
-		machine, ok := machines[name]
-		mu.RUnlock()
-
-		if !ok {
-			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(machine.GetDiagnostics())
-	})
-
-	mux.HandleFunc("POST /projects/{name}/backup", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		mu.RLock()
-		machine, ok := machines[name]
-		mu.RUnlock()
-
-		if !ok {
-			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
-			return
-		}
-
-		if err := machine.Transition(ctx, state.EventTriggerBackup); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusConflict)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"backup_triggered", "project":"%s"}`, name)
-	})
-
-	mux.HandleFunc("POST /projects/{name}/reset", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		mu.RLock()
-		machine, ok := machines[name]
-		mu.RUnlock()
-
-		if !ok {
-			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
-			return
-		}
-
-		if err := machine.Transition(ctx, state.EventClearError); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusConflict)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"error_cleared", "project":"%s"}`, name)
-	})
-
-	// Service introspection: composes backup-state-machine status with the
-	// exports engine's view of generated shims. Unknown services return 200
-	// with is_known_to_daemon=false rather than 404. The logic and its tests
-	// live in pkg/introspect.
-	mux.HandleFunc("GET /projects/{name}/introspect", introspect.Handler(machines, exportEngine))
-
-	if cfg.System.AgentSkills.Enabled {
-		for _, method := range cfg.System.AgentSkills.ExposeVia {
-			if method == "mcp" {
-				mux.HandleFunc("POST /mcp", skillAggregator.HandleMCP)
-				slog.Info("MCP Server exposed on POST /mcp")
-				break
-			}
-		}
-	}
+	// The control-port HTTP surface lives in pkg/httpapi so handlers are
+	// unit-testable; main retains only wiring and the daemon control loop.
+	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, *dryRun)
+	mux := api.Mux()
 
 	port := cfg.System.Daemon.ControlPort
 	if port == 0 {
