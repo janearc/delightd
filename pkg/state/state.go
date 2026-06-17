@@ -163,10 +163,17 @@ func (m *Machine) WatchesForChurn() bool {
 func (m *Machine) AdvanceOnChurn(ctx context.Context) error {
 	switch m.GetState() {
 	case StateFallow:
+		// fallow + churn: the project was quiet and just changed. We do not back
+		// up on the first sighting; we move to monitoring so the next churn check
+		// confirms sustained activity before we spend a checkpoint.
 		return m.Transition(ctx, EventChurnDetected)
 	case StateMonitoring:
+		// monitoring + churn: we already saw activity last tick and it is still
+		// changing, so this is the signal to actually trigger the backup.
 		return m.Transition(ctx, EventTriggerBackup)
 	default:
+		// backing_up / error: a checkpoint is already in flight or we are in
+		// backoff. Fresh churn changes nothing until that resolves, so no-op.
 		return nil
 	}
 }
