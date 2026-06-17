@@ -36,3 +36,18 @@ func TestHasBashFragment(t *testing.T) {
 		t.Error("expected a fragment after writing a .sh wrapper")
 	}
 }
+
+func TestHasBashFragment_ReadErrorIsNotAFragment(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("DELIGHT_EXPORTS_STATE", stateDir)
+	e := NewEngine("/work")
+
+	// a regular file where a project directory is expected makes ReadDir fail
+	// with a non-NotExist error; we cannot confirm a fragment, so report false
+	if err := os.WriteFile(filepath.Join(stateDir, "notadir"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if e.HasBashFragment("notadir") {
+		t.Error("a non-directory state path must not be reported as a fragment")
+	}
+}

@@ -234,6 +234,7 @@ func main() {
 		// In a production setup this might run periodically and cache the results.
 		sources := discovery.DiscoverLocalLLMs(r.Context(), cfg)
 		w.Header().Set("Content-Type", "application/json")
+		// response envelope: {"status":"ok","sources":[...discovered llm endpoints...]}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
 			"sources": sources,
