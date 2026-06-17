@@ -16,13 +16,14 @@ import (
 
 	"delightd/config"
 	"delightd/pkg/backup"
+	"delightd/pkg/discovery"
 	"delightd/pkg/exports"
+	"delightd/pkg/introspect"
 	"delightd/pkg/metrics"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
-	"delightd/pkg/watcher"
-	"delightd/pkg/discovery"
 	"delightd/pkg/traefik"
+	"delightd/pkg/watcher"
 )
 
 func main() {
@@ -114,7 +115,7 @@ func main() {
 		slog.Info("starting periodic active control plane (LLM discovery)")
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		
+
 		// Initial sync
 		sources := discovery.DiscoverLocalLLMs(ctx, cfg)
 		if err := traefik.SyncLLMRoutes(sources); err != nil {
@@ -234,7 +235,7 @@ func main() {
 		sources := discovery.DiscoverLocalLLMs(r.Context(), cfg)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "ok",
+			"status":  "ok",
 			"sources": sources,
 		})
 	})
@@ -293,6 +294,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"error_cleared", "project":"%s"}`, name)
 	})
+
+	// Service introspection: composes backup-state-machine status with the
+	// exports engine's view of generated shims. Unknown services return 200
+	// with is_known_to_daemon=false rather than 404. The logic and its tests
+	// live in pkg/introspect.
+	mux.HandleFunc("GET /projects/{name}/introspect", introspect.Handler(machines, exportEngine))
 
 	if cfg.System.AgentSkills.Enabled {
 		for _, method := range cfg.System.AgentSkills.ExposeVia {
