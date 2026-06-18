@@ -6,12 +6,22 @@ RUN apk add --no-cache git
 
 WORKDIR /src
 
+# Codegen toolchain (cached layer): buf + the Go plugin. Protobuf bindings are
+# generated at build from the vendored proto and never committed, so this stage
+# is what produces gen/ inside the image.
+RUN go install github.com/bufbuild/buf/cmd/buf@v1.71.0 \
+ && go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+ENV PATH="/go/bin:${PATH}"
+
 # Cache dependencies to optimize build times across the fleet
 COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
 COPY . .
+
+# Generate the protobuf bindings (gen/ is gitignored) before compiling.
+RUN buf generate
 
 # Build a purely static binary
 # CGO_ENABLED=0 ensures no dynamic linking to C libraries (glibc/musl)

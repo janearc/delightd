@@ -24,22 +24,26 @@ func TestCreateCheckpoint(t *testing.T) {
 	os.WriteFile(filepath.Join(sourceDir, "test.txt"), []byte("hello world"), 0644)
 
 	// Test dry run
-	arcPath, err := CreateCheckpoint(ctx, "test-proj", sourceDir, backupRoot, 5, nil, true)
+	dry, err := CreateCheckpoint(ctx, "test-proj", sourceDir, backupRoot, 5, nil, true)
 	if err != nil {
 		t.Fatalf("dry run error: %v", err)
 	}
-	if _, err := os.Stat(arcPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(dry.ArchivePath); !os.IsNotExist(err) {
 		t.Errorf("archive should not exist after dry run")
 	}
 
 	// Test real run
-	arcPath, err = CreateCheckpoint(ctx, "test-proj", sourceDir, backupRoot, 5, nil, false)
+	res, err := CreateCheckpoint(ctx, "test-proj", sourceDir, backupRoot, 5, nil, false)
 	if err != nil {
 		t.Fatalf("real run error: %v", err)
 	}
+	arcPath := res.ArchivePath
 
 	if _, err := os.Stat(arcPath); os.IsNotExist(err) {
 		t.Errorf("archive should exist after real run")
+	}
+	if res.BytesBefore == 0 || res.BytesAfter == 0 {
+		t.Errorf("expected non-zero byte metrics, got before=%d after=%d", res.BytesBefore, res.BytesAfter)
 	}
 
 	// Verify tar contents
@@ -127,10 +131,11 @@ func TestCreateCheckpoint_Excludes(t *testing.T) {
 	os.WriteFile(filepath.Join(sourceDir, "app.py"), []byte("code"), 0644)
 	os.WriteFile(filepath.Join(sourceDir, "models", "huge.safetensors"), []byte("weights"), 0644)
 
-	arcPath, err := CreateCheckpoint(ctx, "comfy", sourceDir, backupRoot, 5, []string{"models"}, false)
+	res, err := CreateCheckpoint(ctx, "comfy", sourceDir, backupRoot, 5, []string{"models"}, false)
 	if err != nil {
 		t.Fatalf("checkpoint error: %v", err)
 	}
+	arcPath := res.ArchivePath
 
 	names := tarEntryNames(t, arcPath)
 	if !contains(names, "app.py") {
@@ -156,10 +161,11 @@ func TestCreateCheckpoint_ExcludesNested(t *testing.T) {
 	os.WriteFile(filepath.Join(sourceDir, "src", "ComfyUI", "main.py"), []byte("code"), 0644)
 	os.WriteFile(filepath.Join(sourceDir, "src", "ComfyUI", "models", "unet", "huge.safetensors"), []byte("weights"), 0644)
 
-	arcPath, err := CreateCheckpoint(ctx, "comfy", sourceDir, backupRoot, 5, []string{"models"}, false)
+	res, err := CreateCheckpoint(ctx, "comfy", sourceDir, backupRoot, 5, []string{"models"}, false)
 	if err != nil {
 		t.Fatalf("checkpoint error: %v", err)
 	}
+	arcPath := res.ArchivePath
 
 	names := tarEntryNames(t, arcPath)
 	if !contains(names, "src/ComfyUI/main.py") {

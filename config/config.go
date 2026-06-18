@@ -30,6 +30,16 @@ type SystemConfig struct {
 	AgentSkills  AgentSkillsConfig  `mapstructure:"agent_skills"`
 	Daemon       DaemonConfig       `mapstructure:"daemon"`
 	LLMDiscovery LLMDiscoveryConfig `mapstructure:"llm_discovery"`
+	Kafka        KafkaConfig        `mapstructure:"kafka"`
+}
+
+// KafkaConfig configures the event-emission path. When Brokers is empty, event
+// publishing is disabled and the daemon runs exactly as before -- backups never
+// depend on Kafka being present.
+type KafkaConfig struct {
+	Brokers           []string `mapstructure:"brokers"`
+	SchemaRegistryURL string   `mapstructure:"schema_registry_url"`
+	Topic             string   `mapstructure:"topic"`
 }
 
 type AgentSkillsConfig struct {
