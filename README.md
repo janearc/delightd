@@ -59,6 +59,32 @@ The daemon provides idempotent cleanup. Unlinked exports are archived to `~/var/
 
 An unknown service returns `200` with `is_known_to_daemon: false`, not `404`: a query for a service the daemon has never heard of is a valid answer worth tracking as a signal, not an error.
 
+## Git State
+
+`GET /git` returns live git state for every managed project; `GET /projects/{name}/git` returns it for one:
+
+```json
+{
+  "name": "paling",
+  "branch": "main",
+  "dirty": false,
+  "unpushed": 0,
+  "has_upstream": true,
+  "remote_url": "git@github.com:janearc/paling.git"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `branch` | The currently checked-out branch (empty in a detached HEAD). |
+| `dirty` | The working tree has uncommitted changes (tracked or untracked). |
+| `unpushed` | Commits reachable from `HEAD` that are not on `origin/<branch>`. |
+| `has_upstream` | An `origin/<branch>` tracking ref exists. When `false`, the branch has never been pushed and every local commit counts as `unpushed`. |
+| `remote_url` | The `origin` remote URL, if configured. |
+| `error` | Present only when the repo could not be read (e.g. not a git checkout); other fields hold zero values. A failure on one repo never aborts the `/git` sweep. |
+
+State is computed **live, per request** with `go-git` — not served from a cache. This is deliberate: `fleet-svc` gates destructive host-migration on the dirty/unpushed answer, so a stale "clean" reading could greenlight a teardown over uncommitted work. Field names are aligned with the forthcoming `delight.v1.RepoGitState` contract so the surface graduates to Protobuf over Kafka with the daemon's other events.
+
 ## Execution
 
 ```bash
