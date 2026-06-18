@@ -194,7 +194,7 @@ func main() {
 					if machine.GetState() == state.StateBackingUp {
 						slog.Info("executing backup pipeline", "project", p.Name)
 
-						archivePath, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, *dryRun)
+						archivePath, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
 						if err != nil {
 							metrics.Inc(fmt.Sprintf(`delightd_backup_failures_total{project="%s"}`, p.Name))
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
