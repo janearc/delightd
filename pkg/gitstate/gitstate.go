@@ -1,15 +1,24 @@
-// Package gitstate answers live git-state queries for managed projects. It opens
-// each project's working tree on demand with go-git and reports branch, dirty,
-// and unpushed status.
+// Package gitstate computes the live git state of a project's working tree.
 //
-// Computing live (rather than reading a cached batch report) is deliberate:
-// fleet-svc gates destructive host-migration on this answer, so a stale "clean"
-// reading could greenlight a teardown over uncommitted work. The cost of opening
-// a handful of small working trees per request is negligible next to that risk.
+// In delightd's taxonomy (see delightd_architecture.md §6) a *project* is the
+// atomic managed unit, and GitState is an *observed attribute* of that project's
+// working tree -- delightd reports it, it does not own the tree. The wire shape
+// reflects that: callers receive a ProjectGit, a project paired with its git
+// element, not a free-standing "repo" record.
 //
-// JSON field names are snake_case and aligned with the forthcoming
-// delight.v1.RepoGitState contract, so this surface graduates cleanly to
-// Protobuf over Kafka alongside the rest of delightd's events.
+// State is computed live, per request: fleet-svc gates destructive
+// host-migration on it, so a stale "clean" reading could greenlight a teardown
+// over uncommitted work. The cost of opening a handful of small working trees is
+// negligible next to that risk.
+//
+// This package never logs. Per-project failures are returned in-band via
+// GitState.Error; the caller (the httpapi handler) is responsible for emitting
+// them. Keeping the computation pure is intentional, and the logging contract
+// lives with whoever serves the result.
+//
+// Field names are snake_case and aligned with the forthcoming
+// delight.v1.GitState contract, so the surface graduates to Protobuf over Kafka
+// with the daemon's other events.
 package gitstate
 
 import (
@@ -27,36 +36,42 @@ import (
 	"delightd/config"
 )
 
-// RepoGitState is delightd's live view of one project's working tree. A value is
-// always Name-populated; on a read failure Error is set and the other fields hold
-// zero values, so a caller can render a row without special-casing nil.
-type RepoGitState struct {
-	Name        string `json:"name"`
+// GitState is the observed git state of a project's working tree. On a read
+// failure Error is set and the other fields hold zero values, so a caller can
+// render the project without special-casing nil.
+type GitState struct {
 	Branch      string `json:"branch"`
 	Dirty       bool   `json:"dirty"`
 	Unpushed    int    `json:"unpushed"`
 	HasUpstream bool   `json:"has_upstream"`
 	RemoteURL   string `json:"remote_url"`
-	// Error carries a per-repo failure (not a git repo, unreadable HEAD, ...)
-	// without failing the whole sweep. Empty when the read succeeded.
+	// Error carries a per-project failure (not a git checkout, unreadable HEAD,
+	// ...) without failing the whole sweep. Empty when the read succeeded.
 	Error string `json:"error,omitempty"`
 }
 
-// CollectAll returns the live git state for every configured project, sorted by
-// name for stable output. A failure on one repo is reported in that repo's Error
-// field; it never aborts the sweep.
-func CollectAll(projects []config.ProjectConfig) []RepoGitState {
-	out := make([]RepoGitState, 0, len(projects))
+// ProjectGit is a project paired with its observed git state -- the unit the
+// /git surface returns. Git is an element of the project, per the taxonomy.
+type ProjectGit struct {
+	Name string   `json:"name"`
+	Git  GitState `json:"git"`
+}
+
+// CollectAll returns the git state for every configured project, sorted by name
+// for stable output. A failure on one project is reported in that project's
+// Git.Error; it never aborts the sweep.
+func CollectAll(projects []config.ProjectConfig) []ProjectGit {
+	out := make([]ProjectGit, 0, len(projects))
 	for _, p := range projects {
-		out = append(out, Collect(p.Name, p.Path))
+		out = append(out, ProjectGit{Name: p.Name, Git: Collect(p.Path)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
 // Collect opens the working tree at path and computes its git state.
-func Collect(name, path string) RepoGitState {
-	st := RepoGitState{Name: name}
+func Collect(path string) GitState {
+	var st GitState
 
 	repo, err := git.PlainOpen(expandHome(path))
 	if err != nil {
@@ -76,7 +91,7 @@ func Collect(name, path string) RepoGitState {
 	}
 
 	// Resolve the tracking remote rather than assuming "origin": the fleet's
-	// repos are inconsistent (some name the remote "github"), so a hardcoded
+	// projects are inconsistent (some name the remote "github"), so a hardcoded
 	// "origin" would silently report everything as never-pushed.
 	remoteName, remoteURL, hasRemote := resolveRemote(repo, st.Branch)
 	st.RemoteURL = remoteURL

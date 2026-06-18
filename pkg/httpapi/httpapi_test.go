@@ -171,20 +171,22 @@ func TestHandleGitAll(t *testing.T) {
 		t.Fatalf("code = %d, want 200", rr.Code)
 	}
 	var resp struct {
-		Status string `json:"status"`
-		Repos  []struct {
-			Name  string `json:"name"`
-			Error string `json:"error"`
-		} `json:"repos"`
+		Status   string `json:"status"`
+		Projects []struct {
+			Name string `json:"name"`
+			Git  struct {
+				Error string `json:"error"`
+			} `json:"git"`
+		} `json:"projects"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Status != "ok" || len(resp.Repos) != 1 || resp.Repos[0].Name != "p" {
+	if resp.Status != "ok" || len(resp.Projects) != 1 || resp.Projects[0].Name != "p" {
 		t.Errorf("unexpected body: %s", rr.Body.String())
 	}
-	if resp.Repos[0].Error == "" {
-		t.Errorf("non-git dir should surface a per-repo error")
+	if resp.Projects[0].Git.Error == "" {
+		t.Errorf("non-git dir should surface a per-project error")
 	}
 }
 

@@ -74,7 +74,7 @@ func setUpstream(t *testing.T, repo *git.Repository, hash plumbing.Hash) {
 
 func TestCollect_CleanNoUpstream(t *testing.T) {
 	_, dir := newRepo(t)
-	st := Collect("clean", dir)
+	st := Collect(dir)
 
 	if st.Error != "" {
 		t.Fatalf("unexpected error: %s", st.Error)
@@ -100,7 +100,7 @@ func TestCollect_Dirty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "scratch.txt"), []byte("wip"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := Collect("dirty", dir)
+	st := Collect(dir)
 	if st.Error != "" {
 		t.Fatalf("unexpected error: %s", st.Error)
 	}
@@ -114,7 +114,7 @@ func TestCollect_UpstreamUpToDate(t *testing.T) {
 	head, _ := repo.Head()
 	setUpstream(t, repo, head.Hash())
 
-	st := Collect("synced", dir)
+	st := Collect(dir)
 	if !st.HasUpstream {
 		t.Errorf("has_upstream = false, want true")
 	}
@@ -131,7 +131,7 @@ func TestCollect_UpstreamBehind(t *testing.T) {
 	commitFile(t, repo, dir, "a.txt", "a")
 	commitFile(t, repo, dir, "b.txt", "b")
 
-	st := Collect("ahead", dir)
+	st := Collect(dir)
 	if !st.HasUpstream {
 		t.Errorf("has_upstream = false, want true")
 	}
@@ -149,7 +149,7 @@ func TestCollect_RemoteURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create remote: %v", err)
 	}
-	st := Collect("withremote", dir)
+	st := Collect(dir)
 	if st.RemoteURL != "git@github.com:janearc/example.git" {
 		t.Errorf("remote_url = %q, want the origin url", st.RemoteURL)
 	}
@@ -172,7 +172,7 @@ func TestCollect_NonOriginRemote(t *testing.T) {
 		t.Fatalf("set tracking ref: %v", err)
 	}
 
-	st := Collect("github-remote", dir)
+	st := Collect(dir)
 	if st.RemoteURL != "git@github.com:janearc/delightd.git" {
 		t.Errorf("remote_url = %q, want the github-named remote's url", st.RemoteURL)
 	}
@@ -186,12 +186,9 @@ func TestCollect_NonOriginRemote(t *testing.T) {
 
 func TestCollect_NotAGitRepo(t *testing.T) {
 	dir := t.TempDir()
-	st := Collect("bare", dir)
+	st := Collect(dir)
 	if st.Error == "" {
 		t.Errorf("expected an error for a non-git directory")
-	}
-	if st.Name != "bare" {
-		t.Errorf("name = %q, want it populated even on error", st.Name)
 	}
 }
 
@@ -199,23 +196,23 @@ func TestCollectAll_SortedAndIsolated(t *testing.T) {
 	_, dirA := newRepo(t)
 	dirMissing := filepath.Join(t.TempDir(), "does-not-exist")
 
-	repos := CollectAll([]config.ProjectConfig{
+	projects := CollectAll([]config.ProjectConfig{
 		{Name: "zeta", Path: dirA},
 		{Name: "alpha", Path: dirMissing},
 	})
 
-	if len(repos) != 2 {
-		t.Fatalf("got %d repos, want 2", len(repos))
+	if len(projects) != 2 {
+		t.Fatalf("got %d projects, want 2", len(projects))
 	}
 	// Sorted by name: alpha before zeta.
-	if repos[0].Name != "alpha" || repos[1].Name != "zeta" {
-		t.Errorf("not sorted by name: %q, %q", repos[0].Name, repos[1].Name)
+	if projects[0].Name != "alpha" || projects[1].Name != "zeta" {
+		t.Errorf("not sorted by name: %q, %q", projects[0].Name, projects[1].Name)
 	}
-	// The missing repo errored but did not abort the sweep over zeta.
-	if repos[0].Error == "" {
-		t.Errorf("missing repo should carry an error")
+	// The missing project errored but did not abort the sweep over zeta.
+	if projects[0].Git.Error == "" {
+		t.Errorf("missing project should carry an error")
 	}
-	if repos[1].Error != "" {
-		t.Errorf("healthy repo should not error: %s", repos[1].Error)
+	if projects[1].Git.Error != "" {
+		t.Errorf("healthy project should not error: %s", projects[1].Git.Error)
 	}
 }
