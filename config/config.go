@@ -44,6 +44,10 @@ type BackupRotationConfig struct {
 type BackupConfig struct {
 	CheckInterval string               `mapstructure:"check_interval"`
 	Rotation      BackupRotationConfig `mapstructure:"rotation"`
+	// Exclude lists project-relative paths kept out of the checkpoint, on top of
+	// the built-in skips. This is how large, regenerable trees (e.g. model
+	// weights) are excluded from a project's backups.
+	Exclude []string `mapstructure:"exclude"`
 }
 
 type ProjectConfig struct {
