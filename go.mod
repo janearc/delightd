@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/spf13/viper v1.21.0
+	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
