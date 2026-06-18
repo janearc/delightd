@@ -12,6 +12,7 @@ import (
 
 	"delightd/config"
 	"delightd/pkg/discovery"
+	"delightd/pkg/gitstate"
 	"delightd/pkg/introspect"
 	"delightd/pkg/metrics"
 	"delightd/pkg/skills"
@@ -64,6 +65,14 @@ type projectActionResponse struct {
 	Project string `json:"project"`
 }
 
+// gitStateResponse is the GET /git body: every managed project with its git
+// state as an element. fleet-svc consumes this to gate destructive
+// host-migration, so it is computed per-request rather than served from a cache.
+type gitStateResponse struct {
+	Status   string                `json:"status"`
+	Projects []gitstate.ProjectGit `json:"projects"`
+}
+
 // errorResponse is the body for any non-2xx control-port reply.
 type errorResponse struct {
 	Error string `json:"error"`
@@ -79,6 +88,9 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /projects/{name}/state", s.handleProjectState) // backup state-machine diagnostics
 	mux.HandleFunc("POST /projects/{name}/backup", s.handleBackup)     // manually trigger a checkpoint
 	mux.HandleFunc("POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
+
+	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
+	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 
 	// Service introspection composes backup-state-machine status with the
 	// exports engine's view of generated shims. Unknown services return 200
@@ -115,6 +127,36 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		Status:  "ok",
 		Sources: s.discover(r.Context(), s.cfg),
 	})
+}
+
+func (s *Server) handleGitAll(w http.ResponseWriter, r *http.Request) {
+	projects := gitstate.CollectAll(s.cfg.Projects)
+	logGitErrors(projects)
+	writeJSON(w, http.StatusOK, gitStateResponse{Status: "ok", Projects: projects})
+}
+
+func (s *Server) handleProjectGit(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	for _, p := range s.cfg.Projects {
+		if p.Name == name {
+			pg := gitstate.ProjectGit{Name: p.Name, Git: gitstate.Collect(p.Path)}
+			logGitErrors([]gitstate.ProjectGit{pg})
+			writeJSON(w, http.StatusOK, pg)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found"})
+}
+
+// logGitErrors emits a warning for each project whose git state could not be
+// read. pkg/gitstate returns failures in-band and never logs; surfacing them
+// here is the other half of that contract.
+func logGitErrors(projects []gitstate.ProjectGit) {
+	for _, p := range projects {
+		if p.Git.Error != "" {
+			slog.Warn("git state read failed", "project", p.Name, "error", p.Git.Error)
+		}
+	}
 }
 
 func (s *Server) handleProjectState(w http.ResponseWriter, r *http.Request) {

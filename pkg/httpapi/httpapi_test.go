@@ -158,6 +158,61 @@ func TestHandleReset(t *testing.T) {
 	}
 }
 
+func TestHandleGitAll(t *testing.T) {
+	// A non-git temp dir exercises wiring + JSON shape without a fixture repo:
+	// the per-repo read fails into Error, but the sweep still returns 200. Deep
+	// git semantics are covered in pkg/gitstate.
+	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "p", Path: t.TempDir()}}}
+	s := New(cfg, nil, fakeFragments{}, nil, false)
+
+	rr := httptest.NewRecorder()
+	s.handleGitAll(rr, httptest.NewRequest(http.MethodGet, "/git", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rr.Code)
+	}
+	var resp struct {
+		Status   string `json:"status"`
+		Projects []struct {
+			Name string `json:"name"`
+			Git  struct {
+				Error string `json:"error"`
+			} `json:"git"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Projects) != 1 || resp.Projects[0].Name != "p" {
+		t.Errorf("unexpected body: %s", rr.Body.String())
+	}
+	if resp.Projects[0].Git.Error == "" {
+		t.Errorf("non-git dir should surface a per-project error")
+	}
+}
+
+func TestHandleProjectGit(t *testing.T) {
+	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "known", Path: t.TempDir()}}}
+	s := New(cfg, nil, fakeFragments{}, nil, false)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/projects/known/git", nil)
+	req.SetPathValue("name", "known")
+	s.handleProjectGit(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("known: code = %d, want 200", rr.Code)
+	}
+
+	// A project the daemon doesn't manage is a 404 -- unlike introspect, git
+	// state is only meaningful for a configured project path.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/projects/ghost/git", nil)
+	req.SetPathValue("name", "ghost")
+	s.handleProjectGit(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("unknown: code = %d, want 404", rr.Code)
+	}
+}
+
 func TestMux_RoutingAndMCPGating(t *testing.T) {
 	machines := map[string]*state.Machine{"p": state.NewMachine("p")}
 	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false)
