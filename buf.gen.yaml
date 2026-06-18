@@ -1,0 +1,13 @@
+version: v2
+# Managed mode retargets the Go package to delightd's own module, so the vendored
+# kafka-svc proto generates into delightd/gen/go/... without a cross-repo import
+# and without committing gencode (gen/ is gitignored; run `task generate`).
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: delightd/gen/go
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package delight.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/janearc/kafka-svc/gen/go/delight/v1;delightv1";
+
+// BackupEvent is emitted by delightd after each checkpoint attempt.
+// Subject (RecordNameStrategy): delight.v1.BackupEvent.
+message BackupEvent {
+  string project_name = 1;
+  bool success = 2;
+  uint64 bytes_before = 3;
+  uint64 bytes_after = 4;
+  uint32 duration_milliseconds = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// ServiceBackupStatus is delightd's introspection view of a single service.
+message ServiceBackupStatus {
+  string service_name = 1;
+  bool is_known_to_daemon = 2;
+  bool is_actively_backing_up = 3;
+  bool has_bash_fragment = 4;
+}
