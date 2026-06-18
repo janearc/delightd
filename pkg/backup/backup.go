@@ -14,15 +14,25 @@ import (
 	"time"
 )
 
+// CheckpointResult reports what a checkpoint produced: where it landed plus the
+// size/time metrics that populate a delight.v1.BackupEvent.
+type CheckpointResult struct {
+	ArchivePath string
+	BytesBefore uint64        // total size of the files included (pre-compression)
+	BytesAfter  uint64        // size of the written .tgz
+	Duration    time.Duration // wall-clock generation time
+}
+
 // CreateCheckpoint traverses the project directory and writes a compressed
 // tarball checkpoint. exclude lists project-relative paths to skip on top of the
 // built-in skips (VCS dirs, build artifacts). dryRun walks the manifest without
 // writing the tar.
-func CreateCheckpoint(ctx context.Context, projectName, projectPath, backupRoot string, maxArchives int, exclude []string, dryRun bool) (string, error) {
+func CreateCheckpoint(ctx context.Context, projectName, projectPath, backupRoot string, maxArchives int, exclude []string, dryRun bool) (CheckpointResult, error) {
+	start := time.Now()
 	archiveDir := filepath.Join(backupRoot, projectName)
 	if !dryRun {
 		if err := os.MkdirAll(archiveDir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create backup root: %w", err)
+			return CheckpointResult{}, fmt.Errorf("failed to create backup root: %w", err)
 		}
 	}
 
@@ -32,29 +42,44 @@ func CreateCheckpoint(ctx context.Context, projectName, projectPath, backupRoot 
 	if dryRun {
 		slog.Info("DRY RUN: evaluating manifest generation", "project", projectName, "target_archive", archivePath)
 		fileCount := 0
+		var bytesBefore uint64
 		err := walkCheckpoint(projectPath, exclude, func(relPath string, d os.DirEntry) error {
 			if !d.IsDir() {
 				fileCount++
+				if info, err := d.Info(); err == nil {
+					bytesBefore += uint64(info.Size())
+				}
 			}
 			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("DRY RUN: manifest generation failed: %w", err)
+			return CheckpointResult{}, fmt.Errorf("DRY RUN: manifest generation failed: %w", err)
 		}
 		slog.Info("DRY RUN: success", "project", projectName, "simulated_files_backed_up", fileCount)
-		return archivePath, nil
+		return CheckpointResult{ArchivePath: archivePath, BytesBefore: bytesBefore, Duration: time.Since(start)}, nil
 	}
 
 	slog.Info("starting native checkpoint generation", "project", projectName, "archive", archivePath)
 
-	if err := createTarGz(projectPath, archivePath, exclude); err != nil {
+	bytesBefore, err := createTarGz(projectPath, archivePath, exclude)
+	if err != nil {
 		os.Remove(archivePath)
-		return "", fmt.Errorf("failed to generate tarball: %w", err)
+		return CheckpointResult{}, fmt.Errorf("failed to generate tarball: %w", err)
 	}
 
 	enforceRotation(archiveDir, maxArchives)
 
-	return archivePath, nil
+	var bytesAfter uint64
+	if info, err := os.Stat(archivePath); err == nil {
+		bytesAfter = uint64(info.Size())
+	}
+
+	return CheckpointResult{
+		ArchivePath: archivePath,
+		BytesBefore: bytesBefore,
+		BytesAfter:  bytesAfter,
+		Duration:    time.Since(start),
+	}, nil
 }
 
 // walkCheckpoint walks sourceDir and invokes fn for every entry that survives the
@@ -85,10 +110,12 @@ func walkCheckpoint(sourceDir string, exclude []string, fn func(relPath string, 
 	})
 }
 
-func createTarGz(sourceDir, destFile string, exclude []string) error {
+// createTarGz writes the gzipped tar and returns the total size of the regular
+// files included (pre-compression), which feeds BackupEvent.bytes_before.
+func createTarGz(sourceDir, destFile string, exclude []string) (uint64, error) {
 	file, err := os.Create(destFile)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer file.Close()
 
@@ -98,7 +125,8 @@ func createTarGz(sourceDir, destFile string, exclude []string) error {
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
-	return walkCheckpoint(sourceDir, exclude, func(relPath string, d os.DirEntry) error {
+	var bytesBefore uint64
+	err = walkCheckpoint(sourceDir, exclude, func(relPath string, d os.DirEntry) error {
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -114,6 +142,7 @@ func createTarGz(sourceDir, destFile string, exclude []string) error {
 		if d.IsDir() || !info.Mode().IsRegular() {
 			return nil
 		}
+		bytesBefore += uint64(info.Size())
 		f, err := os.Open(filepath.Join(sourceDir, relPath))
 		if err != nil {
 			return err
@@ -122,6 +151,7 @@ func createTarGz(sourceDir, destFile string, exclude []string) error {
 		_, err = io.Copy(tw, f)
 		return err
 	})
+	return bytesBefore, err
 }
 
 // isSkippedDir and isSkippedFile are the built-in skips applied to every project.

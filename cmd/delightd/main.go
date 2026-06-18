@@ -12,9 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"delightd/config"
+	delightv1 "delightd/gen/go/delight/v1"
+	delightproto "delightd/proto"
 	"delightd/pkg/backup"
 	"delightd/pkg/discovery"
+	"delightd/pkg/events"
 	"delightd/pkg/exports"
 	"delightd/pkg/httpapi"
 	"delightd/pkg/metrics"
@@ -23,6 +28,26 @@ import (
 	"delightd/pkg/traefik"
 	"delightd/pkg/watcher"
 )
+
+// publishBackupEvent emits a delight.v1.BackupEvent. It is best-effort: a nil
+// publisher (disabled or unreachable Kafka) is a no-op, and any error is logged,
+// never propagated -- event emission must not affect the backup it describes.
+func publishBackupEvent(ctx context.Context, pub *events.Publisher, project string, success bool, res backup.CheckpointResult) {
+	if pub == nil {
+		return
+	}
+	ev := &delightv1.BackupEvent{
+		ProjectName:          project,
+		Success:              success,
+		BytesBefore:          res.BytesBefore,
+		BytesAfter:           res.BytesAfter,
+		DurationMilliseconds: uint32(res.Duration.Milliseconds()),
+		Timestamp:            timestamppb.Now(),
+	}
+	if err := pub.PublishBackup(ctx, ev); err != nil {
+		slog.Warn("failed to publish backup event", "project", project, "error", err)
+	}
+}
 
 func main() {
 	dryRun := flag.Bool("dry-run", false, "execute without writing checkpoints to disk")
@@ -134,6 +159,20 @@ func main() {
 		}
 	}()
 
+	// Event emission is best-effort: a Kafka/SR outage must never block backups,
+	// so a failed init (or no brokers configured) leaves a nil, no-op publisher.
+	var publisher *events.Publisher
+	if len(cfg.System.Kafka.Brokers) > 0 {
+		p, err := events.New(ctx, cfg.System.Kafka.Brokers, cfg.System.Kafka.SchemaRegistryURL, cfg.System.Kafka.Topic, delightproto.BackupEventSchema)
+		if err != nil {
+			slog.Warn("event publishing disabled: could not init kafka publisher", "error", err)
+		} else {
+			publisher = p
+			defer publisher.Close()
+			slog.Info("kafka event publisher ready", "brokers", cfg.System.Kafka.Brokers, "topic", cfg.System.Kafka.Topic)
+		}
+	}
+
 	for _, proj := range cfg.Projects {
 		go func(p config.ProjectConfig) {
 			if *immediate {
@@ -194,14 +233,16 @@ func main() {
 					if machine.GetState() == state.StateBackingUp {
 						slog.Info("executing backup pipeline", "project", p.Name)
 
-						archivePath, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
+						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
 						if err != nil {
 							metrics.Inc(fmt.Sprintf(`delightd_backup_failures_total{project="%s"}`, p.Name))
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
+							publishBackupEvent(ctx, publisher, p.Name, false, backup.CheckpointResult{})
 							machine.Transition(ctx, state.EventBackupFail)
 						} else {
 							metrics.Inc(fmt.Sprintf(`delightd_backup_success_total{project="%s"}`, p.Name))
-							slog.Info("backup pipeline succeeded", "project", p.Name, "archive", archivePath)
+							slog.Info("backup pipeline succeeded", "project", p.Name, "archive", res.ArchivePath)
+							publishBackupEvent(ctx, publisher, p.Name, true, res)
 							machine.Transition(ctx, state.EventBackupSuccess)
 						}
 					}
