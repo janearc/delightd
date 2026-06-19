@@ -17,7 +17,18 @@ services:
     ports:
       - "127.0.0.1:8088:8088"
     environment:
-      - DELIGHT_SYSTEM_ROOT=/work/backups
+      # The four roots, mapped onto this container's mounts (see volumes above):
+      #   MONITOR_ROOT /work  -- the read-only ~/work bind: the git-state source.
+      #   DAEMON_ROOT  /var   -- the ~/var:/var write mount: delightd's state tree.
+      #   BACKUPS_ROOT /var/backups -- backup destination on the /var write mount;
+      #     daemon writes archives here directly (no appended "/backups"). Set
+      #     explicitly rather than relying on the ${DAEMON_ROOT}/backups default so
+      #     it is visible in the deployment. Resolves to ~/var/backups on the host.
+      #   CONFIG_ROOT  /etc/delightd -- the read-only ~/etc/delightd config mount.
+      - DELIGHT_MONITOR_ROOT=/work
+      - DELIGHT_DAEMON_ROOT=/var
+      - DELIGHT_BACKUPS_ROOT=/var/backups
+      - DELIGHT_CONFIG_ROOT=/etc/delightd
       - DELIGHT_EXPORTS_REGISTRY=/etc/delightd/delight-registry.yaml
       - DELIGHT_EXPORTS_BIN=/var/bin
       - DELIGHT_EXPORTS_STATE=/var/runtime/delightd/exports

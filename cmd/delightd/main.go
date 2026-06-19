@@ -16,7 +16,6 @@ import (
 
 	"delightd/config"
 	delightv1 "delightd/gen/go/delight/v1"
-	delightproto "delightd/proto"
 	"delightd/pkg/backup"
 	"delightd/pkg/discovery"
 	"delightd/pkg/events"
@@ -27,6 +26,7 @@ import (
 	"delightd/pkg/state"
 	"delightd/pkg/traefik"
 	"delightd/pkg/watcher"
+	delightproto "delightd/proto"
 )
 
 // publishBackupEvent emits a delight.v1.BackupEvent. It is best-effort: a nil
@@ -79,8 +79,12 @@ func main() {
 
 	slog.Info("configuration loaded successfully", "projects_count", len(cfg.Projects))
 
-	workDir := os.ExpandEnv("$HOME/work")
-	exportEngine := exports.NewEngine(workDir)
+	// MonitorRoot is the tree delightd watches (the parent of the managed
+	// projects). The export engine and skill aggregator scan it. It is
+	// configurable via system.monitor_root / DELIGHT_MONITOR_ROOT and defaults
+	// to ~/work; config.Load has already applied the default and expanded ~.
+	monitorRoot := cfg.System.MonitorRoot
+	exportEngine := exports.NewEngine(monitorRoot)
 	var knownProjects []string
 	for _, proj := range cfg.Projects {
 		knownProjects = append(knownProjects, proj.Name)
@@ -90,7 +94,7 @@ func main() {
 		slog.Error("initial export sync failed", "error", err)
 	}
 
-	skillAggregator := skills.NewAggregator(workDir)
+	skillAggregator := skills.NewAggregator(monitorRoot)
 
 	syncSkills := func() {
 		if !cfg.System.AgentSkills.Enabled {
@@ -233,7 +237,13 @@ func main() {
 					if machine.GetState() == state.StateBackingUp {
 						slog.Info("executing backup pipeline", "project", p.Name)
 
-						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
+						// BackupsRoot is the backup destination directory itself
+						// (delight.yaml default ~/var/backups, derived as
+						// ${DaemonRoot}/backups; DELIGHT_BACKUPS_ROOT=/var/backups in
+						// compose+kube, both resolving to ~/var/backups on the host).
+						// CreateCheckpoint writes archives here directly -- no "/backups"
+						// is appended, which previously doubled the segment.
+						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.BackupsRoot, p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
 						if err != nil {
 							metrics.Inc(fmt.Sprintf(`delightd_backup_failures_total{project="%s"}`, p.Name))
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
@@ -261,10 +271,10 @@ func main() {
 	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, *dryRun)
 	mux := api.Mux()
 
-	port := cfg.System.Daemon.ControlPort
-	if port == 0 {
-		port = 8080
-	}
+	// Resolve to the canonical control port (config.DefaultControlPort = 8088) when
+	// the config leaves it unset, so the listener always lands where compose, kube,
+	// and every client route.
+	port := cfg.System.Daemon.ResolveControlPort()
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

@@ -45,13 +45,23 @@ spec:
             - name: control
               containerPort: 8088
           env:
-            # Export engine paths, mirrored from docker-compose.yml. SYSTEM_ROOT
-            # points at /var (write mount), NOT /work — see handoff divergence
-            # note: the compose set DELIGHT_SYSTEM_ROOT=/work/backups, which
-            # needs /work writable; the migration contract makes /work read-only
-            # (git-state source) and routes backups to the /var write mount.
-            - name: DELIGHT_SYSTEM_ROOT
+            # The four roots, mapped onto this pod's mounts (see volumeMounts).
+            # Mirrors docker-compose.yml.
+            #   MONITOR_ROOT /work -- read-only /work mount, the git-state source.
+            #   DAEMON_ROOT  /var  -- the /var write mount, delightd's state tree.
+            #   BACKUPS_ROOT /var/backups -- backup destination on the /var write
+            #     mount; the daemon writes archives here directly (no appended
+            #     "/backups"). Set explicitly, not left to the ${DAEMON_ROOT}/backups
+            #     default. Resolves to ~/var/backups on the host, same as compose.
+            #   CONFIG_ROOT  /etc/delightd -- the read-only config mount.
+            - name: DELIGHT_MONITOR_ROOT
+              value: "/work"
+            - name: DELIGHT_DAEMON_ROOT
+              value: "/var"
+            - name: DELIGHT_BACKUPS_ROOT
               value: "/var/backups"
+            - name: DELIGHT_CONFIG_ROOT
+              value: "/etc/delightd"
             - name: DELIGHT_EXPORTS_REGISTRY
               value: "/etc/delightd/delight-registry.yaml"
             - name: DELIGHT_EXPORTS_BIN

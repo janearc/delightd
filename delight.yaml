@@ -1,8 +1,28 @@
 system:
-  root: "~/var"
+  # The four roots delightd operates over. They are distinct on purpose: the tree
+  # delightd watches is not where it keeps its own state, and the backups
+  # directory is one directory under that state tree, not the state tree itself.
+  # Each is independently overridable by env (the DELIGHT_* name below) for
+  # deployments that relocate the layout -- the in-container paths come from the
+  # compose/kube env, not these host defaults. A leading ~ expands to $HOME.
+  #
+  #   monitor_root  DELIGHT_MONITOR_ROOT  default ~/work
+  #     The tree delightd monitors: the parent of the managed projects' git
+  #     working trees. Read-only in the container deployments (git-state source).
+  #   daemon_root   DELIGHT_DAEMON_ROOT   default ~/var
+  #     delightd's own runtime/state tree (pid file, exports, the backups dir).
+  #   backups_root  DELIGHT_BACKUPS_ROOT  default ${daemon_root}/backups
+  #     The directory backup archives are written INTO -- the literal destination,
+  #     one archive subtree per project. No "/backups" is appended to it. Left
+  #     unset it derives from daemon_root; set it to relocate backups elsewhere.
+  #   config_root   DELIGHT_CONFIG_ROOT   default ~/etc
+  #     Where delightd resolves its configuration and registry.
+  monitor_root: "~/work"
+  daemon_root: "~/var"
+  # backups_root left unset -> derives to ~/var/backups (${daemon_root}/backups).
   config_root: "~/etc"
   daemon:
-    control_port: 8080
+    control_port: 8088
     pid_file: "~/var/run/delightd.pid"
 
 projects:
