@@ -216,3 +216,18 @@ func TestCollectAll_SortedAndIsolated(t *testing.T) {
 		t.Errorf("healthy project should not error: %s", projects[1].Git.Error)
 	}
 }
+
+func TestCollectWithTimeout(t *testing.T) {
+	_, dir := newRepo(t)
+
+	// a generous deadline returns the real state.
+	if st := collectWithTimeout(dir, 5*time.Second); st.Error != "" {
+		t.Errorf("healthy repo should not error: %s", st.Error)
+	}
+	// an impossibly short deadline trips the timeout branch (a real read always
+	// takes longer than a nanosecond), proving one slow project can't block the
+	// whole sweep.
+	if st := collectWithTimeout(dir, time.Nanosecond); st.Error == "" {
+		t.Errorf("expected a timeout error with a 1ns deadline")
+	}
+}
