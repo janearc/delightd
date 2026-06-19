@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	gogitconfig "github.com/go-git/go-git/v5/config"
@@ -57,16 +59,53 @@ type ProjectGit struct {
 	Git  GitState `json:"git"`
 }
 
+// perProjectTimeout caps how long a single project's git read may take before
+// the sweep gives up on it. A healthy working tree is well under a second; a
+// pathological one (huge tree, lock contention) is capped here so it cannot
+// starve the whole /git answer.
+const perProjectTimeout = 5 * time.Second
+
+// maxConcurrentCollect bounds the fan-out so a large roster does not spawn
+// unbounded goroutines or hammer the disk with parallel walks.
+const maxConcurrentCollect = 8
+
 // CollectAll returns the git state for every configured project, sorted by name
-// for stable output. A failure on one project is reported in that project's
-// Git.Error; it never aborts the sweep.
+// for stable output. Projects are read CONCURRENTLY with a per-project deadline:
+// a serial sweep made the total cost the sum of every project's read, so one
+// slow tree timed out the whole /git endpoint (and fleet's `git status`, which
+// fails closed on it). A failure or timeout on one project is reported in that
+// project's Git.Error; it never aborts the sweep.
 func CollectAll(projects []config.ProjectConfig) []ProjectGit {
-	out := make([]ProjectGit, 0, len(projects))
-	for _, p := range projects {
-		out = append(out, ProjectGit{Name: p.Name, Git: Collect(p.Path)})
+	out := make([]ProjectGit, len(projects))
+	sem := make(chan struct{}, maxConcurrentCollect)
+	var wg sync.WaitGroup
+	for i, p := range projects {
+		wg.Add(1)
+		go func(i int, p config.ProjectConfig) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i] = ProjectGit{Name: p.Name, Git: collectWithTimeout(p.Path, perProjectTimeout)}
+		}(i, p)
 	}
+	wg.Wait()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// collectWithTimeout runs Collect but bounds its wall time. go-git's calls take
+// no context, so we cannot cancel a slow read; instead we stop waiting on it and
+// report a timeout, letting the sweep return promptly. The orphaned goroutine
+// finishes on its own (the channel is buffered, so its send never blocks).
+func collectWithTimeout(path string, timeout time.Duration) GitState {
+	ch := make(chan GitState, 1)
+	go func() { ch <- Collect(path) }()
+	select {
+	case st := <-ch:
+		return st
+	case <-time.After(timeout):
+		return GitState{Error: "git state read exceeded " + timeout.String()}
+	}
 }
 
 // Collect opens the working tree at path and computes its git state.
