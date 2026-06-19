@@ -190,6 +190,39 @@ func TestCollect_NotAGitRepo(t *testing.T) {
 	if st.Error == "" {
 		t.Errorf("expected an error for a non-git directory")
 	}
+	// A directory that exists but is not a git checkout is a genuine git-read
+	// failure, NOT a missing path: it must not be mislabeled as the stale-config
+	// signal, or an operator would prune a project whose tree is actually there.
+	if st.MissingPath {
+		t.Errorf("non-git directory wrongly flagged missing_path")
+	}
+	if st.Error == ErrPathNotFound {
+		t.Errorf("non-git directory wrongly reported %q", ErrPathNotFound)
+	}
+}
+
+// TestCollect_MissingPath is the regression for the live-fleet finding: a
+// departed project (odysseus, moved out of ~/work) was still configured, and
+// its missing path read as the same opaque verify failure as a real git fault,
+// blocking the whole teardown. A missing path must produce the distinct,
+// self-explanatory ErrPathNotFound and set MissingPath, so the cause -- a stale
+// config entry -- is legible without string-matching.
+func TestCollect_MissingPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "departed-project")
+	st := Collect(dir)
+
+	if !st.MissingPath {
+		t.Errorf("missing path did not set missing_path")
+	}
+	if st.Error != ErrPathNotFound {
+		t.Errorf("error = %q, want %q", st.Error, ErrPathNotFound)
+	}
+	// The distinct signal must be different from the generic go-git error a real
+	// read failure produces, so the two buckets never collapse.
+	notGit := Collect(t.TempDir())
+	if st.Error == notGit.Error {
+		t.Errorf("missing-path error is indistinguishable from a git-read failure (%q)", st.Error)
+	}
 }
 
 func TestCollectAll_SortedAndIsolated(t *testing.T) {
@@ -208,12 +241,17 @@ func TestCollectAll_SortedAndIsolated(t *testing.T) {
 	if projects[0].Name != "alpha" || projects[1].Name != "zeta" {
 		t.Errorf("not sorted by name: %q, %q", projects[0].Name, projects[1].Name)
 	}
-	// The missing project errored but did not abort the sweep over zeta.
-	if projects[0].Git.Error == "" {
-		t.Errorf("missing project should carry an error")
+	// The missing project carries the distinct missing-path signal but did not
+	// abort the sweep over zeta, which reports its real (clean) state.
+	if projects[0].Git.Error != ErrPathNotFound || !projects[0].Git.MissingPath {
+		t.Errorf("missing project should carry the distinct missing-path signal, got error=%q missing_path=%v",
+			projects[0].Git.Error, projects[0].Git.MissingPath)
 	}
 	if projects[1].Git.Error != "" {
 		t.Errorf("healthy project should not error: %s", projects[1].Git.Error)
+	}
+	if projects[1].Git.MissingPath {
+		t.Errorf("healthy project wrongly flagged missing_path")
 	}
 }
 

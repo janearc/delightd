@@ -38,6 +38,17 @@ import (
 	"delightd/config"
 )
 
+// ErrPathNotFound is the Error value delightd reports when a configured
+// project's path does not exist on disk. It is deliberately distinct from the
+// errors a real git read produces (no checkout, unreadable HEAD, lock
+// contention, ...): a missing path is almost always a STALE CONFIG ENTRY -- a
+// project that departed the fleet but is still listed -- not a fault with the
+// working tree. An operator reading a /git sweep must be able to tell the two
+// apart at a glance, since the remedy differs (prune the config vs. investigate
+// the tree). It is NOT a fail-open: the project still reports an Error and the
+// sweep still fails closed for the consumer; this only makes the cause legible.
+const ErrPathNotFound = "project path not found"
+
 // GitState is the observed git state of a project's working tree. On a read
 // failure Error is set and the other fields hold zero values, so a caller can
 // render the project without special-casing nil.
@@ -49,7 +60,11 @@ type GitState struct {
 	RemoteURL   string `json:"remote_url"`
 	// Error carries a per-project failure (not a git checkout, unreadable HEAD,
 	// ...) without failing the whole sweep. Empty when the read succeeded.
-	Error string `json:"error,omitempty"`
+	// A missing path yields the distinct, self-explanatory ErrPathNotFound;
+	// MissingPath is set alongside it so a consumer can branch on the condition
+	// without string-matching the message.
+	Error       string `json:"error,omitempty"`
+	MissingPath bool   `json:"missing_path,omitempty"`
 }
 
 // ProjectGit is a project paired with its observed git state -- the unit the
@@ -112,7 +127,26 @@ func collectWithTimeout(path string, timeout time.Duration) GitState {
 func Collect(path string) GitState {
 	var st GitState
 
-	repo, err := git.PlainOpen(expandHome(path))
+	resolved := expandHome(path)
+
+	// Distinguish "the configured path is gone" from "the path is there but git
+	// could not read it". go-git collapses both into a generic "repository does
+	// not exist", which buckets a departed project (stale config) with a genuine
+	// git fault. Stat first so a missing path gets the distinct, diagnosable
+	// ErrPathNotFound signal; only os.IsNotExist is treated as missing-path, so
+	// a permission error or other stat failure still falls through to the normal
+	// git-read error path rather than being mislabeled.
+	if _, err := os.Stat(resolved); err != nil {
+		if os.IsNotExist(err) {
+			st.Error = ErrPathNotFound
+			st.MissingPath = true
+			return st
+		}
+		st.Error = err.Error()
+		return st
+	}
+
+	repo, err := git.PlainOpen(resolved)
 	if err != nil {
 		st.Error = err.Error()
 		return st
