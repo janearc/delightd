@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: delightd
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: delightd
+    app.kubernetes.io/part-of: fleet
+spec:
+  # ClusterIP only: in-cluster consumers (fleet-svc) address delightd by this
+  # Service name. Edge traffic reaches it through traefik, not a NodePort —
+  # the one-ingress model is preserved.
+  selector:
+    app.kubernetes.io/name: delightd
+  ports:
+    - name: control
+      port: 8088
+      targetPort: control
