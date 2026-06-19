@@ -1,67 +1,83 @@
 # 😋 delightd
 
-`delightd` is the daemon responsible for fleet checkpointing, interface aggregation, and active control plane duties. It evaluates git repositories for churn, manages local `.tgz` snapshot archives, dynamically discovers local LLMs, registers them to `traefik`, and is controlled externally via `fleet-svc`.
+`delightd` is the fleet's control plane: a single statically-linked Go binary
+with one HTTP control port that the rest of the fleet asks about project state —
+git working-tree status, checkpoint (backup) status, project introspection,
+discovered local LLMs, and the aggregated agent-tool surface. fleet-svc and the
+other tooling are consumers of delightd, not the other way around.
 
-## Architecture
+## On the term "control plane"
 
-The daemon is integrated directly into the service mesh. It exposes an HTTP control port for metrics, LLM telemetry, and Model Context Protocol (MCP).
+Go already has control-plane libraries, and they solve a different problem than
+this one. Envoy's [go-control-plane] and Google's gRPC xDS control plane are xDS
+servers: they stream desired configuration out to data planes and own a snapshot
+cache. Kubernetes [controller-runtime] reconciles declared state against
+observed cluster state in a control loop.
 
-It is compiled as a static 15MB Go binary. It generates dynamic routing configurations for Traefik to pull newly discovered local services (like `llama-server`) into the mesh automatically.
+delightd is neither. It distributes no configuration to data planes and runs no
+reconcile loop. It answers, per request, what is true about a project right now —
+git state, backup state, discovered LLMs — and emits an event for the one action
+it owns, the checkpoint. Those libraries earn their complexity at a scale this
+fleet is nowhere near: a large data-plane population that needs configuration
+streamed to it and held in a snapshot cache. At this size, config distribution is
+handled without them (traefik as the route registry; fleet-svc converges services
+to the declared set), and delightd is the authority those parts read from.
+go-control-plane is the answer for a much bigger fleet; if the fleet grows into
+it, that is a new component alongside delightd, not a retrofit of it.
 
-See `INSTALL.md` for deployment constraints. See `DEVELOPERS.md` for project integration invariants.
+[go-control-plane]: https://github.com/envoyproxy/go-control-plane
+[controller-runtime]: https://github.com/kubernetes-sigs/controller-runtime
 
-## Interface Exports
+## Availability contract (read this first)
 
-The daemon scans managed projects in `~/work` and enforces executable paths into the host `$PATH` at `~/var/bin`.
+delightd has no peer and no quorum. The consumers that depend on it — fleet-svc
+in particular — **fail closed** when it is down. There is **no local fallback**:
+fleet's `git status` over the fleet does not fall back to shelling out to git
+itself; it returns an error if delightd does not answer.
 
-### Static Execution
+The consequence: resilience is delightd's job — it must come up in any
+condition — not the consumers'. Consumers do not hedge against its absence.
 
-Executables located in `~/work/<project>/bin/` are symlinked into `~/var/bin`.
+Concretely:
 
-### Docker Shims (Bash Fragments)
+- A consumer that cannot reach delightd returns an error. It does not fall back
+  to a locally computed answer.
+- Any change to the consumer-facing surface (notably `GET /git`) requires a new
+  delightd binary to be deployed before the dependent fleet commands work. There
+  is no client-side reimplementation and no compatibility shim.
+- The git-state surface is computed live, per request (see
+  [git state](#git-state)), precisely so a consumer never acts on a stale answer.
 
-To bridge the gap between host-level orchestration and strict containerized isolation, the daemon dynamically writes transparent shell wrapper scripts to `~/var/runtime/delightd/exports/<project>/<bin>.sh` and symlinks them into `~/var/bin`. This allows the host to execute standard shell commands that transparently proxy into Docker boundaries. Execution modes are defined in `~/etc/delight-registry.yaml`.
+See [docs/availability.md](docs/availability.md) for the full statement.
 
-A single one of these generated wrapper scripts is what the control API calls a **bash fragment**. The term is literal and narrow: it is a `<bin>.sh` shell script the daemon generated for a project. Nothing more sinister. Introspection reports `has_bash_fragment: true` for a service when at least one such script exists on disk under that project's export directory — that on-disk presence is the source of truth.
+## What it does
 
-**docker-run (Ephemeral):**
-```bash
-#!/usr/bin/env bash
-exec docker run --rm -i -v "$(pwd):/workspace" -w /workspace <image> "$@"
-```
+| Responsibility | Surface | Notes |
+|----------------|---------|-------|
+| Checkpoint projects | backup pipeline, `POST /projects/{name}/backup` | rotating `.tgz` archives; never touches model/weight dirs |
+| Report git state | `GET /git`, `GET /projects/{name}/git` | live, per-request, parallel whole-fleet sweep; delightd owns fleet git-state |
+| Service introspection | `GET /projects/{name}/introspect` | known / backing-up / has-fragment; unknown is 200, not 404 |
+| Discover local LLMs | `GET /discovery/llms` | probes configured/standard local LLM endpoints; registers routes with traefik |
+| Aggregate agent tools | `POST /mcp`, generated `delight` CLI | scans each project's `mcp.json`, namespaces and serves them over MCP |
+| Emit backup events | Kafka (best-effort) | first fleet Kafka producer; an outage never blocks a backup |
 
-**docker-exec (Persistent):**
-```bash
-#!/usr/bin/env bash
-exec docker exec -i <container> <command> "$@"
-```
+delightd owns fleet git-state (the `/git` surface); obs-svc owns the dashboard
+that renders it.
 
-The daemon provides idempotent cleanup. Unlinked exports are archived to `~/var/archive/delightd/exports/<timestamp>/`.
+## Taxonomy
 
-## Introspection
+delightd's canonical unit is the **project**, never "service", "deployment", or
+"repo". delightd manages the *project*, not the repository at its path — git
+state is an *observed attribute* of the project, not something delightd owns.
+The full taxonomy (project / kind / deployment / capabilities / git-state) is in
+[the architecture doc](docs/architecture.md#6-taxonomy-what-is-a-project) and is
+load-bearing for the API shapes.
 
-`GET /projects/{name}/introspect` returns the daemon's view of a single service:
+## Git state
 
-```json
-{
-  "service_name": "paling",
-  "is_known_to_daemon": true,
-  "is_actively_backing_up": false,
-  "has_bash_fragment": true
-}
-```
-
-| Field | Meaning |
-|-------|---------|
-| `is_known_to_daemon` | The service is present in the daemon's project configuration. |
-| `is_actively_backing_up` | The service's backup state machine is currently in `backing_up`. |
-| `has_bash_fragment` | At least one generated docker shim (see [Docker Shims](#docker-shims-bash-fragments)) exists for the service. |
-
-An unknown service returns `200` with `is_known_to_daemon: false`, not `404`: a query for a service the daemon has never heard of is a valid answer worth tracking as a signal, not an error.
-
-## Git State
-
-Git state is an *observed attribute* of a [project](delightd_architecture.md#6-taxonomy-what-is-a-project) — delightd reports it, it does not own the working tree. `GET /projects/{name}/git` returns one project; `GET /git` returns every managed project under a `projects` array:
+Git state is an observed attribute of a [project](docs/architecture.md#6-taxonomy-what-is-a-project).
+`GET /projects/{name}/git` returns one project; `GET /git` returns every managed
+project under a `projects` array.
 
 ```json
 {
@@ -78,17 +94,57 @@ Git state is an *observed attribute* of a [project](delightd_architecture.md#6-t
 
 | Field | Meaning |
 |-------|---------|
-| `git.branch` | The currently checked-out branch (empty in a detached HEAD). |
+| `git.branch` | Currently checked-out branch (empty in a detached HEAD). |
 | `git.dirty` | The working tree has uncommitted changes (tracked or untracked). |
-| `git.unpushed` | Commits reachable from `HEAD` that are not on the branch's tracking ref. |
+| `git.unpushed` | Commits reachable from `HEAD` not on the branch's tracking ref. |
 | `git.has_upstream` | A tracking ref exists. When `false`, the branch has never been pushed and every local commit counts as `unpushed`. |
-| `git.remote_url` | The tracking remote's URL (resolved via the branch's configured upstream, then `origin`, then a sole remote). |
-| `git.error` | Present only when the project could not be read (e.g. not a git checkout); other fields hold zero values. A failure on one project never aborts the `/git` sweep, and is logged by the daemon. |
+| `git.remote_url` | The tracking remote's URL (resolved via the branch's upstream, then `origin`, then a sole remote). |
+| `git.error` | Present only when a project could not be read. Other fields hold zero values. One project's failure never aborts the `/git` sweep. |
 
-State is computed **live, per request** with `go-git` — not served from a cache. This is deliberate: `fleet-svc` gates destructive host-migration on the dirty/unpushed answer, so a stale "clean" reading could greenlight a teardown over uncommitted work. Field names are aligned with the forthcoming `delight.v1.GitState` contract so the surface graduates to Protobuf over Kafka with the daemon's other events.
+State is computed **live, per request** with `go-git` — not `git status
+--porcelain`, and not served from a cache. This is deliberate: fleet-svc gates
+destructive host-migration on the dirty/unpushed answer, so a stale "clean"
+reading could greenlight a teardown over uncommitted work. Field names are
+aligned with the forthcoming `delight.v1.GitState` contract so the surface
+graduates to Protobuf over Kafka with the daemon's other events.
 
-## Execution
+`GET /git` reads every project's tree **concurrently** with a per-project
+deadline; the API reference covers the sweep behavior precisely
+([docs/api.md](docs/api.md#get-git)).
+
+## Introspection
+
+`GET /projects/{name}/introspect` returns the daemon's view of a single project.
+An unknown project returns `200` with `is_known_to_daemon: false`, **not** 404:
+a query for a project the daemon has never heard of is a valid signal worth
+recording, not an error. Field shape and the pending `service_name` → `project`
+rename are in [docs/api.md](docs/api.md#get-projectsnameintrospect).
+
+## Control port
+
+The canonical control port is **`:8088`** — `delight.yaml`, `main.go`'s fallback
+(`config.DefaultControlPort`), compose, and kube all agree.
+
+## Documents
+
+| Document | Contents |
+|----------|----------|
+| [docs/architecture.md](docs/architecture.md) | component map, the git oracle, archival pipeline, taxonomy |
+| [docs/api.md](docs/api.md) | every control-port route: method, JSON shapes, status codes |
+| [docs/availability.md](docs/availability.md) | fail-closed contract, deploy-before-use rule |
+| [docs/events.md](docs/events.md) | the Kafka backup-event contract (wire format, SR, tradeoffs) |
+| [docs/backups.md](docs/backups.md) | checkpoint pipeline, name-aware exclude, rotation, the never-touch-weights invariant |
+| [docs/agent-interface.md](docs/agent-interface.md) | JSON-by-default, skill aggregator, `delight` CLI, registry + reload |
+| [docs/operations.md](docs/operations.md) | `delight.yaml` schema, `DELIGHT_*` env table, kube deploy, build |
+| [proto/README.md](proto/README.md) | how the `delight.v1` proto is vendored from kafka-svc |
+
+## Build and run
 
 ```bash
-docker compose up -d
+task build      # regenerates proto bindings, builds bin/delightd
+task test       # go test ./...
+./bin/delightd  # reads delight.yaml from $HOME/etc/delightd or the cwd
 ```
+
+Build and deployment detail (kube manifests, mounts, probes) is in
+[docs/operations.md](docs/operations.md).
