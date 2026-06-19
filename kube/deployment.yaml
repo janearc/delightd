@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delightd
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: delightd
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: delightd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: delightd
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # The compose runs the binary as the host engineer's UID/GID so every
+      # archive and shim it writes under /var stays host-owned, never root.
+      # HOME is unset for a numeric user, so it resolves to "/" — which is why
+      # viper finds the config at /etc/delightd and traefik dynamic lands in
+      # /var/traefik/dynamic. Keep that contract intact here.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: delightd
+          # Locally built image. The compose builds with no explicit name, so
+          # docker tags it <project>-<service>:latest = delightd-delightd:latest.
+          # That is the exact cached tag the primary agent imports into k3d.
+          # See handoff: this is the closest thing to a pinned tag the compose
+          # produces; if the primary rebuilds, the digest changes under the same
+          # tag — flag for a real version tag before fleet rollout.
+          image: delightd-delightd:latest
+          imagePullPolicy: IfNotPresent
+          # Match the compose entrypoint+args: daemon, immediate first sweep.
+          # No --dry-run: this is the live control plane (the stale k8s/ manifest
+          # ran --dry-run; that was a safety stub, not the real deployment).
+          command: ["/usr/local/bin/delightd"]
+          args: ["--immediate"]
+          ports:
+            - name: control
+              containerPort: 8088
+          env:
+            # Export engine paths, mirrored from docker-compose.yml. SYSTEM_ROOT
+            # points at /var (write mount), NOT /work — see handoff divergence
+            # note: the compose set DELIGHT_SYSTEM_ROOT=/work/backups, which
+            # needs /work writable; the migration contract makes /work read-only
+            # (git-state source) and routes backups to the /var write mount.
+            - name: DELIGHT_SYSTEM_ROOT
+              value: "/var/backups"
+            - name: DELIGHT_EXPORTS_REGISTRY
+              value: "/etc/delightd/delight-registry.yaml"
+            - name: DELIGHT_EXPORTS_BIN
+              value: "/var/bin"
+            - name: DELIGHT_EXPORTS_STATE
+              value: "/var/runtime/delightd/exports"
+            - name: DELIGHT_EXPORTS_ARCHIVE
+              value: "/var/archive/delightd/exports"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: control
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: control
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            # git-state source: read-only (delightd reads project git trees).
+            - name: host-work
+              mountPath: /work
+              readOnly: true
+            # config + registry: read-only (delight.yaml sets control_port 8088).
+            - name: host-etc-delightd
+              mountPath: /etc/delightd
+              readOnly: true
+            # backups, exports (/var/bin), traefik dynamic (/var/traefik/dynamic):
+            # the one write surface.
+            - name: host-var
+              mountPath: /var
+      volumes:
+        - name: host-work
+          hostPath:
+            path: /Users/jane/work
+            type: Directory
+        - name: host-etc-delightd
+          hostPath:
+            path: /Users/jane/etc/delightd
+            type: Directory
+        - name: host-var
+          hostPath:
+            path: /Users/jane/var
+            type: Directory
