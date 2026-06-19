@@ -35,7 +35,7 @@ services:
       - DELIGHT_EXPORTS_ARCHIVE=/var/archive/delightd/exports
     command: ["--immediate"]
     restart: unless-stopped
-    # Dynamic labeling for Traefik discovery (Envoy ignores these)
+    # Dynamic labeling for Traefik discovery
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.delightd.rule=Host(`delightd.local`)"
@@ -59,20 +59,6 @@ services:
       - "127.0.0.1:8081:8080" # Traefik dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-
-  # --------------------------------------------------------
-  # ENVOY PROFILE (Static Reverse Proxy + Endpoint Registry)
-  # --------------------------------------------------------
-  envoy:
-    image: envoyproxy/envoy:v1.27-latest
-    profiles: ["envoy"]
-    ports:
-      - "127.0.0.1:80:8000" # Envoy listens on 8000 internally
-      - "127.0.0.1:9901:9901" # Envoy admin port
-    volumes:
-      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
-    depends_on:
-      - delightd
 
 networks:
   dev-fleet:
