@@ -1,15 +1,15 @@
 # delightd — Kafka event contract
 
-delightd is the fleet's **first Kafka producer**. After each checkpoint attempt
-it emits a `delight.v1.BackupEvent` to the `delight.events` topic, encoded in the
-Confluent Schema Registry protobuf wire format so standard Confluent consumers —
-and obs-svc — can deserialize it. The implementation is `pkg/events`; this
-document is the contract, mined from that package's own notes.
+After each checkpoint attempt, delightd emits a `delight.v1.BackupEvent` to the
+`delight.events` topic, encoded in the Confluent Schema Registry protobuf wire
+format so standard Confluent consumers — and obs-svc — can deserialize it. It is
+the fleet's first Kafka producer, so the conventions here are the ones later
+producers follow. The implementation is `pkg/events`; this document is the
+contract.
 
 ## Best-effort, always
 
-Event emission **never blocks or fails a backup**. This is the single most
-important property:
+Event emission never blocks or fails a backup:
 
 - With no brokers configured, the publisher is `nil` and every publish is a
   silent no-op. The daemon runs exactly as it did before Kafka existed.

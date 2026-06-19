@@ -1,14 +1,32 @@
-# delightd
+# 😋 delightd
 
-`delightd` is the fleet's control plane. It is the daemon the rest of the fleet
-asks about project state: git working-tree status, checkpoint (backup) status,
-service introspection, discovered local LLMs, and the aggregated agent-tool
-surface. It is a single statically-linked Go binary with one HTTP control port.
+`delightd` is the fleet's control plane: a single statically-linked Go binary
+with one HTTP control port that the rest of the fleet asks about project state —
+git working-tree status, checkpoint (backup) status, project introspection,
+discovered local LLMs, and the aggregated agent-tool surface. fleet-svc and the
+other tooling are consumers of delightd, not the other way around.
 
-The naming here is older than the contract. Earlier docs described delightd as a
-"side utility controlled by fleet-svc." That is backwards. fleet-svc and the
-other tooling are *consumers* of delightd; delightd is the authority they read
-from. Read the documents below as the control plane's own docs.
+## On the term "control plane"
+
+Go already has control-plane libraries, and they solve a different problem than
+this one. Envoy's [go-control-plane] and Google's gRPC xDS control plane are xDS
+servers: they stream desired configuration out to data planes and own a snapshot
+cache. Kubernetes [controller-runtime] reconciles declared state against
+observed cluster state in a control loop.
+
+delightd is neither. It distributes no configuration to data planes and runs no
+reconcile loop. It answers, per request, what is true about a project right now —
+git state, backup state, discovered LLMs — and emits an event for the one action
+it owns, the checkpoint. Those libraries earn their complexity at a scale this
+fleet is nowhere near: a large data-plane population that needs configuration
+streamed to it and held in a snapshot cache. At this size, config distribution is
+handled without them (traefik as the route registry; fleet-svc converges services
+to the declared set), and delightd is the authority those parts read from.
+go-control-plane is the answer for a much bigger fleet; if the fleet grows into
+it, that is a new component alongside delightd, not a retrofit of it.
+
+[go-control-plane]: https://github.com/envoyproxy/go-control-plane
+[controller-runtime]: https://github.com/kubernetes-sigs/controller-runtime
 
 ## Availability contract (read this first)
 
@@ -17,14 +35,13 @@ in particular — **fail closed** when it is down. There is **no local fallback*
 fleet's `git status` over the fleet does not fall back to shelling out to git
 itself; it returns an error if delightd does not answer.
 
-The consequence is a one-line operating rule:
-
-> Resilience lives in delightd coming up in any condition. It does not live in
-> consumers hedging against delightd being absent.
+The consequence: resilience is delightd's job — it must come up in any
+condition — not the consumers'. Consumers do not hedge against its absence.
 
 Concretely:
 
-- A consumer that cannot reach delightd reports a failure. It does not guess.
+- A consumer that cannot reach delightd returns an error. It does not fall back
+  to a locally computed answer.
 - Any change to the consumer-facing surface (notably `GET /git`) requires a new
   delightd binary to be deployed before the dependent fleet commands work. There
   is no client-side reimplementation and no compatibility shim.
@@ -44,8 +61,8 @@ See [docs/availability.md](docs/availability.md) for the full statement.
 | Aggregate agent tools | `POST /mcp`, generated `delight` CLI | scans each project's `mcp.json`, namespaces and serves them over MCP |
 | Emit backup events | Kafka (best-effort) | first fleet Kafka producer; an outage never blocks a backup |
 
-Ownership boundary after the transparent sunset: **delightd owns fleet
-git-state** (the `/git` surface); **obs-svc owns the dashboard** that renders it.
+delightd owns fleet git-state (the `/git` surface); obs-svc owns the dashboard
+that renders it.
 
 ## Taxonomy
 
@@ -53,18 +70,12 @@ delightd's canonical unit is the **project**, never "service", "deployment", or
 "repo". delightd manages the *project*, not the repository at its path — git
 state is an *observed attribute* of the project, not something delightd owns.
 The full taxonomy (project / kind / deployment / capabilities / git-state) is in
-[delightd_architecture.md §6](delightd_architecture.md#6-taxonomy-what-is-a-project)
-and is load-bearing for the API shapes.
-
-> Pending wire rename. The introspection surface still names its fields
-> `service_name` / `is_known_to_daemon` and its type is `ServiceBackupStatus`.
-> This predates the taxonomy and is slated to rename to `project`. The current
-> wire shape is documented as-is in [docs/api.md](docs/api.md#get-projectsnameintrospect)
-> with the pending-rename note; do not treat `service_name` as final.
+[the architecture doc](docs/architecture.md#6-taxonomy-what-is-a-project) and is
+load-bearing for the API shapes.
 
 ## Git state
 
-Git state is an observed attribute of a [project](delightd_architecture.md#6-taxonomy-what-is-a-project).
+Git state is an observed attribute of a [project](docs/architecture.md#6-taxonomy-what-is-a-project).
 `GET /projects/{name}/git` returns one project; `GET /git` returns every managed
 project under a `projects` array.
 
@@ -118,7 +129,7 @@ The canonical control port is **`:8088`** — `delight.yaml`, `main.go`'s fallba
 
 | Document | Contents |
 |----------|----------|
-| [delightd_architecture.md](delightd_architecture.md) | component map, the git oracle, archival pipeline, taxonomy |
+| [docs/architecture.md](docs/architecture.md) | component map, the git oracle, archival pipeline, taxonomy |
 | [docs/api.md](docs/api.md) | every control-port route: method, JSON shapes, status codes |
 | [docs/availability.md](docs/availability.md) | fail-closed contract, deploy-before-use rule |
 | [docs/events.md](docs/events.md) | the Kafka backup-event contract (wire format, SR, tradeoffs) |

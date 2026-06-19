@@ -107,7 +107,7 @@ A checkpoint runs when the per-project state machine reaches `backing_up`. That
 happens by:
 
 - the **git oracle** detecting churn on the per-project poll loop (the normal
-  path; see [architecture §3](../delightd_architecture.md#3-the-git-oracle-churn-detection)),
+  path; see [architecture §3](architecture.md#3-the-git-oracle-churn-detection)),
   or
 - a manual **`POST /projects/{name}/backup`** ([api.md](api.md#post-projectsnamebackup)),
   or

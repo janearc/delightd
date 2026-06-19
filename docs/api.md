@@ -207,7 +207,7 @@ The daemon's introspection view of a project.
 
 > Pending wire rename. The type is `ServiceBackupStatus` and the fields are
 > `service_name` / `is_known_to_daemon`. This predates the
-> [project taxonomy](../delightd_architecture.md#6-taxonomy-what-is-a-project)
+> [project taxonomy](architecture.md#6-taxonomy-what-is-a-project)
 > and is slated to rename to `project`. The shape above is what the wire returns
 > today; treat the names as transitional. Field names mirror
 > `delight.v1.ServiceBackupStatus` so the surface graduates to Protobuf cleanly.

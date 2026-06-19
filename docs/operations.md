@@ -3,7 +3,7 @@
 This document covers running delightd: the `delight.yaml` schema, the `DELIGHT_*`
 environment surface, the kube deployment, and the build. It replaces the old
 `INSTALL.md`. For what the daemon *does*, see
-[delightd_architecture.md](../delightd_architecture.md).
+[architecture.md](architecture.md).
 
 ## Configuration sources, in order
 

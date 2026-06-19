@@ -2,7 +2,7 @@
 
 delightd is the fleet's control plane: a single Go binary with one HTTP control
 port. The rest of the fleet reads project state from it and fails closed when it
-is absent (see [docs/availability.md](docs/availability.md)). This document
+is absent (see [availability.md](availability.md)). This document
 describes the components, the git oracle, the archival pipeline, and the
 taxonomy the API shapes are built on.
 
@@ -47,15 +47,10 @@ state internally.
 | Property | Value |
 |----------|-------|
 | Implementation | statically-linked Go binary (no cgo) |
-| Control port | `:8088` (canonical; see note below) |
+| Control port | `:8088` (canonical) |
 | Logging | structured JSON to stdout (`slog`) |
 | Flags | `--dry-run` (walk manifests, write nothing), `--immediate` (evaluate on startup without waiting for the first tick) |
 | Shutdown | SIGINT/SIGTERM → 5 s graceful HTTP shutdown |
-
-> Control-port note. The canonical port is `:8088`. The current `main.go`
-> defaults to `8080` when `control_port` is unset, and the committed
-> `delight.yaml` still sets `8080`; a separate config-fix PR corrects both. This
-> document states `:8088` as the contract regardless.
 
 ## 3. The git oracle (churn detection)
 
@@ -103,11 +98,11 @@ The hard invariant: **delightd only ever rotates its own `.tgz` archives. It
 never deletes from model, weight, or cache directories.** Those are excluded
 from the backup by name, not deleted. The full pipeline, the name-aware exclude
 semantics, and the canonical `~/var/backups` path are in
-[docs/backups.md](docs/backups.md).
+[backups.md](backups.md).
 
 After each checkpoint attempt the daemon emits a best-effort
 `delight.v1.BackupEvent`; a Kafka or Schema-Registry outage never blocks or
-fails the backup. See [docs/events.md](docs/events.md).
+fails the backup. See [events.md](events.md).
 
 ## 5. Configuration
 
@@ -144,7 +139,7 @@ projects:
 ```
 
 The full `delight.yaml` schema and the complete `DELIGHT_*` env table are in
-[docs/operations.md](docs/operations.md). `odysseus` is no longer in the fleet;
+[operations.md](operations.md). `odysseus` is no longer in the fleet;
 it appears in no current config.
 
 ## 6. Taxonomy: What Is a Project?
@@ -168,8 +163,6 @@ project ── exposes ──▶ Capabilities    (skills, exports)
 
 Wire shape follows the taxonomy: git state is returned as an **element of a project**, e.g. `{"name": "paling", "git": {"branch": "main", "dirty": false, …}}` — not as a free-standing record.
 
-> Pending wire rename. The introspection type is still `ServiceBackupStatus`
-> with fields `service_name` / `is_known_to_daemon`. It predates this taxonomy
-> and is slated to rename to `project`. The current shape is documented in
-> [docs/api.md](docs/api.md#get-projectsnameintrospect); treat the names as
-> transitional, not final.
+The introspection type still carries the older `ServiceBackupStatus` /
+`service_name` names, which predate this taxonomy and are slated to become
+`project`. The current wire shape is in [api.md](api.md#get-projectsnameintrospect).

@@ -1,6 +1,6 @@
 // Package gitstate computes the live git state of a project's working tree.
 //
-// In delightd's taxonomy (see delightd_architecture.md §6) a *project* is the
+// In delightd's taxonomy (see docs/architecture.md §6) a *project* is the
 // atomic managed unit, and GitState is an *observed attribute* of that project's
 // working tree -- delightd reports it, it does not own the tree. The wire shape
 // reflects that: callers receive a ProjectGit, a project paired with its git

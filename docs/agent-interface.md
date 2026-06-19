@@ -32,10 +32,8 @@ each sync the aggregator (`pkg/skills`) scans every managed project for an
   (input `{ "project": "<name>" }`) so the daemon's own backup trigger is part of
   the same surface it serves for everyone else.
 
-> There is no `swagger.json` / OpenAPI requirement. Only `mcp.json` is scanned.
-> (Earlier docs claimed an OpenAPI-at-root requirement; no code reads such a
-> file.) The single integration contract for a project's agent tools is its
-> `mcp.json`.
+A project's `mcp.json` is the single integration contract for its agent tools.
+Nothing else is scanned — there is no `swagger.json` or OpenAPI requirement.
 
 `mcp.json` shape (`pkg/skills.Manifest`):
 
