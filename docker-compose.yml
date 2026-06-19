@@ -17,7 +17,10 @@ services:
     ports:
       - "127.0.0.1:8088:8088"
     environment:
-      - DELIGHT_SYSTEM_ROOT=/work/backups
+      # Backup destination, resolving to ~/var/backups on the host (the ~/var:/var
+      # write mount). Points straight at the backups dir -- the daemon writes here
+      # directly and does not append a further "/backups" segment. Matches kube.
+      - DELIGHT_SYSTEM_ROOT=/var/backups
       - DELIGHT_EXPORTS_REGISTRY=/etc/delightd/delight-registry.yaml
       - DELIGHT_EXPORTS_BIN=/var/bin
       - DELIGHT_EXPORTS_STATE=/var/runtime/delightd/exports

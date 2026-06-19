@@ -233,7 +233,12 @@ func main() {
 					if machine.GetState() == state.StateBackingUp {
 						slog.Info("executing backup pipeline", "project", p.Name)
 
-						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root+"/backups", p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
+						// System.Root is already the backup destination directory
+						// (delight.yaml: ~/var/backups; DELIGHT_SYSTEM_ROOT=/var/backups
+						// in compose+kube, both resolving to ~/var/backups on the host).
+						// Do NOT append "/backups" here -- that produced a doubled
+						// ".../backups/backups" segment.
+						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.Root, p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
 						if err != nil {
 							metrics.Inc(fmt.Sprintf(`delightd_backup_failures_total{project="%s"}`, p.Name))
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
@@ -261,10 +266,10 @@ func main() {
 	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, *dryRun)
 	mux := api.Mux()
 
-	port := cfg.System.Daemon.ControlPort
-	if port == 0 {
-		port = 8080
-	}
+	// Resolve to the canonical control port (config.DefaultControlPort = 8088) when
+	// the config leaves it unset, so the listener always lands where compose, kube,
+	// and every client route.
+	port := cfg.System.Daemon.ResolveControlPort()
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

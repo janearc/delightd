@@ -14,6 +14,22 @@ type DaemonConfig struct {
 	PidFile     string `mapstructure:"pid_file"`
 }
 
+// DefaultControlPort is delightd's canonical control port. compose publishes
+// 127.0.0.1:8088, the kube Deployment uses containerPort 8088, and every client
+// (the generated CLI wrapper, curl callers) routes there. This is the single
+// source of the default so a missing or zero config never drops the listener onto
+// a port nothing reaches.
+const DefaultControlPort = 8088
+
+// ResolveControlPort returns the configured control port, falling back to
+// DefaultControlPort when it is unset (the zero value from an absent config key).
+func (d DaemonConfig) ResolveControlPort() int {
+	if d.ControlPort == 0 {
+		return DefaultControlPort
+	}
+	return d.ControlPort
+}
+
 type LLMProviderConfig struct {
 	Name string `mapstructure:"name"`
 	Type string `mapstructure:"type"`

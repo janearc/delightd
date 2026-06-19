@@ -1,8 +1,12 @@
 system:
-  root: "~/var"
+  # root is the directory backup archives are written INTO (one archive subtree
+  # per project). It is the literal destination, not a parent that the daemon
+  # then appends "/backups" to -- compose and kube set DELIGHT_SYSTEM_ROOT to the
+  # same resolved location (~/var/backups on the host) so every deployment agrees.
+  root: "~/var/backups"
   config_root: "~/etc"
   daemon:
-    control_port: 8080
+    control_port: 8088
     pid_file: "~/var/run/delightd.pid"
 
 projects:
