@@ -31,43 +31,118 @@ func TestResolveControlPortDefault(t *testing.T) {
 	}
 }
 
-// TestBackupRootNoDoubledSegment guards the DELIGHT_SYSTEM_ROOT path bug:
-// system.root is the backup destination itself, so the checkpoint root is
-// System.Root verbatim with no appended "/backups". A doubled
-// ".../backups/backups" segment is the regression we are preventing.
-func TestBackupRootNoDoubledSegment(t *testing.T) {
-	cases := []struct {
-		name string
-		root string
-	}{
-		{"compose and kube in-container", "/var/backups"},
-		{"local host default", "/Users/jane/var/backups"},
+// TestResolveRootsDefaults verifies that an empty SystemConfig resolves every
+// root to its documented default (with ~ expanded to $HOME) and that BackupsRoot
+// derives as ${DaemonRoot}/backups when left unset.
+func TestResolveRootsDefaults(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := DelightConfig{System: SystemConfig{Root: tc.root}}
-			// main passes cfg.System.Root straight to backup.CreateCheckpoint.
-			checkpointRoot := cfg.System.Root
-			if checkpointRoot != tc.root {
-				t.Errorf("checkpoint root altered: want %q, got %q", tc.root, checkpointRoot)
-			}
-			if strings.Contains(checkpointRoot, "backups/backups") {
-				t.Errorf("doubled backups segment in %q", checkpointRoot)
-			}
-		})
+
+	var s SystemConfig
+	s.ResolveRoots()
+
+	wantMonitor := filepath.Join(home, "work")
+	wantDaemon := filepath.Join(home, "var")
+	wantBackups := filepath.Join(home, "var", "backups")
+	wantConfig := filepath.Join(home, "etc")
+
+	if s.MonitorRoot != wantMonitor {
+		t.Errorf("MonitorRoot: want %q, got %q", wantMonitor, s.MonitorRoot)
+	}
+	if s.DaemonRoot != wantDaemon {
+		t.Errorf("DaemonRoot: want %q, got %q", wantDaemon, s.DaemonRoot)
+	}
+	if s.BackupsRoot != wantBackups {
+		t.Errorf("BackupsRoot derived: want %q, got %q", wantBackups, s.BackupsRoot)
+	}
+	if s.ConfigRoot != wantConfig {
+		t.Errorf("ConfigRoot: want %q, got %q", wantConfig, s.ConfigRoot)
 	}
 }
 
-// TestDefaultConfigBackupRoot verifies the shipped delight.yaml points system.root
-// directly at the backups dir (~/var/backups), so the no-suffix checkpoint call
-// still lands in a backups directory locally.
-func TestDefaultConfigBackupRoot(t *testing.T) {
-	cfg := loadShippedConfig(t)
-	if !strings.HasSuffix(cfg.System.Root, "/backups") {
-		t.Errorf("shipped system.root should end in /backups, got %q", cfg.System.Root)
+// TestResolveRootsBackupsDerivesFromDaemonRoot verifies BackupsRoot follows a
+// relocated DaemonRoot when not set explicitly, and that an explicit BackupsRoot
+// overrides the derivation rather than being recomputed from DaemonRoot.
+func TestResolveRootsBackupsDerivesFromDaemonRoot(t *testing.T) {
+	// derived: BackupsRoot unset -> ${DaemonRoot}/backups.
+	derived := SystemConfig{DaemonRoot: "/srv/delight/var"}
+	derived.ResolveRoots()
+	if want := "/srv/delight/var/backups"; derived.BackupsRoot != want {
+		t.Errorf("derived BackupsRoot: want %q, got %q", want, derived.BackupsRoot)
 	}
-	if strings.Contains(cfg.System.Root, "backups/backups") {
-		t.Errorf("shipped system.root already doubled: %q", cfg.System.Root)
+
+	// explicit override wins, independent of DaemonRoot.
+	override := SystemConfig{DaemonRoot: "/srv/delight/var", BackupsRoot: "/mnt/cold/backups"}
+	override.ResolveRoots()
+	if want := "/mnt/cold/backups"; override.BackupsRoot != want {
+		t.Errorf("explicit BackupsRoot: want %q, got %q", want, override.BackupsRoot)
+	}
+	if strings.Contains(override.BackupsRoot, "backups/backups") {
+		t.Errorf("doubled backups segment in %q", override.BackupsRoot)
+	}
+}
+
+// TestRootEnvOverrides verifies each DELIGHT_*_ROOT env var is bound and flows
+// through Load into the matching SystemConfig field, even with no config file
+// present (the case BindEnv exists to cover).
+func TestRootEnvOverrides(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", "/tmp/nonexistent")
+	defer os.Setenv("HOME", origHome)
+
+	// point at a dir with no delight.yaml so Load falls back to env + defaults.
+	tmpDir := t.TempDir()
+	origWD, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origWD)
+
+	envs := map[string]string{
+		"DELIGHT_MONITOR_ROOT": "/opt/projects",
+		"DELIGHT_DAEMON_ROOT":  "/opt/state",
+		"DELIGHT_BACKUPS_ROOT": "/opt/cold/backups",
+		"DELIGHT_CONFIG_ROOT":  "/opt/conf",
+	}
+	for k, v := range envs {
+		t.Setenv(k, v)
+	}
+
+	viper.Reset()
+	cfg, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load config failed: %v", err)
+	}
+
+	if cfg.System.MonitorRoot != "/opt/projects" {
+		t.Errorf("MonitorRoot env override: got %q", cfg.System.MonitorRoot)
+	}
+	if cfg.System.DaemonRoot != "/opt/state" {
+		t.Errorf("DaemonRoot env override: got %q", cfg.System.DaemonRoot)
+	}
+	if cfg.System.BackupsRoot != "/opt/cold/backups" {
+		t.Errorf("BackupsRoot env override: got %q", cfg.System.BackupsRoot)
+	}
+	if cfg.System.ConfigRoot != "/opt/conf" {
+		t.Errorf("ConfigRoot env override: got %q", cfg.System.ConfigRoot)
+	}
+}
+
+// TestDefaultConfigBackupsRoot verifies the shipped delight.yaml leaves
+// backups_root unset and that it derives to a "backups" directory under
+// daemon_root (~/var) with no doubled segment.
+func TestDefaultConfigBackupsRoot(t *testing.T) {
+	cfg := loadShippedConfig(t)
+	if !strings.HasSuffix(cfg.System.BackupsRoot, "/backups") {
+		t.Errorf("shipped backups_root should end in /backups, got %q", cfg.System.BackupsRoot)
+	}
+	if strings.Contains(cfg.System.BackupsRoot, "backups/backups") {
+		t.Errorf("shipped backups_root doubled: %q", cfg.System.BackupsRoot)
+	}
+	// it should derive from daemon_root, i.e. ${DaemonRoot}/backups.
+	if want := filepath.Join(cfg.System.DaemonRoot, "backups"); cfg.System.BackupsRoot != want {
+		t.Errorf("shipped backups_root should derive from daemon_root: want %q, got %q",
+			want, cfg.System.BackupsRoot)
 	}
 }
 
@@ -112,7 +187,9 @@ func TestLoadConfig(t *testing.T) {
 
 	yamlContent := `
 system:
-  root: "/tmp/var"
+  monitor_root: "/tmp/work"
+  daemon_root: "/tmp/var"
+  config_root: "/tmp/etc"
   agent_skills:
     enabled: true
     expose_via: ["cli", "mcp"]
@@ -141,8 +218,15 @@ projects:
 		t.Fatalf("Load config failed: %v", err)
 	}
 
-	if cfg.System.Root != "/tmp/var" {
-		t.Errorf("expected System.Root to be /tmp/var, got %s", cfg.System.Root)
+	if cfg.System.MonitorRoot != "/tmp/work" {
+		t.Errorf("expected MonitorRoot to be /tmp/work, got %s", cfg.System.MonitorRoot)
+	}
+	if cfg.System.DaemonRoot != "/tmp/var" {
+		t.Errorf("expected DaemonRoot to be /tmp/var, got %s", cfg.System.DaemonRoot)
+	}
+	// backups_root unset in this yaml -> derives from daemon_root.
+	if cfg.System.BackupsRoot != "/tmp/var/backups" {
+		t.Errorf("expected BackupsRoot to derive to /tmp/var/backups, got %s", cfg.System.BackupsRoot)
 	}
 
 	if !cfg.System.AgentSkills.Enabled {

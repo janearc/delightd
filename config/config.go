@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -41,12 +43,84 @@ type LLMDiscoveryConfig struct {
 }
 
 type SystemConfig struct {
-	Root         string             `mapstructure:"root"`
-	ConfigRoot   string             `mapstructure:"config_root"`
+	// The four roots delightd operates over. They are deliberately distinct: the
+	// tree the daemon monitors is not where it keeps its own runtime state, and
+	// where it writes backups is a single directory under that state tree, not the
+	// state tree itself. Each is independently configurable (env + yaml) like a
+	// ./configure --prefix; see DefaultMonitorRoot/DefaultDaemonRoot/
+	// DefaultConfigRoot and ResolveRoots for the defaults and the BackupsRoot
+	// derivation.
+
+	// MonitorRoot is the tree delightd watches: the parent of the managed
+	// projects' git working trees (read-only in container deployments). yaml
+	// key system.monitor_root, env DELIGHT_MONITOR_ROOT, default ~/work.
+	MonitorRoot string `mapstructure:"monitor_root"`
+	// DaemonRoot is delightd's own runtime/state tree (pid file, exports, the
+	// backups directory). yaml key system.daemon_root, env DELIGHT_DAEMON_ROOT,
+	// default ~/var.
+	DaemonRoot string `mapstructure:"daemon_root"`
+	// BackupsRoot is the directory backup archives are written INTO (one archive
+	// subtree per project). It is the literal destination, not a parent the
+	// daemon appends "/backups" to. yaml key system.backups_root, env
+	// DELIGHT_BACKUPS_ROOT; when unset it derives from DaemonRoot as
+	// ${DaemonRoot}/backups, but an explicit value overrides that.
+	BackupsRoot string `mapstructure:"backups_root"`
+	// ConfigRoot is where delightd resolves its configuration and registry. yaml
+	// key system.config_root, env DELIGHT_CONFIG_ROOT, default ~/etc.
+	ConfigRoot string `mapstructure:"config_root"`
+
 	AgentSkills  AgentSkillsConfig  `mapstructure:"agent_skills"`
 	Daemon       DaemonConfig       `mapstructure:"daemon"`
 	LLMDiscovery LLMDiscoveryConfig `mapstructure:"llm_discovery"`
 	Kafka        KafkaConfig        `mapstructure:"kafka"`
+}
+
+// Default roots, expressed with a leading ~ which ResolveRoots expands to the
+// current user's home. They are package-level so tests and deployment docs can
+// reference the single source.
+const (
+	DefaultMonitorRoot = "~/work"
+	DefaultDaemonRoot  = "~/var"
+	DefaultConfigRoot  = "~/etc"
+)
+
+// ResolveRoots fills any unset root with its default, derives BackupsRoot from
+// DaemonRoot (${DaemonRoot}/backups) when it is not set explicitly, and expands
+// a leading ~ in each to the current user's home. It is idempotent: calling it
+// on an already-resolved config is a no-op for the derivation and only re-runs
+// the (stable) home expansion. Order matters -- BackupsRoot derives from the
+// resolved DaemonRoot, so DaemonRoot is settled first.
+func (s *SystemConfig) ResolveRoots() {
+	if s.MonitorRoot == "" {
+		s.MonitorRoot = DefaultMonitorRoot
+	}
+	if s.DaemonRoot == "" {
+		s.DaemonRoot = DefaultDaemonRoot
+	}
+	if s.ConfigRoot == "" {
+		s.ConfigRoot = DefaultConfigRoot
+	}
+	// BackupsRoot defaults to a "backups" directory under DaemonRoot, but an
+	// explicit value (yaml or DELIGHT_BACKUPS_ROOT) wins. DaemonRoot is expanded
+	// before joining so the derived path carries no leftover ~.
+	s.DaemonRoot = expandHome(s.DaemonRoot)
+	if s.BackupsRoot == "" {
+		s.BackupsRoot = filepath.Join(s.DaemonRoot, "backups")
+	}
+	s.MonitorRoot = expandHome(s.MonitorRoot)
+	s.BackupsRoot = expandHome(s.BackupsRoot)
+	s.ConfigRoot = expandHome(s.ConfigRoot)
+}
+
+// expandHome resolves a leading ~ to the current user's home directory. Roots in
+// delight.yaml are written with ~ by convention.
+func expandHome(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	return path
 }
 
 // KafkaConfig configures the event-emission path. When Brokers is empty, event
@@ -97,10 +171,30 @@ func Load(ctx context.Context) (*DelightConfig, error) {
 	viper.AddConfigPath("$HOME/etc/delightd")
 	viper.AddConfigPath(".")
 
-	// Enable 12-factor environment variable overrides (e.g. DELIGHT_SYSTEM_ROOT)
+	// Enable 12-factor environment variable overrides. The prefix + "." -> "_"
+	// replacer maps system.monitor_root -> DELIGHT_MONITOR_ROOT, etc.
 	viper.SetEnvPrefix("delight")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
+
+	// Bind the four roots to their env vars explicitly. Two reasons: AutomaticEnv
+	// only consults the environment for keys viper already knows about (present in
+	// a config file or bound) -- with no config file the roots would never be read
+	// from the environment; and the env names are deliberately short
+	// (DELIGHT_MONITOR_ROOT, not the AutomaticEnv-derived
+	// DELIGHT_SYSTEM_MONITOR_ROOT), so the binding maps the nested config key to
+	// the chosen env name directly.
+	rootEnvBindings := map[string]string{
+		"system.monitor_root": "DELIGHT_MONITOR_ROOT",
+		"system.daemon_root":  "DELIGHT_DAEMON_ROOT",
+		"system.backups_root": "DELIGHT_BACKUPS_ROOT",
+		"system.config_root":  "DELIGHT_CONFIG_ROOT",
+	}
+	for key, env := range rootEnvBindings {
+		if err := viper.BindEnv(key, env); err != nil {
+			return nil, fmt.Errorf("failed to bind env %s for %s: %w", env, key, err)
+		}
+	}
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -113,6 +207,10 @@ func Load(ctx context.Context) (*DelightConfig, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal configuration: %w", err)
 	}
+
+	// Apply defaults, derive BackupsRoot from DaemonRoot when unset, and expand
+	// ~ so consumers receive absolute paths.
+	cfg.System.ResolveRoots()
 
 	return &cfg, nil
 }
