@@ -117,8 +117,10 @@ config:
 
 ```yaml
 system:
-  root: "~/var"            # backups land under <root>/backups -> ~/var/backups
-  config_root: "~/etc"
+  monitor_root: "~/work"   # tree delightd monitors (managed projects)
+  daemon_root: "~/var"     # delightd's own runtime/state tree
+  # backups_root defaults to ${daemon_root}/backups -> ~/var/backups
+  config_root: "~/etc"     # config + registry resolution dir
   daemon:
     control_port: 8088
     pid_file: "~/var/run/delightd.pid"

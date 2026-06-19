@@ -19,8 +19,11 @@ vars and defaults.
 
 ```yaml
 system:
-  root: "~/var"                          # backups land under <root>/backups
-  config_root: "~/etc"
+  monitor_root: "~/work"                 # tree delightd monitors (managed projects)
+  daemon_root: "~/var"                   # delightd's own runtime/state tree
+  # backups_root defaults to ${daemon_root}/backups; set to relocate backups
+  # backups_root: "~/var/backups"
+  config_root: "~/etc"                   # config + registry resolution dir
   daemon:
     control_port: 8088                   # canonical control port
     pid_file: "~/var/run/delightd.pid"
@@ -50,8 +53,10 @@ projects:
 
 | Key | Type | Meaning |
 |-----|------|---------|
-| `system.root` | path | base for the backup root (`<root>/backups`); canonical `~/var` |
-| `system.config_root` | path | base config dir |
+| `system.monitor_root` | path | the tree delightd monitors (parent of the managed projects' git trees); canonical `~/work` |
+| `system.daemon_root` | path | delightd's own runtime/state tree; canonical `~/var` |
+| `system.backups_root` | path | the backup destination directory itself (no `/backups` appended); defaults to `${daemon_root}/backups`, set to relocate backups independently |
+| `system.config_root` | path | config + registry resolution dir; canonical `~/etc` |
 | `system.daemon.control_port` | int | HTTP control port; canonical `8088` |
 | `system.daemon.pid_file` | path | pid file location |
 | `system.agent_skills.enabled` | bool | enable the skill aggregator + CLI/MCP exposure |
@@ -66,24 +71,34 @@ projects:
 | `projects[].backup.rotation.max_archives` | int | retained `.tgz` count; `<= 0` keeps all |
 | `projects[].backup.exclude` | `[]string` | extra paths/names kept out of the tar |
 
-> Port note. The committed `delight.yaml` and `main.go`'s fallback still use
-> `8080`; a separate config-fix PR corrects both to `8088`. Configure `8088`.
+> Port note. The committed `delight.yaml` and `main.go`'s fallback both resolve
+> to `8088` (`config.DefaultControlPort`); compose and kube agree. Configure
+> `8088`.
 
 ## Environment variables
 
 Two override mechanisms exist, and they are independent.
 
-**1. viper config overrides** — any `delight.yaml` key, prefixed `DELIGHT_` with
-`.` replaced by `_`. The ones in practice:
+**1. viper config overrides** — most `delight.yaml` keys map by prefixing
+`DELIGHT_` and replacing `.` with `_`. The four roots are the exception: each is
+bound explicitly to a short env name (without the `SYSTEM_` segment), so a
+relocated layout can be expressed cleanly and is read even when no config file is
+present:
 
-| Variable | Overrides |
-|----------|-----------|
-| `DELIGHT_SYSTEM_ROOT` | `system.root` (backup root base; set to `~/var`, not `~/var/backups`) |
-| `DELIGHT_SYSTEM_CONFIG_ROOT` | `system.config_root` |
-| `DELIGHT_SYSTEM_DAEMON_CONTROL_PORT` | `system.daemon.control_port` |
-| `DELIGHT_SYSTEM_KAFKA_BROKERS` | `system.kafka.brokers` |
-| `DELIGHT_SYSTEM_KAFKA_SCHEMA_REGISTRY_URL` | `system.kafka.schema_registry_url` |
-| `DELIGHT_SYSTEM_KAFKA_TOPIC` | `system.kafka.topic` |
+| Variable | Overrides | Default |
+|----------|-----------|---------|
+| `DELIGHT_MONITOR_ROOT` | `system.monitor_root` | `~/work` |
+| `DELIGHT_DAEMON_ROOT` | `system.daemon_root` | `~/var` |
+| `DELIGHT_BACKUPS_ROOT` | `system.backups_root` | `${DELIGHT_DAEMON_ROOT}/backups` |
+| `DELIGHT_CONFIG_ROOT` | `system.config_root` | `~/etc` |
+| `DELIGHT_SYSTEM_DAEMON_CONTROL_PORT` | `system.daemon.control_port` | `8088` |
+| `DELIGHT_SYSTEM_KAFKA_BROKERS` | `system.kafka.brokers` | — |
+| `DELIGHT_SYSTEM_KAFKA_SCHEMA_REGISTRY_URL` | `system.kafka.schema_registry_url` | — |
+| `DELIGHT_SYSTEM_KAFKA_TOPIC` | `system.kafka.topic` | — |
+
+`BACKUPS_ROOT` derives from `DAEMON_ROOT` when unset; setting it explicitly
+overrides the derivation (it is the literal destination, never a parent the
+daemon appends `/backups` to).
 
 **2. exports-engine paths** — read directly by `pkg/exports`, not through viper.
 These govern where generated wrappers, shims, and the registry live:
@@ -127,10 +142,13 @@ primary agent's gated step.
 | host `~/var` | `/var` | read-write | the one write surface: backups, `/var/bin`, traefik dynamic |
 
 `/work` is **read-only by contract** — delightd observes git state, it does not
-own the working trees. Backups are routed to the `/var` write mount via
-`DELIGHT_SYSTEM_ROOT` rather than written under `/work`. (The earlier compose set
-`DELIGHT_SYSTEM_ROOT=/work/backups`, which needed `/work` writable; the kube
-contract makes `/work` read-only and points backups at `/var`.)
+own the working trees. The roots map onto the mounts: `DELIGHT_MONITOR_ROOT=/work`
+(read-only git-state source), `DELIGHT_DAEMON_ROOT=/var` and
+`DELIGHT_BACKUPS_ROOT=/var/backups` (the `/var` write surface),
+`DELIGHT_CONFIG_ROOT=/etc/delightd`. Backups land on `/var`, never under the
+read-only `/work`. (An earlier compose set a single `DELIGHT_SYSTEM_ROOT` that
+both overloaded the path and, on `/work/backups`, needed `/work` writable; the
+split roots remove both problems.)
 
 ### Other deployment facts
 

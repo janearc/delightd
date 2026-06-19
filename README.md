@@ -111,9 +111,8 @@ rename are in [docs/api.md](docs/api.md#get-projectsnameintrospect).
 
 ## Control port
 
-The canonical control port is **`:8088`**. (A separate config-fix PR corrects a
-defaulting bug where `delight.yaml` and `main.go` fell back to `8080`; `:8088` is
-the documented port regardless of that fix.)
+The canonical control port is **`:8088`** — `delight.yaml`, `main.go`'s fallback
+(`config.DefaultControlPort`), compose, and kube all agree.
 
 ## Documents
 

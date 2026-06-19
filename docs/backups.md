@@ -21,19 +21,20 @@ delightd under any configuration.
 
 | Path | Contents |
 |------|----------|
-| `~/var/backups` | the backup root: `<root>/backups` where `system.root` is `~/var` |
+| `~/var/backups` | the backups root (`backups_root`): the directory archives are written into |
 | `~/var/backups/<project>/` | one project's archives |
 | `~/var/backups/<project>/<project>-<YYYYMMDD-HHMMSS>.tgz` | one checkpoint |
 
-The backup root is `system.root + "/backups"`. With the canonical
-`system.root: ~/var`, that is **`~/var/backups`**.
+The backups root is `system.backups_root`, used as the literal destination. It
+defaults to `${daemon_root}/backups` — with the canonical `daemon_root: ~/var`
+that is **`~/var/backups`**. Set `backups_root` (or `DELIGHT_BACKUPS_ROOT`)
+explicitly to relocate backups independently of the rest of the state tree.
 
-> Path note. A separate config-fix PR addresses a double-suffix case: when
-> `DELIGHT_SYSTEM_ROOT` is set to a path that already ends in `backups`, the
-> `+ "/backups"` join produced `.../backups/backups`. The canonical, documented
-> path is `~/var/backups`; set `system.root` (or `DELIGHT_SYSTEM_ROOT`) to
-> `~/var`, not to `~/var/backups`. It is never `/var/backups/backups` and never
-> `~/work/backups`.
+> Path note. `backups_root` is the destination directory itself; the daemon never
+> appends a further `/backups`. The path is `~/var/backups`, never
+> `~/var/backups/backups` and never under the read-only `~/work`. (This replaced
+> an earlier overloaded `system.root` whose `+ "/backups"` join could double the
+> segment.)
 
 ## The pipeline
 
@@ -46,7 +47,7 @@ included.
    project's `exclude` list. Directories that match a skip/exclude are pruned
    (the walk does not descend into them).
 2. **Compress** — stream each surviving regular file into a gzipped tar. The
-   archive path is `<root>/backups/<project>/<project>-<timestamp>.tgz`.
+   archive path is `<backups_root>/<project>/<project>-<timestamp>.tgz`.
 3. **Account** — `bytes_before` is the sum of included regular-file sizes
    (pre-compression); `bytes_after` is the written `.tgz` size. Both feed the
    `delight.v1.BackupEvent` ([events.md](events.md)).
