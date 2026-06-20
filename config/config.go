@@ -169,9 +169,18 @@ type DelightConfig struct {
 	LoadWarnings []string `mapstructure:"-" json:"load_warnings,omitempty"`
 }
 
-// markDegraded records that the daemon is coming up with incomplete config and why.
-func (c *DelightConfig) markDegraded(reason string) {
+// markDegraded records that the daemon is coming up with incomplete config and
+// why. When an underlying error is present it is handed to the structured logger
+// as the error object (not flattened with %v) so its full detail survives into the
+// log/telemetry; LoadWarnings keeps a string form for the /health response. err may
+// be nil for a synthetic reason (e.g. a rejected project entry).
+func (c *DelightConfig) markDegraded(reason string, err error) {
 	c.Degraded = true
+	if err != nil {
+		c.LoadWarnings = append(c.LoadWarnings, fmt.Sprintf("%s: %v", reason, err))
+		slog.Error("delightd config degraded", "reason", reason, "error", err)
+		return
+	}
 	c.LoadWarnings = append(c.LoadWarnings, reason)
 	slog.Error("delightd config degraded", "reason", reason)
 }
@@ -187,11 +196,11 @@ func (c *DelightConfig) validateProjects() []ProjectConfig {
 	for i, p := range c.Projects {
 		switch {
 		case strings.TrimSpace(p.Name) == "":
-			c.markDegraded(fmt.Sprintf("project[%d] dropped: empty name (path %q)", i, p.Path))
+			c.markDegraded(fmt.Sprintf("project[%d] dropped: empty name (path %q)", i, p.Path), nil)
 		case strings.TrimSpace(p.Path) == "":
-			c.markDegraded(fmt.Sprintf("project %q dropped: empty path", p.Name))
+			c.markDegraded(fmt.Sprintf("project %q dropped: empty path", p.Name), nil)
 		case seen[p.Name]:
-			c.markDegraded(fmt.Sprintf("project %q dropped: duplicate name", p.Name))
+			c.markDegraded(fmt.Sprintf("project %q dropped: duplicate name", p.Name), nil)
 		default:
 			seen[p.Name] = true
 			valid = append(valid, p)
@@ -239,19 +248,22 @@ func Load(ctx context.Context) (*DelightConfig, error) {
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			slog.Warn("no config file found, falling back to environment variables and defaults")
+			// Not degraded -- running on env + defaults is a supported mode -- but
+			// surface the error: it can explain which paths were searched or why the
+			// lookup failed.
+			slog.Warn("no config file found, falling back to environment variables and defaults", "error", err)
 		} else {
 			// A malformed config file must not take the control plane down. Come up
 			// degraded -- env + defaults, whatever projects we can still read -- and
 			// make the failure loud and queryable (cfg.Degraded, /health) instead of
 			// returning an error that aborts startup.
-			cfg.markDegraded(fmt.Sprintf("config parse failed: %v", err))
+			cfg.markDegraded("config parse failed", err)
 		}
 	}
 
 	if err := viper.Unmarshal(&cfg); err != nil {
 		// Same posture for a shape mismatch: degrade, do not abort.
-		cfg.markDegraded(fmt.Sprintf("config unmarshal failed: %v", err))
+		cfg.markDegraded("config unmarshal failed", err)
 	}
 
 	// Reject obviously-unusable project entries before any consumer sees them. The
