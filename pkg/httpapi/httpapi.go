@@ -51,6 +51,11 @@ type healthResponse struct {
 	Status         string `json:"status"`
 	ActiveProjects int    `json:"active_projects"`
 	DryRun         bool   `json:"dry_run"`
+	// Degraded is true when the daemon came up but could not fully read its config
+	// (a bad config file or rejected project entries); Warnings explains why. This
+	// makes a fail-open startup visible instead of silent.
+	Degraded bool     `json:"degraded"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // discoveryResponse is the GET /discovery/llms body.
@@ -115,10 +120,16 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	status := "ok"
+	if s.cfg.Degraded {
+		status = "degraded"
+	}
 	writeJSON(w, http.StatusOK, healthResponse{
-		Status:         "ok",
+		Status:         status,
 		ActiveProjects: len(s.cfg.Projects),
 		DryRun:         s.dryRun,
+		Degraded:       s.cfg.Degraded,
+		Warnings:       s.cfg.LoadWarnings,
 	})
 }
 

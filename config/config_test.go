@@ -240,3 +240,87 @@ projects:
 		t.Errorf("expected 1 project named test-proj")
 	}
 }
+
+// loadFromYAML writes the given delight.yaml into a temp dir and loads it the way
+// the daemon does (config discovered on the working dir; HOME pointed away so the
+// real ~/etc/delightd is never consulted). It mirrors the existing config tests.
+func loadFromYAML(t *testing.T, yamlContent string) *DelightConfig {
+	t.Helper()
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "delight.yaml"), []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("write mock config: %v", err)
+	}
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origWD) })
+	t.Setenv("HOME", filepath.Join(tmpDir, "nonexistent"))
+	viper.Reset()
+
+	cfg, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned an error (it should degrade, not fail): %v", err)
+	}
+	return cfg
+}
+
+// TestLoadDropsInvalidProjects: obviously-unusable entries (no name, no path,
+// duplicate name) are rejected at load with the daemon marked degraded, while the
+// valid projects survive. This is the odysseus-class fix: a bad entry no longer
+// poisons the set.
+func TestLoadDropsInvalidProjects(t *testing.T) {
+	cfg := loadFromYAML(t, `
+system:
+  monitor_root: "/tmp/work"
+projects:
+  - name: "good"
+    path: "/tmp/work/good"
+  - name: ""
+    path: "/tmp/work/noname"
+  - name: "nopath"
+    path: ""
+  - name: "good"
+    path: "/tmp/work/dup"
+`)
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "good" {
+		t.Fatalf("expected only the valid 'good' project, got %+v", cfg.Projects)
+	}
+	if !cfg.Degraded {
+		t.Error("expected Degraded=true after dropping invalid entries")
+	}
+	if len(cfg.LoadWarnings) != 3 {
+		t.Errorf("expected 3 load warnings (noname, nopath, duplicate), got %d: %v", len(cfg.LoadWarnings), cfg.LoadWarnings)
+	}
+}
+
+// TestLoadDegradesOnParseError: a syntactically broken delight.yaml must not abort
+// startup. Load returns a usable (empty, degraded) config instead of an error --
+// the availability mandate: come up in any condition.
+func TestLoadDegradesOnParseError(t *testing.T) {
+	cfg := loadFromYAML(t, "projects:\n  - name: \"broken\"\n    path: [unterminated\n")
+	if !cfg.Degraded {
+		t.Error("expected Degraded=true on a parse error")
+	}
+	if len(cfg.Projects) != 0 {
+		t.Errorf("expected no projects from an unparseable file, got %d", len(cfg.Projects))
+	}
+	if len(cfg.LoadWarnings) == 0 {
+		t.Error("expected a load warning explaining the parse failure")
+	}
+}
+
+// TestLoadCleanConfigIsNotDegraded: the happy path stays clean -- no false degraded.
+func TestLoadCleanConfigIsNotDegraded(t *testing.T) {
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "alpha"
+    path: "/tmp/work/alpha"
+`)
+	if cfg.Degraded {
+		t.Errorf("clean config should not be degraded, warnings=%v", cfg.LoadWarnings)
+	}
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(cfg.Projects))
+	}
+}
