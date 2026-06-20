@@ -62,6 +62,16 @@ spec:
               value: "/var/backups"
             - name: DELIGHT_CONFIG_ROOT
               value: "/etc/delightd"
+            # The host's ~/etc/delightd is bind-mounted directly at /etc/delightd
+            # here, so the config dir IS the config root -- a non-standard layout
+            # vs the on-host ~/etc (where config lives one level down in
+            # delightd/). delightd derives the drop-in dir as
+            # <ConfigRoot>/delightd/projects.d, which under this mount would
+            # double to /etc/delightd/delightd/projects.d and find nothing. Pin
+            # the projects.d path explicitly (the override the config code
+            # provides for exactly this case) so the fragments are read.
+            - name: DELIGHT_PROJECTS_DIR
+              value: "/etc/delightd/projects.d"
             - name: DELIGHT_EXPORTS_REGISTRY
               value: "/etc/delightd/delight-registry.yaml"
             - name: DELIGHT_EXPORTS_BIN
