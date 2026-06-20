@@ -324,3 +324,125 @@ projects:
 		t.Fatalf("expected 1 project, got %d", len(cfg.Projects))
 	}
 }
+
+// TestLoadMergesFragments: drop-in fragments under projects.d are merged with the
+// inline projects list, and a malformed fragment is skipped (degraded), not fatal.
+func TestLoadMergesFragments(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "projects.d")
+	if err := os.MkdirAll(pd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pd, "taco.yaml"), []byte("name: taco\npath: /work/taco\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// a broken fragment must not abort the load; it is skipped with a warning.
+	if err := os.WriteFile(filepath.Join(pd, "broken.yaml"), []byte("name: x\npath: [bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DELIGHT_PROJECTS_DIR", pd)
+
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "inline"
+    path: "/work/inline"
+`)
+	names := map[string]bool{}
+	for _, p := range cfg.Projects {
+		names[p.Name] = true
+	}
+	if !names["inline"] || !names["taco"] {
+		t.Fatalf("expected both inline and taco projects, got %v", names)
+	}
+	if !cfg.Degraded {
+		t.Error("expected Degraded=true after skipping the broken fragment")
+	}
+}
+
+// TestLoadFragmentDedupesAgainstInline: a fragment that repeats an inline project
+// name is dropped by validateProjects (inline wins), and the daemon degrades.
+func TestLoadFragmentDedupesAgainstInline(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "projects.d")
+	os.MkdirAll(pd, 0o755)
+	os.WriteFile(filepath.Join(pd, "dup.yaml"), []byte("name: shared\npath: /work/from-fragment\n"), 0o644)
+	t.Setenv("DELIGHT_PROJECTS_DIR", pd)
+
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "shared"
+    path: "/work/from-inline"
+`)
+	count := 0
+	for _, p := range cfg.Projects {
+		if p.Name == "shared" {
+			count++
+			if p.Path != "/work/from-inline" {
+				t.Errorf("inline should win on dedup, got path %q", p.Path)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one 'shared' project after dedup, got %d", count)
+	}
+}
+
+func TestLintFragmentValid(t *testing.T) {
+	dir := t.TempDir()
+	// point at a real git repo (this checkout) so the git-repo check stays quiet
+	wd, _ := os.Getwd()
+	repo := filepath.Dir(wd) // .../delightd (config's parent)
+	frag := filepath.Join(dir, "ok.yaml")
+	os.WriteFile(frag, []byte("name: taco\npath: "+repo+"\n"), 0o644)
+
+	res := LintFragment(frag)
+	if !res.Valid {
+		t.Fatalf("expected valid, got errors %v", res.Errors)
+	}
+	if res.Project == nil || res.Project.Name != "taco" {
+		t.Errorf("expected parsed project taco, got %+v", res.Project)
+	}
+}
+
+func TestLintFragmentStructuralError(t *testing.T) {
+	dir := t.TempDir()
+	frag := filepath.Join(dir, "bad.yaml")
+	os.WriteFile(frag, []byte("name: \"\"\npath: \"\"\n"), 0o644)
+
+	res := LintFragment(frag)
+	if res.Valid {
+		t.Fatal("expected invalid for empty name and path")
+	}
+	if len(res.Errors) != 2 {
+		t.Errorf("expected 2 errors (empty name, empty path), got %v", res.Errors)
+	}
+}
+
+func TestLintFragmentMalformed(t *testing.T) {
+	dir := t.TempDir()
+	frag := filepath.Join(dir, "broken.yaml")
+	os.WriteFile(frag, []byte("name: taco\npath: [unterminated\n"), 0o644)
+
+	res := LintFragment(frag)
+	if res.Valid {
+		t.Fatal("expected invalid for malformed YAML")
+	}
+	if len(res.Errors) == 0 {
+		t.Error("expected a parse error")
+	}
+}
+
+// a non-existent path is a warning, not an error -- it may be a container path.
+func TestLintFragmentPathWarningNotError(t *testing.T) {
+	dir := t.TempDir()
+	frag := filepath.Join(dir, "frag.yaml")
+	os.WriteFile(frag, []byte("name: taco\npath: /work/taco\n"), 0o644)
+
+	res := LintFragment(frag)
+	if !res.Valid {
+		t.Errorf("a missing path should not invalidate the fragment, got errors %v", res.Errors)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("expected a warning about the missing path")
+	}
+}

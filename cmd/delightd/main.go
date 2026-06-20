@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -50,6 +51,19 @@ func publishBackupEvent(ctx context.Context, pub *events.Publisher, project stri
 }
 
 func main() {
+	// Subcommands run and exit before the daemon's flag parsing. A leading "-" is a
+	// daemon flag, not a subcommand, so the daemon path is unaffected. Today: `lint`
+	// (`register`/`unregister` are the Phase 3 follow-up to issue #19).
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		switch os.Args[1] {
+		case "lint":
+			os.Exit(runLint(os.Args[2:]))
+		default:
+			fmt.Fprintf(os.Stderr, "delightd: unknown subcommand %q\n", os.Args[1])
+			os.Exit(2)
+		}
+	}
+
 	dryRun := flag.Bool("dry-run", false, "execute without writing checkpoints to disk")
 	immediate := flag.Bool("immediate", false, "execute an immediate evaluation on startup without waiting for the first interval tick")
 	flag.Parse()
