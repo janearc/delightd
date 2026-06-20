@@ -159,6 +159,45 @@ type ProjectConfig struct {
 type DelightConfig struct {
 	System   SystemConfig    `mapstructure:"system"`
 	Projects []ProjectConfig `mapstructure:"projects"`
+
+	// Degraded is set when Load could not fully read its configuration but chose to
+	// come up anyway rather than fail closed -- the availability mandate is that
+	// delightd starts in any condition. LoadWarnings carries the human-readable
+	// reasons (surfaced on /health). Both are derived at load time, never read from
+	// config, so the unmarshaler ignores them.
+	Degraded     bool     `mapstructure:"-" json:"degraded"`
+	LoadWarnings []string `mapstructure:"-" json:"load_warnings,omitempty"`
+}
+
+// markDegraded records that the daemon is coming up with incomplete config and why.
+func (c *DelightConfig) markDegraded(reason string) {
+	c.Degraded = true
+	c.LoadWarnings = append(c.LoadWarnings, reason)
+	slog.Error("delightd config degraded", "reason", reason)
+}
+
+// validateProjects drops entries that are obviously unusable so a single bad entry
+// cannot break the daemon or confuse downstream consumers. A project with no name
+// or no path, or a duplicate name, is rejected here with a warning. A path that
+// merely does not exist is NOT dropped: gitstate reports that as missing_path at
+// sweep time, which is the right place to surface a transient/unmounted tree.
+func (c *DelightConfig) validateProjects() []ProjectConfig {
+	seen := make(map[string]bool, len(c.Projects))
+	valid := make([]ProjectConfig, 0, len(c.Projects))
+	for i, p := range c.Projects {
+		switch {
+		case strings.TrimSpace(p.Name) == "":
+			c.markDegraded(fmt.Sprintf("project[%d] dropped: empty name (path %q)", i, p.Path))
+		case strings.TrimSpace(p.Path) == "":
+			c.markDegraded(fmt.Sprintf("project %q dropped: empty path", p.Name))
+		case seen[p.Name]:
+			c.markDegraded(fmt.Sprintf("project %q dropped: duplicate name", p.Name))
+		default:
+			seen[p.Name] = true
+			valid = append(valid, p)
+		}
+	}
+	return valid
 }
 
 // Load initializes Viper, reads the configuration agnosticly, and unmarshals it.
@@ -196,17 +235,28 @@ func Load(ctx context.Context) (*DelightConfig, error) {
 		}
 	}
 
+	var cfg DelightConfig
+
 	if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, fmt.Errorf("failed to read config file: %w", err)
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			slog.Warn("no config file found, falling back to environment variables and defaults")
+		} else {
+			// A malformed config file must not take the control plane down. Come up
+			// degraded -- env + defaults, whatever projects we can still read -- and
+			// make the failure loud and queryable (cfg.Degraded, /health) instead of
+			// returning an error that aborts startup.
+			cfg.markDegraded(fmt.Sprintf("config parse failed: %v", err))
 		}
-		slog.Warn("no config file found, falling back to environment variables and defaults")
 	}
 
-	var cfg DelightConfig
 	if err := viper.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal configuration: %w", err)
+		// Same posture for a shape mismatch: degrade, do not abort.
+		cfg.markDegraded(fmt.Sprintf("config unmarshal failed: %v", err))
 	}
+
+	// Reject obviously-unusable project entries before any consumer sees them. The
+	// returned type is unchanged, so gitstate/httpapi/backup are untouched.
+	cfg.Projects = cfg.validateProjects()
 
 	// Apply defaults, derive BackupsRoot from DaemonRoot when unset, and expand
 	// ~ so consumers receive absolute paths.
