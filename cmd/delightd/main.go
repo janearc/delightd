@@ -2,17 +2,16 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"delightd/config"
@@ -51,27 +50,38 @@ func publishBackupEvent(ctx context.Context, pub *events.Publisher, project stri
 }
 
 func main() {
-	// Subcommands run and exit before the daemon's flag parsing. A leading "-" is a
-	// daemon flag, not a subcommand, so the daemon path is unaffected. Today: `lint`
-	// (`register`/`unregister` are the Phase 3 follow-up to issue #19).
-	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
-		switch os.Args[1] {
-		case "lint":
-			os.Exit(runLint(os.Args[2:]))
-		default:
-			fmt.Fprintf(os.Stderr, "delightd: unknown subcommand %q\n", os.Args[1])
-			os.Exit(2)
-		}
+	if err := rootCmd().Execute(); err != nil {
+		os.Exit(1)
 	}
+}
 
-	dryRun := flag.Bool("dry-run", false, "execute without writing checkpoints to disk")
-	immediate := flag.Bool("immediate", false, "execute an immediate evaluation on startup without waiting for the first interval tick")
-	flag.Parse()
+// rootCmd is the delightd command tree. The daemon is the default action; cobra
+// keeps subcommand and flag parsing declarative instead of hand-rolled. `lint` is
+// the first subcommand (`register`/`unregister` are the Phase 3 follow-up to #19).
+func rootCmd() *cobra.Command {
+	var dryRun, immediate bool
+	cmd := &cobra.Command{
+		Use:          "delightd",
+		Short:        "delightd -- the fleet control-plane daemon",
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runDaemon(dryRun, immediate)
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "execute without writing checkpoints to disk")
+	cmd.Flags().BoolVar(&immediate, "immediate", false, "execute an immediate evaluation on startup without waiting for the first interval tick")
+	cmd.AddCommand(lintCmd())
+	return cmd
+}
 
+// runDaemon is the long-running control plane: load config, build the per-project
+// state machines, start the sync/discovery/backup loops and the control port, and
+// block until a termination signal.
+func runDaemon(dryRun, immediate bool) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	if *dryRun {
+	if dryRun {
 		slog.Warn("DAEMON STARTED IN DRY RUN MODE - NO DESTRUCTIVE DISK WRITES WILL OCCUR")
 	}
 
@@ -80,8 +90,7 @@ func main() {
 
 	cfg, err := config.Load(ctx)
 	if err != nil {
-		slog.Error("failed to load configuration", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
 	// machines is built once here and only read afterwards (control loop and
@@ -104,7 +113,7 @@ func main() {
 		knownProjects = append(knownProjects, proj.Name)
 	}
 
-	if err := exportEngine.Sync(ctx, knownProjects, *dryRun); err != nil {
+	if err := exportEngine.Sync(ctx, knownProjects, dryRun); err != nil {
 		slog.Error("initial export sync failed", "error", err)
 	}
 
@@ -120,7 +129,7 @@ func main() {
 
 		// Handle CLI Generation
 		for _, method := range cfg.System.AgentSkills.ExposeVia {
-			if method == "cli" && !*dryRun {
+			if method == "cli" && !dryRun {
 				varBinDir := os.Getenv("DELIGHT_EXPORTS_BIN")
 				if varBinDir == "" {
 					home, _ := os.UserHomeDir()
@@ -147,7 +156,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				exportEngine.Sync(ctx, knownProjects, *dryRun)
+				exportEngine.Sync(ctx, knownProjects, dryRun)
 				syncSkills()
 			}
 		}
@@ -193,7 +202,7 @@ func main() {
 
 	for _, proj := range cfg.Projects {
 		go func(p config.ProjectConfig) {
-			if *immediate {
+			if immediate {
 				slog.Info("executing immediate startup evaluation", "project", p.Name)
 				machine := machines[p.Name]
 
@@ -257,7 +266,7 @@ func main() {
 						// compose+kube, both resolving to ~/var/backups on the host).
 						// CreateCheckpoint writes archives here directly -- no "/backups"
 						// is appended, which previously doubled the segment.
-						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.BackupsRoot, p.Backup.Rotation.MaxArchives, p.Backup.Exclude, *dryRun)
+						res, err := backup.CreateCheckpoint(ctx, p.Name, p.Path, cfg.System.BackupsRoot, p.Backup.Rotation.MaxArchives, p.Backup.Exclude, dryRun)
 						if err != nil {
 							metrics.Inc(fmt.Sprintf(`delightd_backup_failures_total{project="%s"}`, p.Name))
 							slog.Error("backup pipeline failed", "project", p.Name, "error", err)
@@ -282,7 +291,7 @@ func main() {
 
 	// The control-port HTTP surface lives in pkg/httpapi so handlers are
 	// unit-testable; main retains only wiring and the daemon control loop.
-	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, *dryRun)
+	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, dryRun)
 	mux := api.Mux()
 
 	// Resolve to the canonical control port (config.DefaultControlPort = 8088) when
@@ -321,4 +330,5 @@ func main() {
 	}
 
 	slog.Info("shutdown complete")
+	return nil
 }
