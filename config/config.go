@@ -138,22 +138,22 @@ type AgentSkillsConfig struct {
 }
 
 type BackupRotationConfig struct {
-	MaxArchives int `mapstructure:"max_archives"`
+	MaxArchives int `mapstructure:"max_archives" json:"max_archives"`
 }
 
 type BackupConfig struct {
-	CheckInterval string               `mapstructure:"check_interval"`
-	Rotation      BackupRotationConfig `mapstructure:"rotation"`
+	CheckInterval string               `mapstructure:"check_interval" json:"check_interval"`
+	Rotation      BackupRotationConfig `mapstructure:"rotation" json:"rotation"`
 	// Exclude lists project-relative paths kept out of the checkpoint, on top of
 	// the built-in skips. This is how large, regenerable trees (e.g. model
 	// weights) are excluded from a project's backups.
-	Exclude []string `mapstructure:"exclude"`
+	Exclude []string `mapstructure:"exclude" json:"exclude,omitempty"`
 }
 
 type ProjectConfig struct {
-	Name   string       `mapstructure:"name"`
-	Path   string       `mapstructure:"path"`
-	Backup BackupConfig `mapstructure:"backup"`
+	Name   string       `mapstructure:"name" json:"name"`
+	Path   string       `mapstructure:"path" json:"path"`
+	Backup BackupConfig `mapstructure:"backup" json:"backup"`
 }
 
 type DelightConfig struct {
@@ -185,26 +185,51 @@ func (c *DelightConfig) markDegraded(reason string, err error) {
 	slog.Error("delightd config degraded", "reason", reason)
 }
 
+// projectStructuralErrors returns the reasons a project entry is unusable
+// regardless of environment (empty required fields). An empty result means the
+// entry is structurally sound; it says nothing about whether the path currently
+// exists -- that is gitstate's missing_path concern at sweep time. Shared by
+// validateProjects (load-time) and LintFragment (pre-flight).
+func projectStructuralErrors(p ProjectConfig) []string {
+	var errs []string
+	if strings.TrimSpace(p.Name) == "" {
+		errs = append(errs, "empty name")
+	}
+	if strings.TrimSpace(p.Path) == "" {
+		errs = append(errs, "empty path")
+	}
+	return errs
+}
+
+// ProjectsDir is the drop-in directory for per-project config fragments,
+// <ConfigRoot>/delightd/projects.d. DELIGHT_PROJECTS_DIR overrides it (useful for
+// tests and non-standard layouts). ConfigRoot must already be resolved.
+func (c *DelightConfig) ProjectsDir() string {
+	if d := os.Getenv("DELIGHT_PROJECTS_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(c.System.ConfigRoot, "delightd", "projects.d")
+}
+
 // validateProjects drops entries that are obviously unusable so a single bad entry
-// cannot break the daemon or confuse downstream consumers. A project with no name
-// or no path, or a duplicate name, is rejected here with a warning. A path that
-// merely does not exist is NOT dropped: gitstate reports that as missing_path at
-// sweep time, which is the right place to surface a transient/unmounted tree.
+// cannot break the daemon or confuse downstream consumers, and de-duplicates by
+// name across the inline list and the drop-in fragments. A path that merely does
+// not exist is NOT dropped: gitstate reports that as missing_path at sweep time,
+// which is the right place to surface a transient/unmounted tree.
 func (c *DelightConfig) validateProjects() []ProjectConfig {
 	seen := make(map[string]bool, len(c.Projects))
 	valid := make([]ProjectConfig, 0, len(c.Projects))
 	for i, p := range c.Projects {
-		switch {
-		case strings.TrimSpace(p.Name) == "":
-			c.markDegraded(fmt.Sprintf("project[%d] dropped: empty name (path %q)", i, p.Path), nil)
-		case strings.TrimSpace(p.Path) == "":
-			c.markDegraded(fmt.Sprintf("project %q dropped: empty path", p.Name), nil)
-		case seen[p.Name]:
-			c.markDegraded(fmt.Sprintf("project %q dropped: duplicate name", p.Name), nil)
-		default:
-			seen[p.Name] = true
-			valid = append(valid, p)
+		if errs := projectStructuralErrors(p); len(errs) > 0 {
+			c.markDegraded(fmt.Sprintf("project[%d] (%q) dropped: %s", i, p.Name, strings.Join(errs, ", ")), nil)
+			continue
 		}
+		if seen[p.Name] {
+			c.markDegraded(fmt.Sprintf("project %q dropped: duplicate name", p.Name), nil)
+			continue
+		}
+		seen[p.Name] = true
+		valid = append(valid, p)
 	}
 	return valid
 }
@@ -266,13 +291,26 @@ func Load(ctx context.Context) (*DelightConfig, error) {
 		cfg.markDegraded("config unmarshal failed", err)
 	}
 
-	// Reject obviously-unusable project entries before any consumer sees them. The
-	// returned type is unchanged, so gitstate/httpapi/backup are untouched.
-	cfg.Projects = cfg.validateProjects()
-
-	// Apply defaults, derive BackupsRoot from DaemonRoot when unset, and expand
-	// ~ so consumers receive absolute paths.
+	// Apply defaults, derive BackupsRoot from DaemonRoot when unset, and expand ~.
+	// Done before reading fragments because the drop-in directory hangs off the
+	// resolved ConfigRoot.
 	cfg.System.ResolveRoots()
+
+	// Merge drop-in project fragments from <ConfigRoot>/delightd/projects.d. Each
+	// fragment is one project in its own file; a malformed or unreadable fragment is
+	// skipped (degraded), never fatal -- the blast radius of a bad fragment is that
+	// one project, not the daemon. The inline `projects:` list still works as a
+	// fallback during the transition.
+	fragProjects, fragWarnings := LoadProjectFragments(cfg.ProjectsDir())
+	cfg.Projects = append(cfg.Projects, fragProjects...)
+	for _, w := range fragWarnings {
+		cfg.markDegraded(w, nil)
+	}
+
+	// Reject obviously-unusable entries and de-dup across inline + fragments before
+	// any consumer sees them. The returned type is unchanged, so
+	// gitstate/httpapi/backup are untouched.
+	cfg.Projects = cfg.validateProjects()
 
 	return &cfg, nil
 }
