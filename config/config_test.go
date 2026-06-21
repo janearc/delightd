@@ -156,6 +156,28 @@ func TestDefaultConfigControlPort(t *testing.T) {
 	}
 }
 
+// TestShippedConfigEnablesAgentSkills verifies the shipped delight.yaml actually
+// turns the skill generator on. The feature is fully implemented and tested, but
+// when agent_skills is absent from the config it defaults off, and the daemon
+// skips generation: the ~/var/bin/delight wrapper is never written and POST /mcp
+// is never registered. That is precisely the regression that shipped once -- the
+// claim ("delightd generates skills") and the behaviour drifted -- so guard it.
+func TestShippedConfigEnablesAgentSkills(t *testing.T) {
+	cfg := loadShippedConfig(t)
+	if !cfg.System.AgentSkills.Enabled {
+		t.Fatal("shipped delight.yaml must enable agent_skills; with it off the daemon never generates the CLI wrapper or registers /mcp")
+	}
+	got := map[string]bool{}
+	for _, m := range cfg.System.AgentSkills.ExposeVia {
+		got[m] = true
+	}
+	for _, want := range []string{"cli", "mcp"} {
+		if !got[want] {
+			t.Errorf("shipped agent_skills.expose_via should include %q, got %v", want, cfg.System.AgentSkills.ExposeVia)
+		}
+	}
+}
+
 // loadShippedConfig loads the repo's delight.yaml (one dir up from config/) so the
 // committed defaults are asserted against, not a synthetic fixture.
 func loadShippedConfig(t *testing.T) *DelightConfig {
@@ -238,5 +260,211 @@ projects:
 
 	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "test-proj" {
 		t.Errorf("expected 1 project named test-proj")
+	}
+}
+
+// loadFromYAML writes the given delight.yaml into a temp dir and loads it the way
+// the daemon does (config discovered on the working dir; HOME pointed away so the
+// real ~/etc/delightd is never consulted). It mirrors the existing config tests.
+func loadFromYAML(t *testing.T, yamlContent string) *DelightConfig {
+	t.Helper()
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "delight.yaml"), []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("write mock config: %v", err)
+	}
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origWD) })
+	t.Setenv("HOME", filepath.Join(tmpDir, "nonexistent"))
+	viper.Reset()
+
+	cfg, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned an error (it should degrade, not fail): %v", err)
+	}
+	return cfg
+}
+
+// TestLoadDropsInvalidProjects: obviously-unusable entries (no name, no path,
+// duplicate name) are rejected at load with the daemon marked degraded, while the
+// valid projects survive. This is the odysseus-class fix: a bad entry no longer
+// poisons the set.
+func TestLoadDropsInvalidProjects(t *testing.T) {
+	cfg := loadFromYAML(t, `
+system:
+  monitor_root: "/tmp/work"
+projects:
+  - name: "good"
+    path: "/tmp/work/good"
+  - name: ""
+    path: "/tmp/work/noname"
+  - name: "nopath"
+    path: ""
+  - name: "good"
+    path: "/tmp/work/dup"
+`)
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "good" {
+		t.Fatalf("expected only the valid 'good' project, got %+v", cfg.Projects)
+	}
+	if !cfg.Degraded {
+		t.Error("expected Degraded=true after dropping invalid entries")
+	}
+	if len(cfg.LoadWarnings) != 3 {
+		t.Errorf("expected 3 load warnings (noname, nopath, duplicate), got %d: %v", len(cfg.LoadWarnings), cfg.LoadWarnings)
+	}
+}
+
+// TestLoadDegradesOnParseError: a syntactically broken delight.yaml must not abort
+// startup. Load returns a usable (empty, degraded) config instead of an error --
+// the availability mandate: come up in any condition.
+func TestLoadDegradesOnParseError(t *testing.T) {
+	cfg := loadFromYAML(t, "projects:\n  - name: \"broken\"\n    path: [unterminated\n")
+	if !cfg.Degraded {
+		t.Error("expected Degraded=true on a parse error")
+	}
+	if len(cfg.Projects) != 0 {
+		t.Errorf("expected no projects from an unparseable file, got %d", len(cfg.Projects))
+	}
+	if len(cfg.LoadWarnings) == 0 {
+		t.Error("expected a load warning explaining the parse failure")
+	}
+}
+
+// TestLoadCleanConfigIsNotDegraded: the happy path stays clean -- no false degraded.
+func TestLoadCleanConfigIsNotDegraded(t *testing.T) {
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "alpha"
+    path: "/tmp/work/alpha"
+`)
+	if cfg.Degraded {
+		t.Errorf("clean config should not be degraded, warnings=%v", cfg.LoadWarnings)
+	}
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(cfg.Projects))
+	}
+}
+
+// TestLoadMergesFragments: drop-in fragments under projects.d are merged with the
+// inline projects list, and a malformed fragment is skipped (degraded), not fatal.
+func TestLoadMergesFragments(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "projects.d")
+	if err := os.MkdirAll(pd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pd, "taco.yaml"), []byte("name: taco\npath: /work/taco\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// a broken fragment must not abort the load; it is skipped with a warning.
+	if err := os.WriteFile(filepath.Join(pd, "broken.yaml"), []byte("name: x\npath: [bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DELIGHT_PROJECTS_DIR", pd)
+
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "inline"
+    path: "/work/inline"
+`)
+	names := map[string]bool{}
+	for _, p := range cfg.Projects {
+		names[p.Name] = true
+	}
+	if !names["inline"] || !names["taco"] {
+		t.Fatalf("expected both inline and taco projects, got %v", names)
+	}
+	if !cfg.Degraded {
+		t.Error("expected Degraded=true after skipping the broken fragment")
+	}
+}
+
+// TestLoadFragmentDedupesAgainstInline: a fragment that repeats an inline project
+// name is dropped by validateProjects (inline wins), and the daemon degrades.
+func TestLoadFragmentDedupesAgainstInline(t *testing.T) {
+	dir := t.TempDir()
+	pd := filepath.Join(dir, "projects.d")
+	os.MkdirAll(pd, 0o755)
+	os.WriteFile(filepath.Join(pd, "dup.yaml"), []byte("name: shared\npath: /work/from-fragment\n"), 0o644)
+	t.Setenv("DELIGHT_PROJECTS_DIR", pd)
+
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "shared"
+    path: "/work/from-inline"
+`)
+	count := 0
+	for _, p := range cfg.Projects {
+		if p.Name == "shared" {
+			count++
+			if p.Path != "/work/from-inline" {
+				t.Errorf("inline should win on dedup, got path %q", p.Path)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one 'shared' project after dedup, got %d", count)
+	}
+}
+
+func TestLintFragmentValid(t *testing.T) {
+	dir := t.TempDir()
+	// point at a real git repo (this checkout) so the git-repo check stays quiet
+	wd, _ := os.Getwd()
+	repo := filepath.Dir(wd) // .../delightd (config's parent)
+	frag := filepath.Join(dir, "ok.yaml")
+	os.WriteFile(frag, []byte("name: taco\npath: "+repo+"\n"), 0o644)
+
+	res := LintFragment(frag)
+	if !res.Valid {
+		t.Fatalf("expected valid, got errors %v", res.Errors)
+	}
+	if res.Project == nil || res.Project.Name != "taco" {
+		t.Errorf("expected parsed project taco, got %+v", res.Project)
+	}
+}
+
+func TestLintFragmentStructuralError(t *testing.T) {
+	dir := t.TempDir()
+	frag := filepath.Join(dir, "bad.yaml")
+	os.WriteFile(frag, []byte("name: \"\"\npath: \"\"\n"), 0o644)
+
+	res := LintFragment(frag)
+	if res.Valid {
+		t.Fatal("expected invalid for empty name and path")
+	}
+	if len(res.Errors) != 2 {
+		t.Errorf("expected 2 errors (empty name, empty path), got %v", res.Errors)
+	}
+}
+
+func TestLintFragmentMalformed(t *testing.T) {
+	dir := t.TempDir()
+	frag := filepath.Join(dir, "broken.yaml")
+	os.WriteFile(frag, []byte("name: taco\npath: [unterminated\n"), 0o644)
+
+	res := LintFragment(frag)
+	if res.Valid {
+		t.Fatal("expected invalid for malformed YAML")
+	}
+	if len(res.Errors) == 0 {
+		t.Error("expected a parse error")
+	}
+}
+
+// a non-existent path is a warning, not an error -- it may be a container path.
+func TestLintFragmentPathWarningNotError(t *testing.T) {
+	dir := t.TempDir()
+	frag := filepath.Join(dir, "frag.yaml")
+	os.WriteFile(frag, []byte("name: taco\npath: /work/taco\n"), 0o644)
+
+	res := LintFragment(frag)
+	if !res.Valid {
+		t.Errorf("a missing path should not invalidate the fragment, got errors %v", res.Errors)
+	}
+	if len(res.Warnings) == 0 {
+		t.Error("expected a warning about the missing path")
 	}
 }

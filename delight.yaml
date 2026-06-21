@@ -25,6 +25,16 @@ system:
     control_port: 8088
     pid_file: "~/var/run/delightd.pid"
 
+  # Agent skills. delightd aggregates each managed project's mcp.json into one
+  # agent surface and regenerates it on a timer. Enabled, it exposes those tools
+  # two ways: a CLI router written to ~/var/bin/delight, and an MCP endpoint at
+  # POST /mcp. Left unset the daemon skips generation entirely -- the wrapper is
+  # never written and /mcp stays unregistered -- so this must be set for the
+  # skills to exist at all.
+  agent_skills:
+    enabled: true
+    expose_via: ["cli", "mcp"]
+
 projects:
   - name: "paling"
     path: "~/work/paling"
