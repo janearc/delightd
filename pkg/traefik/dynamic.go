@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"gopkg.in/yaml.v3"
 	"delightd/pkg/discovery"
+	"gopkg.in/yaml.v3"
 )
 
 // DynamicConfig represents the Traefik dynamic file configuration structure
@@ -58,12 +58,12 @@ func SyncLLMRoutes(sources []discovery.ModelSource) error {
 		if !source.Healthy || len(source.Models) == 0 {
 			continue
 		}
-		
+
 		hasActive = true
 
 		// Create a sanitized name for the service based on provider and port
 		serviceName := fmt.Sprintf("llm-%s-%d", source.Provider, idx)
-		
+
 		config.Http.Services[serviceName] = Service{
 			LoadBalancer: LoadBalancer{
 				Servers: []Server{
