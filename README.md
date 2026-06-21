@@ -130,6 +130,7 @@ The canonical control port is **`:8088`** — `delight.yaml`, `main.go`'s fallba
 | Document | Contents |
 |----------|----------|
 | [docs/architecture.md](docs/architecture.md) | component map, the git oracle, archival pipeline, taxonomy |
+| [docs/fleet-and-delightd.md](docs/fleet-and-delightd.md) | the control-plane consolidation: delightd owns the roster, fleet-svc wraps it; the seam and the direction |
 | [docs/api.md](docs/api.md) | every control-port route: method, JSON shapes, status codes |
 | [docs/availability.md](docs/availability.md) | fail-closed contract, deploy-before-use rule |
 | [docs/events.md](docs/events.md) | the Kafka backup-event contract (wire format, SR, tradeoffs) |
