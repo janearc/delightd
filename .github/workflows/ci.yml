@@ -43,3 +43,15 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test -race -cover ./...
+      # The functional test proves delightd's headline promise end to end: it builds
+      # the real delightd binary, brings the daemon UP against a fully synthetic
+      # environment (temp roots + a couple of fake `git init` projects, one clean and
+      # one left dirty), and drives the live control port -- GET /health, /projects,
+      # /git -- then asserts a POST /projects/{name}/backup turns into a checkpoint
+      # .tgz on disk. A handler returning 200 is not enough; only a separate process
+      # binding a real socket and running the backup eval loop proves the daemon
+      # actually works. It is self-contained (loopback HTTP, its own temp fixtures,
+      # no host paths, no network) and gated behind the `integration` build tag so it
+      # does not run in the default unit lap.
+      - name: Functional (daemon end-to-end)
+        run: go test -tags=integration -race -count=1 ./test/integration/...
