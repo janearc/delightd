@@ -54,9 +54,12 @@ code already has to say.
 - **delightd owns the roster.** The authoritative list of projects — and the
   fields fleet needs to act on them — lives in delightd's registry. fleet reads
   it; it keeps none of its own.
-- **One brain to bring back.** A fleet that can be rebuilt from a cold machine
-  needs one place to ask "what was running here." Two registries are two things
-  to restore and reconcile; one is one.
+- **One brain to bring back.** This is much of why the roster lives in delightd
+  at all. From a cold machine, delightd is what prepares the host and orchestrates
+  it forward — installing what's needed, standing up the cluster, deploying the
+  workloads — until you have a working environment again. That path wants one
+  place to ask "what was running here"; two registries are two things to restore
+  and reconcile, and one is one.
 
 This is a direction, not a flag day. The rewrite lands as a series of reviewable
 changes, never a single cutover.

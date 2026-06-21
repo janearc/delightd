@@ -1,18 +1,17 @@
-# delightd
+# 😋 delightd
 
 *A small daemon that keeps your work safe before you remember to — and tells you,
 for certain, when it is.*
 
-You work across a dozen projects at once. Some have changes you never committed;
-some you haven't backed up in weeks. You don't think about any of it — until the
-morning you reformat a machine, or a runaway job eats all your memory, and you
-find out which projects you'd quietly been gambling with.
+You work across a dozen projects at once. A few have uncommitted changes; one or
+two haven't been pushed in a while. You're not thinking about any of it — no
+reason to — until you reformat a machine or a long job runs the box out of
+memory, and the one thing you want is to know, for certain, that nothing was lost.
 
-`delightd` is the program that takes the gamble away. It runs in the background,
-watches every project you've told it about, and **checkpoints work the moment it
-notices the work exists.** And at any instant it can answer one question — for
-every project at once — that you really want to be sure of before you do
-something irreversible: *is everything saved?*
+That's delightd. It runs in the background, watches every project you've told it
+about, and **checkpoints work the moment it notices the work exists.** At any
+instant it can answer the one question worth being sure of before something
+irreversible: *is everything saved?*
 
 ## The trick: it reads the same signal you do
 
@@ -60,7 +59,9 @@ oversight. The alternative — every consumer reimplementing "is this project
 clean?" with its own almost-right logic — is how you end up with several
 confident, disagreeing answers. delightd takes the opposite bet: build *one*
 component that has to come up in any condition, and let everything else simply
-trust it.
+trust it. It's built to run on one machine — yours — and it's happy to be
+deployed to a cluster, but it only ever *manages* your machine; running anyone
+else's assets was never the job.
 
 ## "Control plane" — and the ones I chose not to use
 
@@ -70,8 +71,9 @@ fleet of data planes and own a snapshot cache; Kubernetes' [controller-runtime]
 reconciles declared state against the world in a loop. delightd does neither — it
 distributes no configuration and runs no reconcile loop. It answers, per request,
 what is *true* about a project right now, and emits an event for the one action it
-owns. Those libraries earn their complexity at a scale this is nowhere near;
-reaching for them here would be cargo-culting the shape of a bigger system. If it
+owns. Those are superb libraries from legendary engineers, and the scale they're built
+for is real — it's just nowhere near this one. delightd is built the right way for
+*what it is*, not dressed up as something bigger for the look of it. If the fleet
 ever grows into that scale, that's a new component beside delightd — not a
 retrofit of it.
 
@@ -80,7 +82,7 @@ retrofit of it.
 
 ## A clean idea of what a "project" is
 
-delightd's one unit is the **project** — never a "repo," "service," or
+delightd's atomic unit is the **project** — never a "repo," "service," or
 "deployment." A project is a named piece of work; its git tree is something
 delightd *observes*, not something it owns; "service" is a *role* a project can
 play, not the thing itself. Keeping that vocabulary honest is what lets the API
