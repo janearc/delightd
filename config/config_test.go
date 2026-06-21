@@ -156,6 +156,28 @@ func TestDefaultConfigControlPort(t *testing.T) {
 	}
 }
 
+// TestShippedConfigEnablesAgentSkills verifies the shipped delight.yaml actually
+// turns the skill generator on. The feature is fully implemented and tested, but
+// when agent_skills is absent from the config it defaults off, and the daemon
+// skips generation: the ~/var/bin/delight wrapper is never written and POST /mcp
+// is never registered. That is precisely the regression that shipped once -- the
+// claim ("delightd generates skills") and the behaviour drifted -- so guard it.
+func TestShippedConfigEnablesAgentSkills(t *testing.T) {
+	cfg := loadShippedConfig(t)
+	if !cfg.System.AgentSkills.Enabled {
+		t.Fatal("shipped delight.yaml must enable agent_skills; with it off the daemon never generates the CLI wrapper or registers /mcp")
+	}
+	got := map[string]bool{}
+	for _, m := range cfg.System.AgentSkills.ExposeVia {
+		got[m] = true
+	}
+	for _, want := range []string{"cli", "mcp"} {
+		if !got[want] {
+			t.Errorf("shipped agent_skills.expose_via should include %q, got %v", want, cfg.System.AgentSkills.ExposeVia)
+		}
+	}
+}
+
 // loadShippedConfig loads the repo's delight.yaml (one dir up from config/) so the
 // committed defaults are asserted against, not a synthetic fixture.
 func loadShippedConfig(t *testing.T) *DelightConfig {
