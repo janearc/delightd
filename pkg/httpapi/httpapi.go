@@ -96,7 +96,7 @@ type rosterEntry struct {
 // roster fields. This makes fleet membership a first-class, queryable surface
 // rather than something inferred from GET /git.
 type rosterResponse struct {
-	Status   string          `json:"status"`
+	Status   string        `json:"status"`
 	Projects []rosterEntry `json:"projects"`
 }
 

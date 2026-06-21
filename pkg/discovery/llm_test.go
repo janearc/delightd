@@ -10,9 +10,9 @@ import (
 
 func TestCheckOllama(t *testing.T) {
 	tests := []struct {
-		name         string
-		handler      http.HandlerFunc
-		expected     ModelSource
+		name     string
+		handler  http.HandlerFunc
+		expected ModelSource
 	}{
 		{
 			name: "healthy ollama with models",
@@ -74,7 +74,7 @@ func TestCheckOllama(t *testing.T) {
 
 func TestCheckOllama_Errors(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Test request creation error (invalid method context)
 	// We use " " as method to force http.NewRequestWithContext to fail
 	req, _ := http.NewRequestWithContext(ctx, " ", "http://localhost", nil)
@@ -85,7 +85,7 @@ func TestCheckOllama_Errors(t *testing.T) {
 	// But it uses: http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/tags", nil)
 	// Passing an unparseable URL will do it.
 	result := checkOllama(ctx, "http://192.168.0.%31/", "ollama")
-	
+
 	// Check client do error using port 0
 	result2 := checkOllama(ctx, "http://localhost:0", "ollama")
 	if result2.Healthy {
@@ -96,9 +96,9 @@ func TestCheckOllama_Errors(t *testing.T) {
 
 func TestCheckLlamaCpp(t *testing.T) {
 	tests := []struct {
-		name         string
-		handler      http.HandlerFunc
-		expected     ModelSource
+		name     string
+		handler  http.HandlerFunc
+		expected ModelSource
 	}{
 		{
 			name: "healthy llama.cpp /health",
