@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -178,6 +179,35 @@ func TestShippedConfigEnablesAgentSkills(t *testing.T) {
 	}
 }
 
+// TestShippedConfigCarriesRosterFields verifies the shipped delight.yaml actually
+// carries the roster fields delightd now owns (the seam in
+// docs/fleet-and-delightd.md). paling is the registry's worked example: a
+// non-essential launchd workload. With these absent, the /projects surface would
+// report an empty deploy block for every project and fleet's tier-0 / lifecycle
+// classification would have nothing to read -- the regression this guards.
+func TestShippedConfigCarriesRosterFields(t *testing.T) {
+	cfg := loadShippedConfig(t)
+	var paling *ProjectConfig
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == "paling" {
+			paling = &cfg.Projects[i]
+			break
+		}
+	}
+	if paling == nil {
+		t.Fatalf("shipped delight.yaml should list paling, got %d projects", len(cfg.Projects))
+	}
+	if paling.Essential {
+		t.Errorf("shipped paling should be non-essential")
+	}
+	if paling.Deploy.Kind != "launchd" {
+		t.Errorf("shipped paling deploy.kind = %q, want launchd", paling.Deploy.Kind)
+	}
+	if len(paling.Deploy.Command) == 0 {
+		t.Errorf("shipped paling deploy.command should be set, got empty")
+	}
+}
+
 // loadShippedConfig loads the repo's delight.yaml (one dir up from config/) so the
 // committed defaults are asserted against, not a synthetic fixture.
 func loadShippedConfig(t *testing.T) *DelightConfig {
@@ -313,6 +343,83 @@ projects:
 	}
 	if len(cfg.LoadWarnings) != 3 {
 		t.Errorf("expected 3 load warnings (noname, nopath, duplicate), got %d: %v", len(cfg.LoadWarnings), cfg.LoadWarnings)
+	}
+}
+
+// TestLoadProjectRosterFields verifies the roster fields delightd now owns (the
+// seam in docs/fleet-and-delightd.md) round-trip through Load: essential tier and
+// the deploy block (kind/deployment/command), modeled on fleet's WorkstationConfig
+// shape. Both a kube workload and a launchd one are exercised.
+func TestLoadProjectRosterFields(t *testing.T) {
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "obs-svc"
+    path: "/tmp/work/obs-svc"
+    essential: false
+    deploy:
+      kind: kube
+      deployment: obs-svc-agg
+  - name: "paling"
+    path: "/tmp/work/paling"
+    essential: false
+    deploy:
+      kind: launchd
+      command: ["uv", "run", "paling", "launchagent", "install"]
+  - name: "fleet"
+    path: "/tmp/work/fleet"
+    essential: true
+`)
+	if cfg.Degraded {
+		t.Fatalf("clean roster config should not degrade, warnings=%v", cfg.LoadWarnings)
+	}
+	byName := map[string]ProjectConfig{}
+	for _, p := range cfg.Projects {
+		byName[p.Name] = p
+	}
+
+	obs := byName["obs-svc"]
+	if obs.Essential {
+		t.Errorf("obs-svc should be non-essential, got essential=true")
+	}
+	if obs.Deploy.Kind != "kube" || obs.Deploy.Deployment != "obs-svc-agg" {
+		t.Errorf("obs-svc deploy = %+v, want kind=kube deployment=obs-svc-agg", obs.Deploy)
+	}
+
+	paling := byName["paling"]
+	if paling.Deploy.Kind != "launchd" {
+		t.Errorf("paling deploy.kind = %q, want launchd", paling.Deploy.Kind)
+	}
+	if want := []string{"uv", "run", "paling", "launchagent", "install"}; !slices.Equal(paling.Deploy.Command, want) {
+		t.Errorf("paling deploy.command = %v, want %v", paling.Deploy.Command, want)
+	}
+
+	fleet := byName["fleet"]
+	if !fleet.Essential {
+		t.Errorf("fleet should be essential, got essential=false")
+	}
+}
+
+// TestLoadProjectRosterFieldsOptional verifies the new roster fields are
+// genuinely optional: a project that predates them (only name/path) still loads
+// clean, with essential defaulting false and an empty deploy block.
+func TestLoadProjectRosterFieldsOptional(t *testing.T) {
+	cfg := loadFromYAML(t, `
+projects:
+  - name: "legacy"
+    path: "/tmp/work/legacy"
+`)
+	if cfg.Degraded {
+		t.Fatalf("legacy config should not degrade, warnings=%v", cfg.LoadWarnings)
+	}
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(cfg.Projects))
+	}
+	p := cfg.Projects[0]
+	if p.Essential {
+		t.Errorf("absent essential should default false, got true")
+	}
+	if p.Deploy.Kind != "" || p.Deploy.Deployment != "" || len(p.Deploy.Command) != 0 {
+		t.Errorf("absent deploy block should be empty, got %+v", p.Deploy)
 	}
 }
 

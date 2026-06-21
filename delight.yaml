@@ -38,6 +38,15 @@ system:
 projects:
   - name: "paling"
     path: "~/work/paling"
+    # Roster fields delightd now owns (the seam in docs/fleet-and-delightd.md):
+    # the project's tier and how fleet rolls it. paling is the bare-metal eel --
+    # `paling serve` needs Metal/MLX and cannot be a pod, so it deploys through a
+    # launchd agent (install reloads the plist onto current code). essential:false
+    # -- it is an on-demand workload, not part of the cold-boot converge set.
+    essential: false
+    deploy:
+      kind: launchd
+      command: ["uv", "run", "paling", "launchagent", "install"]
     backup:
       check_interval: "15m"
       rotation:

@@ -150,9 +150,29 @@ type BackupConfig struct {
 	Exclude []string `mapstructure:"exclude" json:"exclude,omitempty"`
 }
 
+// DeployConfig describes how fleet actuates a project. It is part of the roster
+// delightd now owns (the seam in docs/fleet-and-delightd.md): fleet reads it to
+// decide what `fleet deploy <project>` does rather than keeping its own copy in
+// WorkstationConfig.yaml. The shape mirrors fleet's deploy block exactly --
+// kind (compose|kube|launchd), an optional deployment name (the kube Deployment
+// to roll), and an optional command (the launchd/install invocation). A project
+// that is not a deployable workload (a CLI tool, a library) simply omits it.
+type DeployConfig struct {
+	Kind       string   `mapstructure:"kind" json:"kind,omitempty"`
+	Deployment string   `mapstructure:"deployment" json:"deployment,omitempty"`
+	Command    []string `mapstructure:"command" json:"command,omitempty"`
+}
+
 type ProjectConfig struct {
-	Name   string       `mapstructure:"name" json:"name"`
-	Path   string       `mapstructure:"path" json:"path"`
+	Name string `mapstructure:"name" json:"name"`
+	Path string `mapstructure:"path" json:"path"`
+	// Essential is the project's tier: true for the set bootstrap converges on a
+	// cold machine, false for on-demand workloads. fleet's tier-0 classification
+	// reads this from the roster delightd owns.
+	Essential bool `mapstructure:"essential" json:"essential"`
+	// Deploy carries how fleet rolls this project, when it is a deployable
+	// workload. Omitted for projects that ship no service (CLI tools, libraries).
+	Deploy DeployConfig `mapstructure:"deploy" json:"deploy,omitempty"`
 	Backup BackupConfig `mapstructure:"backup" json:"backup"`
 }
 
