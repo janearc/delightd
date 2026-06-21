@@ -255,6 +255,25 @@ func countCommitsUntil(repo *git.Repository, from, stop plumbing.Hash) int {
 	return count
 }
 
+// RemoteURL returns just the tracking remote's URL for the repo at path, opening
+// the repository and reading only its config -- it skips the worktree status walk
+// and the unpushed-commit count that Collect performs. The /projects roster wants
+// the live remote URL but not the full git state, so this is the cheap read for
+// that case. An empty string means no remote could be resolved (or the path is not
+// a git checkout); the caller treats that as "unknown", not an error.
+func RemoteURL(path string) string {
+	repo, err := git.PlainOpen(expandHome(path))
+	if err != nil {
+		return ""
+	}
+	var branch string
+	if head, err := repo.Head(); err == nil && head.Name().IsBranch() {
+		branch = head.Name().Short()
+	}
+	_, url, _ := resolveRemote(repo, branch)
+	return url
+}
+
 // expandHome resolves a leading ~ to the current user's home directory. Project
 // paths in delight.yaml are written with ~ by convention.
 func expandHome(path string) string {

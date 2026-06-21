@@ -78,6 +78,28 @@ type gitStateResponse struct {
 	Projects []gitstate.ProjectGit `json:"projects"`
 }
 
+// rosterEntry is one project in the GET /projects listing: the roster fields
+// delightd now owns (the seam in docs/fleet-and-delightd.md) plus the live remote
+// URL. fleet-svc consumes this for its lifecycle, bootstrap, and tier-0
+// classification in place of parsing WorkstationConfig.yaml. RemoteURL is read
+// per-request (cheap: repo config only, no worktree walk) and omitted when no
+// remote can be resolved.
+type rosterEntry struct {
+	Name      string              `json:"name"`
+	Path      string              `json:"path"`
+	Essential bool                `json:"essential"`
+	Deploy    config.DeployConfig `json:"deploy"`
+	RemoteURL string              `json:"remote_url,omitempty"`
+}
+
+// rosterResponse is the GET /projects body: every managed project with its
+// roster fields. This makes fleet membership a first-class, queryable surface
+// rather than something inferred from GET /git.
+type rosterResponse struct {
+	Status   string          `json:"status"`
+	Projects []rosterEntry `json:"projects"`
+}
+
 // errorResponse is the body for any non-2xx control-port reply.
 type errorResponse struct {
 	Error string `json:"error"`
@@ -94,6 +116,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /projects/{name}/backup", s.handleBackup)     // manually trigger a checkpoint
 	mux.HandleFunc("POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
 
+	mux.HandleFunc("GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 
@@ -138,6 +161,25 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		Status:  "ok",
 		Sources: s.discover(r.Context(), s.cfg),
 	})
+}
+
+// handleProjectsAll serves the authoritative roster: every managed project with
+// the fields fleet acts on (essential tier, deploy block) plus its live remote
+// URL. The remote URL is the only per-request read and is cheap (repo config
+// only); the rest comes straight from the loaded config, so this is the
+// membership query that GET /git only answered implicitly.
+func (s *Server) handleProjectsAll(w http.ResponseWriter, r *http.Request) {
+	projects := make([]rosterEntry, 0, len(s.cfg.Projects))
+	for _, p := range s.cfg.Projects {
+		projects = append(projects, rosterEntry{
+			Name:      p.Name,
+			Path:      p.Path,
+			Essential: p.Essential,
+			Deploy:    p.Deploy,
+			RemoteURL: gitstate.RemoteURL(p.Path),
+		})
+	}
+	writeJSON(w, http.StatusOK, rosterResponse{Status: "ok", Projects: projects})
 }
 
 func (s *Server) handleGitAll(w http.ResponseWriter, r *http.Request) {

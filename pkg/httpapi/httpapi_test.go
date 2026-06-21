@@ -190,6 +190,68 @@ func TestHandleGitAll(t *testing.T) {
 	}
 }
 
+func TestHandleProjectsAll(t *testing.T) {
+	// Two projects exercise the roster fields end-to-end: an essential workload
+	// with a deploy block, and a non-essential CLI tool with none. A non-git temp
+	// path means RemoteURL resolves empty (omitted), so the shape is exercised
+	// without a fixture repo -- the cheap-remote read is covered in pkg/gitstate.
+	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{
+		{
+			Name:      "obs-svc",
+			Path:      t.TempDir(),
+			Essential: true,
+			Deploy:    config.DeployConfig{Kind: "kube", Deployment: "obs-svc-agg"},
+		},
+		{Name: "taco", Path: t.TempDir(), Essential: false},
+	}}
+	s := New(cfg, nil, fakeFragments{}, nil, false)
+
+	rr := httptest.NewRecorder()
+	s.handleProjectsAll(rr, httptest.NewRequest(http.MethodGet, "/projects", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q", ct)
+	}
+
+	var resp struct {
+		Status   string `json:"status"`
+		Projects []struct {
+			Name      string `json:"name"`
+			Path      string `json:"path"`
+			Essential bool   `json:"essential"`
+			Deploy    struct {
+				Kind       string   `json:"kind"`
+				Deployment string   `json:"deployment"`
+				Command    []string `json:"command"`
+			} `json:"deploy"`
+			RemoteURL string `json:"remote_url"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Projects) != 2 {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+
+	// roster order follows config order; assert the carried fields per project.
+	if resp.Projects[0].Name != "obs-svc" || !resp.Projects[0].Essential {
+		t.Errorf("first project: %+v", resp.Projects[0])
+	}
+	if resp.Projects[0].Deploy.Kind != "kube" || resp.Projects[0].Deploy.Deployment != "obs-svc-agg" {
+		t.Errorf("deploy block not surfaced: %+v", resp.Projects[0].Deploy)
+	}
+	if resp.Projects[1].Name != "taco" || resp.Projects[1].Essential {
+		t.Errorf("second project: %+v", resp.Projects[1])
+	}
+	// a non-git path yields no remote: remote_url is omitted (empty).
+	if resp.Projects[1].RemoteURL != "" {
+		t.Errorf("non-git path should resolve no remote, got %q", resp.Projects[1].RemoteURL)
+	}
+}
+
 func TestHandleProjectGit(t *testing.T) {
 	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "known", Path: t.TempDir()}}}
 	s := New(cfg, nil, fakeFragments{}, nil, false)
@@ -224,6 +286,7 @@ func TestMux_RoutingAndMCPGating(t *testing.T) {
 		want         int
 	}{
 		{http.MethodGet, "/projects/p/introspect", http.StatusOK},
+		{http.MethodGet, "/projects", http.StatusOK},
 		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodPost, "/mcp", http.StatusNotFound}, // MCP disabled by default
