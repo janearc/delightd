@@ -129,6 +129,40 @@ Status: always `200`. Per-project failures live in-band in `git.error`, not in
 the HTTP status. The handler logs each `git.error` (the `gitstate` package
 itself never logs; surfacing is the handler's half of the contract).
 
+## GET /projects
+
+The authoritative **roster**: every managed project with the fields fleet needs
+to act on it, returned under `projects`. This is the seam where delightd owns the
+roster and fleet reads it instead of parsing `WorkstationConfig.yaml` (see
+[fleet-and-delightd.md](fleet-and-delightd.md)).
+
+```json
+{
+  "status": "ok",
+  "projects": [
+    {
+      "name": "paling",
+      "path": "~/work/paling",
+      "essential": false,
+      "deploy": { "kind": "launchd", "command": ["uv", "run", "paling", "launchagent", "install"] },
+      "remote_url": "git@github.com:janearc/paling.git"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `name` | The project's name (its key in the registry). |
+| `path` | The project's working-tree path. |
+| `essential` | Tier: `true` for the set bootstrap converges on a cold machine, `false` for on-demand workloads. fleet's tier-0 classification reads this. |
+| `deploy.kind` | How fleet rolls the project: `compose`, `kube`, or `launchd`. Empty for projects that ship no service (CLI tools, libraries). |
+| `deploy.deployment` | The kube Deployment name, when `kind: kube`. |
+| `deploy.command` | The command fleet runs, when `kind: launchd`. |
+| `remote_url` | The tracking remote, read per-request (cheap: repo config only, no worktree walk). Omitted when no remote resolves. |
+
+Status: always `200`.
+
 ## GET /projects/{name}/git
 
 Live git state for one project.

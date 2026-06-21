@@ -78,13 +78,13 @@ type gitStateResponse struct {
 	Projects []gitstate.ProjectGit `json:"projects"`
 }
 
-// rosterProject is one project in the GET /projects listing: the roster fields
+// rosterEntry is one project in the GET /projects listing: the roster fields
 // delightd now owns (the seam in docs/fleet-and-delightd.md) plus the live remote
 // URL. fleet-svc consumes this for its lifecycle, bootstrap, and tier-0
 // classification in place of parsing WorkstationConfig.yaml. RemoteURL is read
 // per-request (cheap: repo config only, no worktree walk) and omitted when no
 // remote can be resolved.
-type rosterProject struct {
+type rosterEntry struct {
 	Name      string              `json:"name"`
 	Path      string              `json:"path"`
 	Essential bool                `json:"essential"`
@@ -92,12 +92,12 @@ type rosterProject struct {
 	RemoteURL string              `json:"remote_url,omitempty"`
 }
 
-// projectsResponse is the GET /projects body: every managed project with its
+// rosterResponse is the GET /projects body: every managed project with its
 // roster fields. This makes fleet membership a first-class, queryable surface
 // rather than something inferred from GET /git.
-type projectsResponse struct {
+type rosterResponse struct {
 	Status   string          `json:"status"`
-	Projects []rosterProject `json:"projects"`
+	Projects []rosterEntry `json:"projects"`
 }
 
 // errorResponse is the body for any non-2xx control-port reply.
@@ -169,9 +169,9 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 // only); the rest comes straight from the loaded config, so this is the
 // membership query that GET /git only answered implicitly.
 func (s *Server) handleProjectsAll(w http.ResponseWriter, r *http.Request) {
-	projects := make([]rosterProject, 0, len(s.cfg.Projects))
+	projects := make([]rosterEntry, 0, len(s.cfg.Projects))
 	for _, p := range s.cfg.Projects {
-		projects = append(projects, rosterProject{
+		projects = append(projects, rosterEntry{
 			Name:      p.Name,
 			Path:      p.Path,
 			Essential: p.Essential,
@@ -179,7 +179,7 @@ func (s *Server) handleProjectsAll(w http.ResponseWriter, r *http.Request) {
 			RemoteURL: gitstate.RemoteURL(p.Path),
 		})
 	}
-	writeJSON(w, http.StatusOK, projectsResponse{Status: "ok", Projects: projects})
+	writeJSON(w, http.StatusOK, rosterResponse{Status: "ok", Projects: projects})
 }
 
 func (s *Server) handleGitAll(w http.ResponseWriter, r *http.Request) {
