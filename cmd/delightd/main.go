@@ -11,6 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/janearc/blm/citizen"
+	"github.com/janearc/blm/emit"
+	observabilityproto "github.com/janearc/blm/proto/observability/v1"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -198,6 +201,27 @@ func runDaemon(dryRun, immediate bool) error {
 			publisher = p
 			defer publisher.Close()
 			slog.Info("kafka event publisher ready", "brokers", cfg.System.Kafka.Brokers, "topic", cfg.System.Kafka.Topic)
+		}
+	}
+
+	// delightd joins the fleet as a good-citizen: a liveness heartbeat on
+	// observability.events via blm's good-citizen helper, so the daemon is
+	// visible to obs-svc like every other service. It rides the same broker and
+	// schema-registry config as the backup publisher above, but as its own blm
+	// emit.Publisher on the observability.v1 contracts -- the backup publisher
+	// stays on delight.v1 (different contract, different topic). Best-effort and
+	// nil-safe, exactly like the backup publisher: a Kafka/SR outage disables the
+	// heartbeat, never the daemon's real work.
+	if len(cfg.System.Kafka.Brokers) > 0 {
+		emitPub, err := emit.New(ctx, cfg.System.Kafka.Brokers, cfg.System.Kafka.SchemaRegistryURL)
+		if err != nil {
+			slog.Warn("good-citizen heartbeat disabled: could not init emit publisher", "error", err)
+		} else {
+			defer emitPub.Close()
+			// 15s liveness cadence (blm defaults to the same when interval <= 0).
+			// Heartbeat blocks, so it runs in its own goroutine until ctx cancels.
+			go citizen.Heartbeat(ctx, emitPub, "delightd", observabilityproto.Schema, 15*time.Second, logger)
+			slog.Info("good-citizen heartbeat started", "service", "delightd", "topic", citizen.TopicObservability)
 		}
 	}
 
