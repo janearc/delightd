@@ -25,11 +25,30 @@ func modelCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&deployments, "deployments", defaultDeploymentsPath(),
 		"path to the deployment set YAML")
 
+	// loadSet is the load + validate every subcommand shares, in one place.
+	loadSet := func() (model.DeploymentSet, error) {
+		return model.LoadDeploymentSet(deployments)
+	}
+	// withDeployment is the common shape behind the per-deployment commands (up/down):
+	// load the set, resolve the named deployment, hand it to fn. New per-deployment
+	// commands reuse it instead of repeating the load + lookup + unknown-name error.
+	withDeployment := func(name string, fn func(model.DeploymentDescriptor) error) error {
+		set, err := loadSet()
+		if err != nil {
+			return err
+		}
+		d, ok := set.ByName(name)
+		if !ok {
+			return fmt.Errorf("unknown deployment %q", name)
+		}
+		return fn(d)
+	}
+
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "list the declared model deployments (JSON)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			set, err := model.LoadDeploymentSet(deployments)
+			set, err := loadSet()
 			if err != nil {
 				return err
 			}
@@ -41,7 +60,7 @@ func modelCmd() *cobra.Command {
 		Use:   "render",
 		Short: "emit the LiteLLM proxy config derived from the deployments (JSON)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			set, err := model.LoadDeploymentSet(deployments)
+			set, err := loadSet()
 			if err != nil {
 				return err
 			}
@@ -54,19 +73,13 @@ func modelCmd() *cobra.Command {
 		Short: "emit the idempotent bring-up plan for a deployment (dry-run)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			set, err := model.LoadDeploymentSet(deployments)
-			if err != nil {
-				return err
-			}
-			d, ok := set.ByName(args[0])
-			if !ok {
-				return fmt.Errorf("unknown deployment %q", args[0])
-			}
-			return printJSON(map[string]any{
-				"command": "up",
-				"dry_run": true,
-				"note":    "delightd does not launch heavy servers; run idempotent_steps to realise",
-				"plan":    d.BringUp(),
+			return withDeployment(args[0], func(d model.DeploymentDescriptor) error {
+				return printJSON(map[string]any{
+					"command": "up",
+					"dry_run": true,
+					"note":    "delightd does not launch heavy servers; run idempotent_steps to realise",
+					"plan":    d.BringUp(),
+				})
 			})
 		},
 	}
@@ -76,18 +89,12 @@ func modelCmd() *cobra.Command {
 		Short: "emit the idempotent teardown plan for a deployment (dry-run)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			set, err := model.LoadDeploymentSet(deployments)
-			if err != nil {
-				return err
-			}
-			d, ok := set.ByName(args[0])
-			if !ok {
-				return fmt.Errorf("unknown deployment %q", args[0])
-			}
-			return printJSON(map[string]any{
-				"command": "down",
-				"dry_run": true,
-				"plan":    d.Teardown(),
+			return withDeployment(args[0], func(d model.DeploymentDescriptor) error {
+				return printJSON(map[string]any{
+					"command": "down",
+					"dry_run": true,
+					"plan":    d.Teardown(),
+				})
 			})
 		},
 	}
@@ -97,7 +104,7 @@ func modelCmd() *cobra.Command {
 		Short: "probe deployment endpoint(s); non-zero exit if any is unreachable",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			set, err := model.LoadDeploymentSet(deployments)
+			set, err := loadSet()
 			if err != nil {
 				return err
 			}
