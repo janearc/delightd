@@ -1,16 +1,18 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
+
+	observabilityv1 "github.com/janearc/blm/gen/go/observability/v1"
 )
 
-// The model-health ladder (docs/model-hosting.md §4): a model's "green" is not one bit
-// but a set of rungs, cheap -> expensive, reported in the fleet GREEN/YELLOW/RED
-// vocabulary. The always-on tiers here -- declared and reachable -- are the continuous
-// signal; the loadable and "has-a-brain" tiers are summoned (they cost a load) and land in
-// a following step.
+// The model-health ladder (docs/model-hosting.md §4): a model's "green" is not one bit but
+// a set of rungs, cheap -> expensive, reported in the fleet's HealthState. The always-on
+// tiers here -- declared and reachable -- are the continuous signal; loadable and integrity
+// are summoned and land later.
 
 type HealthTier string
 
@@ -19,19 +21,27 @@ const (
 	TierReachable HealthTier = "reachable" // its endpoint answers
 )
 
-type TierState string
+// Health is the fleet contract enum observability.v1.HealthState -- not a homegrown string.
+// Its numeric order is its severity (UNSPECIFIED < GREEN < YELLOW < RED < EXHAUSTED), so a
+// worst-wins roll-up is just the max; "not assessed" is HEALTH_STATE_UNSPECIFIED, a typed
+// value rather than a null. JSON renders the enum's name.
+type Health observabilityv1.HealthState
 
 const (
-	StateGreen   TierState = "GREEN"
-	StateYellow  TierState = "YELLOW"
-	StateRed     TierState = "RED"
-	StateUnknown TierState = "UNKNOWN"
+	StateUnspecified = Health(observabilityv1.HealthState_HEALTH_STATE_UNSPECIFIED)
+	StateGreen       = Health(observabilityv1.HealthState_HEALTH_STATE_GREEN)
+	StateYellow      = Health(observabilityv1.HealthState_HEALTH_STATE_YELLOW)
+	StateRed         = Health(observabilityv1.HealthState_HEALTH_STATE_RED)
 )
+
+func (h Health) MarshalJSON() ([]byte, error) {
+	return json.Marshal(observabilityv1.HealthState(h).String())
+}
 
 // TierResult is one rung's verdict.
 type TierResult struct {
 	Tier   HealthTier `json:"tier"`
-	State  TierState  `json:"state"`
+	State  Health     `json:"state"`
 	Detail string     `json:"detail,omitempty"`
 }
 
@@ -39,14 +49,13 @@ type TierResult struct {
 type LadderReport struct {
 	Deployment string       `json:"deployment"`
 	Backend    Backend      `json:"backend"`
-	Overall    TierState    `json:"overall"`
+	Overall    Health       `json:"overall"`
 	Tiers      []TierResult `json:"tiers"`
 }
 
-// tierDeclared checks the weights are where the descriptor says. A path / HF-cache
-// location is stat-ed; an ollama tag is a backend handle (not a path), so its
-// registration check belongs to the later loadable tier -- here it is GREEN as a coherent
-// declaration.
+// tierDeclared checks the weights are where the descriptor says. A path / HF-cache location
+// is stat-ed; an ollama tag is a backend handle (not a path), so its registration check
+// belongs to the later loadable tier -- here it is GREEN as a coherent declaration.
 func (d DeploymentDescriptor) tierDeclared() TierResult {
 	if d.IsHFCacheLocation() {
 		if _, err := os.Stat(d.Location); err != nil {
@@ -93,12 +102,12 @@ func (s DeploymentSet) Ladders(name string) (reports []LadderReport, found bool)
 	return reports, true
 }
 
-// worstState returns the worst rung's state: RED > YELLOW > GREEN > UNKNOWN.
-func worstState(tiers []TierResult) TierState {
-	rank := map[TierState]int{StateUnknown: 0, StateGreen: 1, StateYellow: 2, StateRed: 3}
-	worst := StateUnknown
+// worstState returns the worst rung's state. HealthState's numeric order is its severity,
+// so worst-wins is the max.
+func worstState(tiers []TierResult) Health {
+	worst := StateUnspecified
 	for _, t := range tiers {
-		if rank[t.State] > rank[worst] {
+		if t.State > worst {
 			worst = t.State
 		}
 	}

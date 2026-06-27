@@ -4,10 +4,11 @@ go 1.26.4
 
 require (
 	github.com/go-git/go-git/v5 v5.19.1
+	github.com/janearc/blm v0.0.0-20260627082936-bd09cacd9686
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/twmb/franz-go v1.21.3
-	google.golang.org/protobuf v1.33.0
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 
