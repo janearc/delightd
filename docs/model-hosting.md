@@ -104,11 +104,21 @@ fleet's `observability.v1` `GREEN`/`YELLOW`/`RED`, cheap → expensive:
    `/health`. Free, the poll.
 3. **Loadable** — the transport admits it can load it. Backend-dependent: where a
    transport has no "instantiate without committing RAM," this tier collapses into 4.
-4. **Has a brain** — opt-in, on request: commit it to RAM, ask one tiny question,
-   accept a **fuzzy** answer (*"how many legs does a dog have"* → "four" / "usually
-   4"). This is **liveness, not eval** — a loose match, deliberately dumb; grading
-   quality is a different, bottomless job. It costs RAM, so it is an `up` + probe +
-   `down`, **summoned, never the continuous poll** (budget it).
+4. **Integrity** — *not* a bare liveness ping. For a shipped, fine-tuned model, verify it
+   is the right checkpoint, intact, and behaving as the specific model it is meant to be
+   — the standard supply-chain + eval-as-CI pattern, in two parts:
+   - a **weight checksum + signature** verified before first load (catches corruption, a
+     swapped checkpoint, bad shard reassembly) — cheap and exact; and
+   - a **golden set** the model ships with: a small, versioned battery of
+     `{prompt, expected fuzzy output}` spanning capability across domains (a broken MoE
+     expert passes some and fails others), identity, and the model's **intended
+     refuse-or-answer behavior**. Integrity is **model-relative** — a safety-tuned model
+     refuses what an uncensored one answers; the expected behavior *defines* the model.
+     Scored fuzzily against the model's own expected outputs, summoned not continuous.
+
+   **Reserved, not built.** It depends on the producer (paling) emitting that integrity
+   kit — checksum + golden set — alongside the weights (janearc/paling#43), and on stable
+   paling output; punted until then. Today the ladder stops at *reachable* (tiers 1–2).
 
 Steady green is tiers 1–2; tiers 3–4 are requested.
 
@@ -148,11 +158,11 @@ is not an option: it entered maintenance mode in December 2024.)
 
 ## 8. Built vs. not (honest)
 
-- **Built:** the `model.v1` contract (descriptors, enums, `Invoke`); the
-  apple-on-device provider (serves `model.v1` over loopback HTTP, `/health`);
-  model-svc's Python descriptor / render / up-down-health logic (the thing being
-  folded in here).
-- **To build in delightd (Go):** the `model` subcommand + manifest (ported from
-  model-svc); the tier-3/4 health ladder, especially the tier-4 brain probe; the
-  reconciliation walk over model dirs; LiteLLM-as-a-transport-under-`model.v1`.
+- **Built (in delightd, Go):** the `model.v1` contract; the apple-on-device provider
+  (serves `model.v1` over loopback HTTP, `/health`); and the `model` subsystem ported from
+  model-svc — the descriptor + validator, `list` / `render`, `up` / `down` / `health`, and
+  the health ladder's always-on tiers (declared + reachable).
+- **To build:** tier 3 (**loadable**); tier 4 (**integrity** — weight checksum + golden
+  set; reserved, blocked on paling#43 and stable paling output); the reconciliation walk
+  over model dirs; LiteLLM-as-a-transport-under-`model.v1`.
 - **Not today:** the xDS graduation; xinference / llama-cpp executed paths.
