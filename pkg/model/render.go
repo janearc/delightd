@@ -38,7 +38,9 @@ func (d DeploymentDescriptor) litellmParams() map[string]any {
 	return params
 }
 
-// RenderLiteLLM derives the LiteLLM proxy config from a deployment set.
+// RenderLiteLLM derives the LiteLLM proxy config from a deployment set (the one loaded by
+// LoadDeploymentSet from the deployments YAML). The deployments stay the source of truth;
+// the LiteLLM model_list is always derived, never hand-edited alongside them.
 func RenderLiteLLM(set DeploymentSet) LiteLLMConfig {
 	models := make([]LiteLLMModel, 0, len(set.Deployments))
 	for _, d := range set.Deployments {

@@ -3,11 +3,10 @@ package model
 import "testing"
 
 func TestRenderLiteLLM(t *testing.T) {
-	ctx := 32768
 	set := DeploymentSet{Deployments: []DeploymentDescriptor{
 		{
 			Name: "mistral-24b", Location: "mistral-24b:latest", Architecture: ArchDecode,
-			Role: RoleChat, Backend: BackendOllama, ContextWindow: ctx,
+			Role: RoleChat, Backend: BackendOllama, ContextWindow: 32768,
 			LiteLLMModelName: "ollama/mistral-24b:latest",
 			TraefikRoute:     TraefikRoute{Host: "mistral.localhost", ServicePort: 11434},
 		},

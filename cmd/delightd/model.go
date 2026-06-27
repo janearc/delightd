@@ -10,9 +10,11 @@ import (
 	"delightd/pkg/model"
 )
 
-// modelCmd is delightd's model-hosting control surface: the declared model deployments
-// and the LiteLLM config derived from them. JSON by default (agent-first). Read-only
-// today -- up/down/health and reconciliation land in later steps.
+// modelCmd is delightd's model-hosting control surface: it surfaces pkg/model (the
+// declared deployments and the LiteLLM config derived from them) as CLI subcommands.
+// Built on cobra and JSON-by-default -- the same agent-first, CLI-is-the-contract shape
+// as the rest of delightd's commands (cf. lint), so an agent drives it the same way.
+// Read-only today; up/down/health and reconciliation land in later steps.
 func modelCmd() *cobra.Command {
 	var deployments string
 	cmd := &cobra.Command{
@@ -52,6 +54,11 @@ func modelCmd() *cobra.Command {
 
 // defaultDeploymentsPath resolves the deployment set under delightd's config root
 // (DELIGHT_CONFIG_ROOT, default ~/etc), overridable with --deployments.
+//
+// NOTE (blm seam): the descriptor here is delightd-local, but blm owns the wire contract
+// (model.v1), which docs/model-hosting.md makes the umbrella. Reconciling the two --
+// delightd exposing its deployments as model.v1 descriptors for discovery, and the
+// config/paths aligning with good-citizen conventions -- is a later, tracked step.
 func defaultDeploymentsPath() string {
 	root := os.Getenv("DELIGHT_CONFIG_ROOT")
 	if root == "" {
