@@ -64,9 +64,9 @@ func oneOf[T comparable](v T, allowed []T) bool {
 // TraefikRoute is the in-mesh routing contract delightd writes (slated to graduate to
 // xDS; see docs/model-hosting.md).
 type TraefikRoute struct {
-	Host        string `yaml:"host"`
-	PathPrefix  string `yaml:"path_prefix,omitempty"`
-	ServicePort int    `yaml:"service_port"`
+	Host        string `yaml:"host" json:"host"`
+	PathPrefix  string `yaml:"path_prefix,omitempty" json:"path_prefix,omitempty"`
+	ServicePort int    `yaml:"service_port" json:"service_port"`
 }
 
 func (r TraefikRoute) validate(deployment string) error {
@@ -82,14 +82,14 @@ func (r TraefikRoute) validate(deployment string) error {
 // DeploymentDescriptor is one model availability signifier: a model, at a location,
 // served by a backend, reachable behind a route, with a known architecture and role.
 type DeploymentDescriptor struct {
-	Name             string       `yaml:"name"`
-	Location         string       `yaml:"location"`
-	Architecture     Architecture `yaml:"architecture"`
-	Role             Role         `yaml:"role"`
-	Backend          Backend      `yaml:"backend"`
-	TraefikRoute     TraefikRoute `yaml:"traefik_route"`
-	ContextWindow    int          `yaml:"context_window,omitempty"` // 0 means unset
-	LiteLLMModelName string       `yaml:"litellm_model_name,omitempty"`
+	Name             string       `yaml:"name" json:"name"`
+	Location         string       `yaml:"location" json:"location"`
+	Architecture     Architecture `yaml:"architecture" json:"architecture"`
+	Role             Role         `yaml:"role" json:"role"`
+	Backend          Backend      `yaml:"backend" json:"backend"`
+	TraefikRoute     TraefikRoute `yaml:"traefik_route" json:"traefik_route"`
+	ContextWindow    int          `yaml:"context_window,omitempty" json:"context_window,omitempty"` // 0 means unset
+	LiteLLMModelName string       `yaml:"litellm_model_name,omitempty" json:"litellm_model_name,omitempty"`
 }
 
 func (d DeploymentDescriptor) servedByOllama() bool { return d.Backend == BackendOllama }
@@ -166,7 +166,7 @@ func (d DeploymentDescriptor) IsHFCacheLocation() bool {
 
 // DeploymentSet is the declared set of model deployments delightd knows about.
 type DeploymentSet struct {
-	Deployments []DeploymentDescriptor `yaml:"deployments"`
+	Deployments []DeploymentDescriptor `yaml:"deployments" json:"deployments"`
 }
 
 // Validate validates every descriptor and rejects duplicate names.
