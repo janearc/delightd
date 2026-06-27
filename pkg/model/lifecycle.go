@@ -91,19 +91,6 @@ type Probe struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// HealthResult pairs a deployment with its probe.
-type HealthResult struct {
-	Deployment string  `json:"deployment"`
-	Backend    Backend `json:"backend"`
-	Health     Probe   `json:"health"`
-}
-
-// HealthReport is the aggregate over the probed deployments.
-type HealthReport struct {
-	Healthy bool           `json:"healthy"`
-	Results []HealthResult `json:"results"`
-}
-
 // HealthURL is where a backend answers a liveness GET: ollama replies to a bare GET at
 // root ("Ollama is running"); the openai-compatible shims expose /health.
 func (d DeploymentDescriptor) HealthURL() string {
@@ -124,28 +111,4 @@ func ProbeURL(url string, timeout time.Duration) Probe {
 	}
 	defer resp.Body.Close()
 	return Probe{URL: url, Reachable: true, Status: resp.StatusCode}
-}
-
-// Health probes one named deployment, or every deployment when name is empty. found is
-// false only when a name is given that is not in the set; healthy is true only if every
-// probed endpoint answered.
-func (s DeploymentSet) Health(name string) (report HealthReport, found bool) {
-	var targets []DeploymentDescriptor
-	if name != "" {
-		d, ok := s.ByName(name)
-		if !ok {
-			return HealthReport{}, false
-		}
-		targets = []DeploymentDescriptor{d}
-	} else {
-		targets = s.Deployments
-	}
-
-	report.Healthy = true
-	for _, d := range targets {
-		p := ProbeURL(d.HealthURL(), 2*time.Second)
-		report.Healthy = report.Healthy && p.Reachable
-		report.Results = append(report.Results, HealthResult{Deployment: d.Name, Backend: d.Backend, Health: p})
-	}
-	return report, true
 }

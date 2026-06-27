@@ -101,7 +101,7 @@ func modelCmd() *cobra.Command {
 
 	health := &cobra.Command{
 		Use:   "health [deployment]",
-		Short: "probe deployment endpoint(s); non-zero exit if any is unreachable",
+		Short: "report the health ladder for deployment(s); non-zero exit if any is RED",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			set, err := loadSet()
@@ -112,19 +112,25 @@ func modelCmd() *cobra.Command {
 			if len(args) == 1 {
 				name = args[0]
 			}
-			report, found := set.Health(name)
+			reports, found := set.Ladders(name)
 			if !found {
 				return fmt.Errorf("unknown deployment %q", name)
 			}
+			healthy := true
+			for _, r := range reports {
+				if r.Overall == model.StateRed {
+					healthy = false
+				}
+			}
 			if err := printJSON(map[string]any{
 				"command": "health",
-				"healthy": report.Healthy,
-				"results": report.Results,
+				"healthy": healthy,
+				"results": reports,
 			}); err != nil {
 				return err
 			}
-			if !report.Healthy {
-				return fmt.Errorf("one or more deployments unreachable")
+			if !healthy {
+				return fmt.Errorf("one or more deployments unhealthy")
 			}
 			return nil
 		},
