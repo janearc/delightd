@@ -71,6 +71,7 @@ func rootCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "execute without writing checkpoints to disk")
 	cmd.Flags().BoolVar(&immediate, "immediate", false, "execute an immediate evaluation on startup without waiting for the first interval tick")
 	cmd.AddCommand(lintCmd())
+	cmd.AddCommand(modelCmd())
 	return cmd
 }
 
