@@ -22,6 +22,7 @@ import (
 	"delightd/pkg/introspect"
 	"delightd/pkg/metrics"
 	"delightd/pkg/registry"
+	"delightd/pkg/schemaregistry"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 )
@@ -40,13 +41,33 @@ type Server struct {
 	// tests that do not exercise registration; handlers treat nil as an empty registry.
 	reg *registry.Registry
 
+	// subjects verifies contract subjects against the schema registry at join time, and
+	// guaranteeHealthCheck runs the reachability guarantee on a joining endpoint. Both are
+	// injectable so handleRegister can be tested without a live SR or network.
+	subjects             subjectChecker
+	guaranteeHealthCheck func(context.Context, *registryv1.Endpoint) error
+
+	// events publishes the never-silent RegisterRefused event; eventsTopic and refusedSchema
+	// are its destination and schema text. Wired by main via UseEvents; nil until then (a
+	// refusal still returns its HTTP error and logs loudly).
+	events        eventPublisher
+	eventsTopic   string
+	refusedSchema string
+
 	// discover is the local-LLM discovery source, injectable so handlers can be
 	// tested without probing the network.
 	discover func(context.Context, *config.DelightConfig) []discovery.ModelSource
 }
 
+// eventPublisher is the subset of Big Little Mesh's emit.Publisher that handleRegister uses
+// to put a RegisterRefused on the bus. Defined here so the handler can be tested with a fake.
+type eventPublisher interface {
+	Publish(ctx context.Context, topic, subject, schemaText, key string, msg proto.Message) error
+}
+
 // New constructs a Server wired to the live daemon dependencies. reg MAY be nil (the
-// registry is additive; a nil registry serves an empty set).
+// registry is additive; a nil registry serves an empty set). The schema-registry checker is
+// built from config; the bus event publisher is wired separately via UseEvents.
 func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports introspect.FragmentChecker, skillAgg *skills.Aggregator, dryRun bool, reg *registry.Registry) *Server {
 	return &Server{
 		cfg:      cfg,
@@ -55,8 +76,20 @@ func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports 
 		skills:   skillAgg,
 		dryRun:   dryRun,
 		reg:      reg,
-		discover: discovery.DiscoverLocalLLMs,
+		// An unset SR URL yields a checker whose checks fail loudly rather than passing.
+		subjects:             schemaregistry.New(cfg.System.Kafka.SchemaRegistryURL),
+		guaranteeHealthCheck: guaranteeHealthCheck,
+		discover:             discovery.DiscoverLocalLLMs,
 	}
+}
+
+// UseEvents wires the bus publisher for the never-silent RegisterRefused event (delightd's
+// emit.Publisher, the topic to publish on, and the schema text to register). Called by main
+// after the publisher is built; without it, refusals are HTTP + log only.
+func (s *Server) UseEvents(pub eventPublisher, topic, refusedSchema string) {
+	s.events = pub
+	s.eventsTopic = topic
+	s.refusedSchema = refusedSchema
 }
 
 // healthResponse is the GET /health body.
@@ -172,6 +205,7 @@ func (s *Server) Mux() *http.ServeMux {
 
 	mux.HandleFunc("GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
 	mux.HandleFunc("GET /registrations", s.handleRegistrations)    // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
+	mux.HandleFunc("POST /register", s.handleRegister)             // a frood joins the live registry (additive, optional; not yet required)
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 

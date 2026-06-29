@@ -11,3 +11,10 @@ import _ "embed"
 //
 //go:embed delight/v1/delight.proto
 var BackupEventSchema string
+
+// RegisterRefusedSchema is the PROTOBUF schema text registered under the
+// registry.v1.RegisterRefused subject (RecordNameStrategy). registry.v1 is delightd-owned
+// (not vendored); events.proto is kept self-contained so this schema registers on its own.
+//
+//go:embed registry/v1/events.proto
+var RegisterRefusedSchema string

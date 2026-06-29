@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+// Package registry.v1 also carries delightd's registry events. This file holds the events
+// the broker emits onto the bus; it is intentionally self-contained (only a timestamp
+// import, no reference to RegisterRequest/frood) so its schema registers cleanly on its own.
+package registry.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// RegisterRefused is emitted when a /register is NOT accepted. The never-silent rule: a
+// refusal is not only an HTTP response to the caller -- it is also a visible event on the
+// bus describing what was asked for and could not be given, so an operator (or an agent
+// watching the stream) sees froods that tried and were turned away, not just the froods that
+// joined. It is flat by design: the salient facts, not the whole request payload.
+message RegisterRefused {
+  // project is the project the caller claimed to be.
+  string project = 1;
+  // endpoint is the endpoint authority it tried to claim (may be empty if none was given).
+  string endpoint = 2;
+  // code is a stable, machine-readable category for the refusal (e.g. "undeclared_project",
+  // "inconsistent_identity", "endpoint_held", "unknown_subject", "missing_required_subject",
+  // "malformed_serves", "unreachable").
+  string code = 3;
+  // reason is the human-readable explanation (the same text returned to the caller).
+  string reason = 4;
+  // refused_at is when the refusal happened.
+  google.protobuf.Timestamp refused_at = 5;
+
+  // Reserved for future fields (the claimed identity, contract counts) without renumbering.
+  reserved 6 to 15;
+}
