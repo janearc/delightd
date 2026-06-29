@@ -73,3 +73,10 @@ message Registration {
   // Reserved for future record fields (last_seen, renewal count) without renumbering.
   reserved 7 to 15;
 }
+
+// RegistrationSet is the whole live registry as one message: the form delightd serves on
+// GET /registrations and persists as its warm-start snapshot. The on-disk snapshot IS this
+// contract (protojson), so the cache cannot drift from the wire shape.
+message RegistrationSet {
+  repeated Registration registrations = 1;
+}

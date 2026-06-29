@@ -25,6 +25,7 @@ import (
 	"delightd/pkg/exports"
 	"delightd/pkg/httpapi"
 	"delightd/pkg/metrics"
+	"delightd/pkg/registry"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 	"delightd/pkg/traefik"
@@ -314,9 +315,19 @@ func runDaemon(dryRun, immediate bool) error {
 		}(proj)
 	}
 
+	// The live citizen registry (the /register broker's state). Its snapshot is a
+	// warm-start cache under DaemonRoot; loading it on boot means discovery is available
+	// immediately rather than blank until the first re-register. Additive: it sits
+	// alongside the yaml/poll roster and replaces nothing. A failed load is logged and the
+	// daemon continues with an empty registry (the availability mandate: come up anyway).
+	reg := registry.New(filepath.Join(cfg.System.DaemonRoot, "registry", "registrations.json"), slog.Default())
+	if err := reg.Load(); err != nil {
+		slog.Error("registry: warm-start load failed; continuing with empty registry", "error", err)
+	}
+
 	// The control-port HTTP surface lives in pkg/httpapi so handlers are
 	// unit-testable; main retains only wiring and the daemon control loop.
-	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, dryRun)
+	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, dryRun, reg)
 	mux := api.Mux()
 
 	// Resolve to the canonical control port (config.DefaultControlPort = 8088) when
