@@ -31,10 +31,11 @@ message Deploy {
 message Project {
   string name = 1;
   string path = 2;
-  // essential is the project's tier (fleet's tier-0 classification reads it). It is
-  // declared `optional` (explicit presence) so it is always emitted on the wire --
-  // including the value false -- without forcing every other field to also emit its zero
-  // value. Without this, protojson would omit essential=false and break back-compat.
+  // essential is the project's tier (fleet's tier-0 classification reads it). The
+  // `optional` keyword here is a serialization lever, not a maybe-absent marker: it gives
+  // the field proto3 explicit presence, which is what makes protojson emit it even when
+  // the value is false. Without it, protojson omits a false bool and fleet's tier-0 read
+  // sees the field missing.
   optional bool essential = 3;
   // deploy is always present on the wire (an empty object for non-deployable projects),
   // matching the prior shape.
@@ -44,8 +45,12 @@ message Project {
   optional string remote_url = 5;
   // kind is the archetype discriminator. Watcher is the default; see Kind.
   Kind kind = 6;
-  // endpoint is a listener's address (host:port or URL). Empty for watchers.
-  string endpoint = 7;
+
+  // Reserved: a listener endpoint will be added here as a structured message once the
+  // first listener defines its shape. A bare host:port-or-URL string can't evolve (scheme,
+  // health path, port set) without a protojson-breaking change, so we hold the number
+  // rather than ship a string we'd regret.
+  reserved 7;
 
   // Reserved for future roster-owned fields (e.g. backup policy, system tier) so they can
   // be promoted into the contract later without renumbering. The full config system is

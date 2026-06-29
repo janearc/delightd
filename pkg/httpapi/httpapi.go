@@ -132,8 +132,7 @@ func projectToProto(p config.ProjectConfig, remoteURL string) *registryv1.Projec
 			Deployment: p.Deploy.Deployment,
 			Command:    p.Deploy.Command,
 		},
-		Kind:     projectKind(p.Kind),
-		Endpoint: p.Endpoint,
+		Kind: projectKind(p.Kind),
 	}
 	if remoteURL != "" {
 		proj.RemoteUrl = proto.String(remoteURL)
