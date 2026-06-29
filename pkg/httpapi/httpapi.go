@@ -102,6 +102,13 @@ type rosterResponse struct {
 	Projects []json.RawMessage `json:"projects"`
 }
 
+// registrationsResponse is the GET /registrations body: the live frood registrations in the
+// same {status, items[]} envelope GET /projects uses, each item a protojson Registration.
+type registrationsResponse struct {
+	Status        string            `json:"status"`
+	Registrations []json.RawMessage `json:"registrations"`
+}
+
 // rosterMarshal serves the roster wire. UseProtoNames keeps snake_case field names
 // (name/path/essential/deploy/remote_url) byte-identical to the prior hand-written
 // shape. EmitUnpopulated is deliberately left off, so the wire stays sparse
@@ -241,17 +248,17 @@ func (s *Server) handleRegistrations(w http.ResponseWriter, r *http.Request) {
 	if s.reg != nil {
 		set = s.reg.Set()
 	}
-	b, err := rosterMarshal.Marshal(set)
-	if err != nil {
-		slog.Error("failed to marshal registrations", "error", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode registrations"})
-		return
+	regs := make([]json.RawMessage, 0, len(set.GetRegistrations()))
+	for _, reg := range set.GetRegistrations() {
+		b, err := rosterMarshal.Marshal(reg)
+		if err != nil {
+			slog.Error("failed to marshal registration", "project", reg.GetProject(), "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode registrations"})
+			return
+		}
+		regs = append(regs, b)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(b); err != nil {
-		slog.Error("failed to write registrations response", "error", err)
-	}
+	writeJSON(w, http.StatusOK, registrationsResponse{Status: "ok", Registrations: regs})
 }
 
 func (s *Server) handleGitAll(w http.ResponseWriter, r *http.Request) {

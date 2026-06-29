@@ -75,8 +75,12 @@ message Registration {
 }
 
 // RegistrationSet is the whole live registry as one message: the form delightd serves on
-// GET /registrations and persists as its warm-start snapshot. The on-disk snapshot IS this
-// contract (protojson), so the cache cannot drift from the wire shape.
+// GET /registrations. The store persists registrations individually (bbolt, keyed by
+// project); this message is the collected view. The warm cache is provisional, not truth --
+// a lease expires anything that stops renewing.
 message RegistrationSet {
   repeated Registration registrations = 1;
+
+  // Reserved for future set-level fields (e.g. a generated-at stamp) without renumbering.
+  reserved 2 to 15;
 }
