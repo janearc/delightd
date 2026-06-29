@@ -213,11 +213,16 @@ func runDaemon(dryRun, immediate bool) error {
 	// stays on delight.v1 (different contract, different topic). Best-effort and
 	// nil-safe, exactly like the backup publisher: a Kafka/SR outage disables the
 	// heartbeat, never the daemon's real work.
+	// emitPub is hoisted to function scope so it serves both the heartbeat and the
+	// /register NotRegistered events (one publisher, many subjects/topics). It stays nil if
+	// Kafka is unavailable, and every use of it is nil-safe.
+	var emitPub *emit.Publisher
 	if len(cfg.System.Kafka.Brokers) > 0 {
-		emitPub, err := emit.New(ctx, cfg.System.Kafka.Brokers, cfg.System.Kafka.SchemaRegistryURL)
+		p, err := emit.New(ctx, cfg.System.Kafka.Brokers, cfg.System.Kafka.SchemaRegistryURL)
 		if err != nil {
 			slog.Warn("frood heartbeat disabled: could not init emit publisher", "error", err)
 		} else {
+			emitPub = p
 			defer emitPub.Close()
 			// 15s liveness cadence (Big Little Mesh defaults to the same when interval <= 0).
 			// Heartbeat blocks, so it runs in its own goroutine until ctx cancels.
@@ -332,6 +337,12 @@ func runDaemon(dryRun, immediate bool) error {
 	// The control-port HTTP surface lives in pkg/httpapi so handlers are
 	// unit-testable; main retains only wiring and the daemon control loop.
 	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, dryRun, reg)
+	// never-silent: a /register that does not complete is emitted as registry.v1.NotRegistered
+	// on the bus, not only returned to the caller. Reuses the heartbeat's emit publisher; wired
+	// only when Kafka is available, so the outcome otherwise logs loudly (see emitNotRegistered).
+	if emitPub != nil {
+		api.UseEvents(emitPub, cfg.System.Kafka.Topic, delightproto.NotRegisteredSchema)
+	}
 	mux := api.Mux()
 
 	// Resolve to the canonical control port (config.DefaultControlPort = 8088) when
@@ -368,6 +379,9 @@ func runDaemon(dryRun, immediate bool) error {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("control port forced to shutdown abruptly", "error", err)
 	}
+	// the listener is stopped, so no new NotRegistered emits start; wait for any already in
+	// flight (each self-bounded to ~2s) so a NotRegistered event is not dropped on the way out.
+	api.DrainEvents()
 
 	slog.Info("shutdown complete")
 	return nil
