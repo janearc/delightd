@@ -1,128 +1,138 @@
 package registry
 
 import (
-	"os"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
-	"time"
 
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
-	froodv1 "delightd/gen/go/frood/v1"
 	registryv1 "delightd/gen/go/registry/v1"
 )
 
-// reg builds a deterministic Registration for round-trip comparison.
 func reg(project, addr string) *registryv1.Registration {
 	return &registryv1.Registration{
-		Project:      project,
-		Identity:     &froodv1.Identity{ServiceName: project, Project: project, Version: "v1"},
-		Endpoint:     &registryv1.Endpoint{Scheme: "http", Address: addr},
-		RegisteredAt: timestamppb.New(time.Unix(1000, 0).UTC()),
+		Project:  project,
+		Endpoint: &registryv1.Endpoint{Scheme: "http", Address: addr},
 	}
 }
 
-func snapPath(t *testing.T) string {
+func openTmp(t *testing.T) *Registry {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "registry", "registrations.json")
+	r, err := Open(filepath.Join(t.TempDir(), "registry", "registry.db"), nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	return r
 }
 
-// A cold start (no snapshot file) is an empty registry, not an error.
-func TestLoadColdStartEmpty(t *testing.T) {
-	r := New(snapPath(t), nil)
-	if err := r.Load(); err != nil {
-		t.Fatalf("cold-start load: %v", err)
-	}
-	if got := len(r.List()); got != 0 {
-		t.Fatalf("cold start should be empty, got %d", got)
-	}
-}
-
-// An empty registry round-trips: checkpoint with nothing, reload, still empty.
-func TestRoundTripEmpty(t *testing.T) {
-	path := snapPath(t)
-	if err := New(path, nil).checkpoint(); err != nil {
-		t.Fatalf("checkpoint empty: %v", err)
-	}
-	r := New(path, nil)
-	if err := r.Load(); err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if got := len(r.List()); got != 0 {
-		t.Fatalf("empty round-trip, got %d", got)
+// A freshly-opened store is empty.
+func TestColdStartEmpty(t *testing.T) {
+	if got := len(openTmp(t).List()); got != 0 {
+		t.Fatalf("cold start not empty: %d", got)
 	}
 }
 
-// Multiple registrations round-trip exactly, ordered by project.
-func TestRoundTripMulti(t *testing.T) {
-	path := snapPath(t)
-	w := New(path, nil)
-	// Put out of order; List/snapshot MUST sort by project.
-	if err := w.Put(reg("beta", "b:2")); err != nil {
+// Put then Get/List; List is ordered by project regardless of insert order.
+func TestPutGetListSorted(t *testing.T) {
+	r := openTmp(t)
+	if err := r.Put(reg("beta", "b:2")); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Put(reg("alpha", "a:1")); err != nil {
+	if err := r.Put(reg("alpha", "a:1")); err != nil {
 		t.Fatal(err)
 	}
-
-	r := New(path, nil)
-	if err := r.Load(); err != nil {
-		t.Fatalf("reload: %v", err)
+	g, ok := r.Get("alpha")
+	if !ok || g.GetEndpoint().GetAddress() != "a:1" {
+		t.Fatalf("get alpha: %v ok=%v", g, ok)
 	}
-	got := r.List()
-	if len(got) != 2 {
-		t.Fatalf("got %d registrations, want 2", len(got))
-	}
-	if !proto.Equal(got[0], reg("alpha", "a:1")) || !proto.Equal(got[1], reg("beta", "b:2")) {
-		t.Fatalf("round-trip mismatch: %v", got)
+	list := r.List()
+	if len(list) != 2 || list[0].GetProject() != "alpha" || list[1].GetProject() != "beta" {
+		t.Fatalf("list not sorted: %v", list)
 	}
 }
 
-// Warm start: a fresh Registry loads the snapshot a prior process wrote, so discovery is
-// available immediately.
-func TestWarmStartLoad(t *testing.T) {
-	path := snapPath(t)
-	if err := New(path, nil).Put(reg("paling", "paling.fleet:8090")); err != nil {
+// bbolt persistence is the warm start: a reopen of the same file sees prior writes.
+func TestWarmStartAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry", "registry.db")
+	r1, err := Open(path, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	r := New(path, nil)
-	if err := r.Load(); err != nil {
-		t.Fatalf("warm-start load: %v", err)
+	if err := r1.Put(reg("paling", "paling:8090")); err != nil {
+		t.Fatal(err)
 	}
-	g, ok := r.Get("paling")
-	if !ok || g.GetEndpoint().GetAddress() != "paling.fleet:8090" {
-		t.Fatalf("warm start missing paling: %v ok=%v", g, ok)
+	if err := r1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer r2.Close()
+	if g, ok := r2.Get("paling"); !ok || g.GetEndpoint().GetAddress() != "paling:8090" {
+		t.Fatalf("warm start lost paling: %v ok=%v", g, ok)
 	}
 }
 
-// The write is atomic: a successful checkpoint leaves no temp file behind, and a partial
-// temp file (a simulated mid-write) is never visible to a load -- Load reads only the
-// canonical path, so it sees the committed snapshot, never the half-written one.
-func TestAtomicWriteNoPartial(t *testing.T) {
-	path := snapPath(t)
-	if err := New(path, nil).Put(reg("alpha", "a:1")); err != nil {
+func TestDelete(t *testing.T) {
+	r := openTmp(t)
+	if err := r.Put(reg("x", "x:1")); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Dir(path)
-
-	tmps, _ := filepath.Glob(filepath.Join(dir, "*.tmp"))
-	if len(tmps) != 0 {
-		t.Fatalf("temp files left after checkpoint: %v", tmps)
-	}
-
-	// plant a half-written temp, as if a write had been interrupted before the rename.
-	if err := os.WriteFile(filepath.Join(dir, ".registrations-PARTIAL.json.tmp"), []byte("{ half-writt"), 0o600); err != nil {
+	if err := r.Delete("x"); err != nil {
 		t.Fatal(err)
 	}
-	r := New(path, nil)
-	if err := r.Load(); err != nil {
-		t.Fatalf("load must ignore the partial temp, got err: %v", err)
+	if _, ok := r.Get("x"); ok {
+		t.Fatal("delete did not remove")
 	}
-	if _, ok := r.Get("alpha"); !ok {
-		t.Fatal("committed snapshot was not loaded")
+	if err := r.Delete("absent"); err != nil {
+		t.Fatalf("delete of absent project should be a no-op: %v", err)
 	}
-	if got := len(r.List()); got != 1 {
-		t.Fatalf("partial leaked into the load: got %d", got)
+}
+
+// Upsert is the atomic collision check: a different project on the same endpoint is held;
+// the same project re-claiming its own endpoint is idempotent.
+func TestUpsertCollisionAndIdempotent(t *testing.T) {
+	r := openTmp(t)
+	if _, err := r.Upsert(reg("alpha", "shared:9000")); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	holder, err := r.Upsert(reg("beta", "shared:9000"))
+	if !errors.Is(err, ErrEndpointHeld) || holder != "alpha" {
+		t.Fatalf("collision: holder=%q err=%v, want alpha/ErrEndpointHeld", holder, err)
+	}
+	if _, ok := r.Get("beta"); ok {
+		t.Fatal("beta must not be recorded when its endpoint is held")
+	}
+	if _, err := r.Upsert(reg("alpha", "shared:9000")); err != nil {
+		t.Fatalf("same-project re-upsert should be idempotent: %v", err)
+	}
+}
+
+// Concurrent writers and readers must not race (run with -race) and the store stays
+// consistent.
+func TestConcurrentAccess(t *testing.T) {
+	r := openTmp(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			p := fmt.Sprintf("p%d", n)
+			if err := r.Put(reg(p, fmt.Sprintf("a:%d", n))); err != nil {
+				t.Errorf("put: %v", err)
+			}
+			_, _ = r.Get(p)
+			_ = r.List()
+			if _, err := r.Upsert(reg(p, fmt.Sprintf("a:%d", n))); err != nil {
+				t.Errorf("upsert: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if got := len(r.List()); got != 8 {
+		t.Fatalf("want 8 registrations, got %d", got)
 	}
 }

@@ -315,14 +315,18 @@ func runDaemon(dryRun, immediate bool) error {
 		}(proj)
 	}
 
-	// The live frood registry (the /register broker's state). Its snapshot is a
-	// warm-start cache under DaemonRoot; loading it on boot means discovery is available
-	// immediately rather than blank until the first re-register. Additive: it sits
-	// alongside the yaml/poll roster and replaces nothing. A failed load is logged and the
-	// daemon continues with an empty registry (the availability mandate: come up anyway).
-	reg := registry.New(filepath.Join(cfg.System.DaemonRoot, "registry", "registrations.json"), slog.Default())
-	if err := reg.Load(); err != nil {
-		slog.Error("registry: warm-start load failed; continuing with empty registry", "error", err)
+	// The live frood registry (the /register broker's state), backed by bbolt under
+	// DaemonRoot. Warm-start is implicit -- opening the db makes any registrations a prior
+	// process wrote available immediately, rather than blank until the first re-register.
+	// Additive: it sits alongside the yaml/poll roster and replaces nothing. If the store
+	// cannot be opened it is logged and the daemon continues with a nil registry (handlers
+	// serve an empty set) -- the availability mandate: come up anyway.
+	reg, err := registry.Open(filepath.Join(cfg.System.DaemonRoot, "registry", "registry.db"), slog.Default())
+	if err != nil {
+		slog.Error("registry: could not open bbolt store; continuing without it", "error", err)
+	}
+	if reg != nil {
+		defer reg.Close()
 	}
 
 	// The control-port HTTP surface lives in pkg/httpapi so handlers are

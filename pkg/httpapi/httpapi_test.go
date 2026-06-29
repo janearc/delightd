@@ -337,8 +337,13 @@ func TestHandleRegistrations(t *testing.T) {
 		t.Fatalf("nil registry should serve empty set, got: %s", rr.Body.String())
 	}
 
-	// A populated registry serves the live set as registry.v1.RegistrationSet (protojson).
-	reg := registry.New(filepath.Join(t.TempDir(), "registry", "registrations.json"), nil)
+	// A populated registry serves the live registrations in the {status, registrations[]}
+	// envelope, each a protojson Registration.
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "registry", "registry.db"), nil)
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	defer reg.Close()
 	if err := reg.Put(&registryv1.Registration{
 		Project:  "paling",
 		Endpoint: &registryv1.Endpoint{Scheme: "http", Address: "paling.fleet:8090"},
@@ -352,6 +357,9 @@ func TestHandleRegistrations(t *testing.T) {
 		t.Fatalf("code = %d, want 200", rr2.Code)
 	}
 	body := rr2.Body.String()
+	if !strings.Contains(body, `"status":"ok"`) {
+		t.Fatalf("missing {status} envelope: %s", body)
+	}
 	if !strings.Contains(body, `"project":"paling"`) || !strings.Contains(body, `"address":"paling.fleet:8090"`) {
 		t.Fatalf("registration not surfaced (proto field names expected): %s", body)
 	}
