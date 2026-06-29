@@ -9,7 +9,8 @@ These are **vendored copies** of contracts owned upstream; `task sync-proto` wip
 replaces each from its source, so keep them byte-identical to their originals (drift is
 detectable and is a bug). A change to a vendored contract is made upstream and re-vendored.
 
-- `delight/` — owned by `kafka-svc` (`~/work/kafka-logging/proto`). The bus event contracts.
+- `delight/` — owned by `kafka-svc` (`~/work/kafka-logging/proto`). The bus event contracts
+  delightd emits; kafka-svc owns the bus schemas, so delightd vendors the copy it generates from.
 - `citizen/` — owned by `blm` (`~/work/blm/proto/citizen`). The guaranteed citizen interface
   (`citizen.v1.Identity` / `ContractDescriptor`) that delightd's `registry.v1` register wire
   references.
@@ -18,6 +19,20 @@ detectable and is a bug). A change to a vendored contract is made upstream and r
 task sync-proto   # rm -rf + recopy proto/delight (from kafka-svc) and proto/citizen (from blm)
 task generate     # regenerates gen/go from the proto
 ```
+
+### Why `citizen.v1` is vendored here
+
+This one is not obvious top-to-bottom: it is a contract delightd does not own, copied in and
+then referenced by a contract delightd *does* own (`registry.v1`). The reason is ownership.
+`citizen.v1` is the universal citizen interface — the set *every* citizen on the mesh
+implements, a `good_citizen` concept that belongs to blm, not to delightd. delightd's
+`/register` broker has to speak it: `registry.v1.RegisterRequest` carries the registering
+citizen's `citizen.v1.Identity` and `ContractDescriptor`. So delightd vendors a byte-identical
+copy and imports it from `registry.v1`, the same generate-at-build way it vendors `delight.v1`.
+Redefining the interface here would fork a contract blm owns; a cross-repo buf-module
+dependency is heavier than this repo needs. The split holds: blm owns the citizen interface,
+delightd owns the register protocol that uses it, and the copy under `citizen/` is where the
+two meet without either side owning the other's contract.
 
 ## `registry/` — delightd-owned
 
