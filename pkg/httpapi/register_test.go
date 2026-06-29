@@ -33,7 +33,7 @@ func (f fakeSubjects) SubjectExists(_ context.Context, subject string) (bool, er
 	return f.known[subject], nil
 }
 
-// fakeEvents records the RegisterRefused events the handler publishes, so tests can assert
+// fakeEvents records the NotRegistered events the handler publishes, so tests can assert
 // the never-silent behavior.
 type fakeEvents struct {
 	mu    sync.Mutex

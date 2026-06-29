@@ -50,8 +50,9 @@ type Server struct {
 
 	// events publishes the never-silent NotRegistered event; eventsTopic and
 	// notRegisteredSchema are its destination and schema text. Wired by main via UseEvents;
-	// nil until then (the outcome still returns its HTTP error and logs loudly). emitWG
-	// tracks the detached emit goroutines so a graceful shutdown (and the tests) can wait.
+	// nil until then (the outcome still returns its HTTP error and logs loudly). emitWG tracks
+	// the detached emit goroutines; DrainEvents waits on it, called by the shutdown path (and
+	// the tests) so in-flight emits are not dropped.
 	events              eventPublisher
 	eventsTopic         string
 	notRegisteredSchema string
@@ -95,6 +96,11 @@ func (s *Server) UseEvents(pub eventPublisher, topic, notRegisteredSchema string
 	s.eventsTopic = topic
 	s.notRegisteredSchema = notRegisteredSchema
 }
+
+// DrainEvents blocks until the detached NotRegistered emit goroutines have finished. It is
+// called on the shutdown path so an in-flight emit is not dropped when the daemon stops; each
+// emit is self-bounded (a 2s context), so this returns promptly. The tests use it too.
+func (s *Server) DrainEvents() { s.emitWG.Wait() }
 
 // healthResponse is the GET /health body.
 type healthResponse struct {
