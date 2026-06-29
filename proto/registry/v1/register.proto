@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+// Package registry.v1 also carries the /register broker wire: what a citizen sends to
+// register with delightd and what delightd returns. The Project message (project.proto) is
+// the unit being registered for; this file is the registration protocol. delightd owns this
+// contract (it is the broker); citizen.v1 -- the identity and contract-descriptor a citizen
+// reports -- is vendored from blm (see proto/README.md). Contract only; the handler is a
+// later step and registration is additive (not yet mandatory).
+package registry.v1;
+
+import "citizen/v1/citizen.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// Endpoint is one address a citizen listens on. It is structured (not a bare string) so it
+// can carry scheme and, later, a health path or port set without a protojson-breaking change.
+message Endpoint {
+  string scheme = 1;   // "http", "https", "grpc"
+  string address = 2;  // host:port or URL authority, e.g. "obs-svc-agg.fleet:8090"
+
+  // Reserved for future endpoint facets (health_path, named ports) without renumbering.
+  reserved 3 to 7;
+}
+
+// RegisterRequest is what a citizen sends to /register: the project it claims to bind to, its
+// identity, the contracts it speaks, and the endpoint(s) it has already bound. delightd
+// admits it only if the project is one it manages and the guaranteed interface checks out.
+message RegisterRequest {
+  // project is the declared registry.v1 Project name the citizen claims to be acting as.
+  string project = 1;
+  citizen.v1.Identity identity = 2;
+  citizen.v1.ContractDescriptor contracts = 3;
+  // endpoints are the addresses the citizen has already bound. delightd confirms one back in
+  // RegisterResponse (the confirm model -- see RegisterResponse.endpoint).
+  repeated Endpoint endpoints = 4;
+
+  // Reserved for future register-time fields (capabilities, requested lease) without renumbering.
+  reserved 5 to 15;
+}
+
+// RegisterResponse is delightd's reply: the confirmed registration and the lease under which
+// it holds.
+message RegisterResponse {
+  // identity is the confirmed identity (echoed so the citizen sees what was recorded).
+  citizen.v1.Identity identity = 1;
+  // endpoint is the address delightd recorded for this citizen. Today delightd confirms one
+  // of the endpoints the citizen reported; the field is single (not the citizen's list) so
+  // delightd can assign or redirect it later without a contract change.
+  Endpoint endpoint = 2;
+  // lease_ttl_seconds is how long the registration holds before it must be renewed. Modeled
+  // now though renewal and reaping come later; 0 means "no lease enforced yet".
+  uint32 lease_ttl_seconds = 3;
+  // config is room for configuration delightd may hand down to the citizen at register.
+  google.protobuf.Struct config = 4;
+
+  // Reserved for future assignment fields without renumbering.
+  reserved 5 to 15;
+}
+
+// Registration is the live record delightd holds for an admitted citizen: who it is, what it
+// speaks, where it answers, and when its lease lapses absent renewal.
+message Registration {
+  string project = 1;
+  citizen.v1.Identity identity = 2;
+  citizen.v1.ContractDescriptor contracts = 3;
+  Endpoint endpoint = 4;
+  // registered_at is when delightd admitted this citizen.
+  google.protobuf.Timestamp registered_at = 5;
+  // lease_expires_at is when the registration lapses if not renewed. Modeled now; the
+  // heartbeat-driven renewal and reaping that maintain it come later.
+  google.protobuf.Timestamp lease_expires_at = 6;
+
+  // Reserved for future record fields (last_seen, renewal count) without renumbering.
+  reserved 7 to 15;
+}

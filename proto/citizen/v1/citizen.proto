@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+// Package citizen.v1 is the universal citizen interface for the mesh: the minimum every
+// citizen -- watcher or listener (see docs/services.md) -- must expose so a peer or delightd
+// can learn who it is and what it speaks. It is a good_citizen concept (the shared mesh
+// layer), not specific to any one service. The interface is verified when a citizen
+// registers; see docs/citizens.md.
+package citizen.v1;
+
+// Identity is the who-am-I a citizen reports: enough to bind it to a declared project and to
+// key its heartbeat, discovery, and registration.
+message Identity {
+  // service_name is the citizen's own name -- the key it heartbeats under and is discovered by.
+  string service_name = 1;
+  // project is the declared registry.v1 Project name this citizen binds to. It is the name
+  // (a string), not the Project message -- citizen.v1 carries no dependency on the broker's
+  // contract. delightd checks the project is one it manages at register.
+  string project = 2;
+  // version is the citizen's build/version string (e.g. a semver or `git describe`).
+  string version = 3;
+
+  // Reserved for future identity facets (instance id, git sha, start time) without renumbering.
+  reserved 4 to 15;
+}
+
+// ContractRef names one contract a citizen speaks. subject is the contract's
+// RecordNameStrategy identity -- the fully-qualified protobuf message name, e.g.
+// "observability.v1.ServiceHealthHeartbeat" -- which is the same key the bus and the schema
+// registry use, so a claim made here is checkable against what is actually registered.
+message ContractRef {
+  string subject = 1;
+  // version is an optional schema/contract version pin; empty means "whatever is current".
+  string version = 2;
+
+  // Reserved for future qualifiers (topic, role, required-vs-optional) without renumbering.
+  reserved 3 to 7;
+}
+
+// ContractDescriptor is what a citizen claims to speak, split by direction so a peer can route
+// and delightd can later verify "you speak what you claim":
+//   - emits:    messages this citizen publishes onto the bus;
+//   - consumes: messages this citizen reads from the bus;
+//   - serves:   contracts this citizen answers directly as a service (an RPC / HTTP surface).
+// A watcher typically emits and consumes; a listener typically serves. These are claims made
+// at register time, to be checked against the registry and known contracts -- not trusted
+// blindly.
+message ContractDescriptor {
+  repeated ContractRef emits = 1;
+  repeated ContractRef consumes = 2;
+  repeated ContractRef serves = 3;
+
+  // Reserved for future contract relationships without renumbering.
+  reserved 4 to 7;
+}

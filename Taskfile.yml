@@ -1,15 +1,19 @@
 version: '3'
 
-# delightd consumes kafka-svc's contracts via generate-at-build: the proto is
-# vendored under proto/ (source of truth: kafka-svc), and Go bindings are
-# generated into gen/ (never committed). buf is required (https://buf.build).
+# delightd consumes external contracts via generate-at-build: each is vendored
+# under proto/ (byte-identical to its upstream source of truth), and Go bindings
+# are generated into gen/ (never committed). buf is required (https://buf.build).
+# Vendored: delight.v1 (from kafka-svc), citizen.v1 (from blm). delightd-owned:
+# registry.v1 -- never re-synced. See proto/README.md.
 
 tasks:
   sync-proto:
-    desc: Re-vendor delight.v1 contracts from kafka-svc (the source of truth).
+    desc: Re-vendor external contracts (delight.v1 from kafka-svc, citizen.v1 from blm).
     cmds:
       - rm -rf proto/delight
       - cp -R ../kafka-logging/proto/delight proto/delight
+      - rm -rf proto/citizen
+      - cp -R ../blm/proto/citizen proto/citizen
 
   generate:
     desc: Generate Go bindings from the vendored proto into gen/ (never committed).
