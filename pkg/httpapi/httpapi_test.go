@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	registryv1 "delightd/gen/go/registry/v1"
+
 	"delightd/config"
 	"delightd/pkg/discovery"
+	"delightd/pkg/registry"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 )
@@ -42,7 +46,7 @@ func errorBackoffMachine(t *testing.T, name string) *state.Machine {
 
 func TestHandleHealth(t *testing.T) {
 	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "a"}, {Name: "b"}}}
-	s := New(cfg, nil, fakeFragments{}, nil, true)
+	s := New(cfg, nil, fakeFragments{}, nil, true, nil)
 
 	rr := httptest.NewRecorder()
 	s.handleHealth(rr, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -59,7 +63,7 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleDiscovery(t *testing.T) {
-	s := New(&config.DelightConfig{}, nil, fakeFragments{}, nil, false)
+	s := New(&config.DelightConfig{}, nil, fakeFragments{}, nil, false, nil)
 	s.discover = noDiscovery
 
 	rr := httptest.NewRecorder()
@@ -81,7 +85,7 @@ func TestHandleDiscovery(t *testing.T) {
 
 func TestHandleProjectState(t *testing.T) {
 	machines := map[string]*state.Machine{"known": state.NewMachine("known")}
-	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false)
+	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false, nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects/known/state", nil)
@@ -105,7 +109,7 @@ func TestHandleBackup(t *testing.T) {
 		"ready":   state.NewMachine("ready"),
 		"backoff": errorBackoffMachine(t, "backoff"),
 	}
-	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false)
+	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false, nil)
 
 	// fallow machine accepts the trigger
 	rr := httptest.NewRecorder()
@@ -137,7 +141,7 @@ func TestHandleBackup(t *testing.T) {
 
 func TestHandleReset(t *testing.T) {
 	machines := map[string]*state.Machine{"stuck": errorBackoffMachine(t, "stuck")}
-	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false)
+	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false, nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/projects/stuck/reset", nil)
@@ -164,7 +168,7 @@ func TestHandleGitAll(t *testing.T) {
 	// the per-repo read fails into Error, but the sweep still returns 200. Deep
 	// git semantics are covered in pkg/gitstate.
 	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "p", Path: t.TempDir()}}}
-	s := New(cfg, nil, fakeFragments{}, nil, false)
+	s := New(cfg, nil, fakeFragments{}, nil, false, nil)
 
 	rr := httptest.NewRecorder()
 	s.handleGitAll(rr, httptest.NewRequest(http.MethodGet, "/git", nil))
@@ -205,7 +209,7 @@ func TestHandleProjectsAll(t *testing.T) {
 		},
 		{Name: "taco", Path: t.TempDir(), Essential: false},
 	}}
-	s := New(cfg, nil, fakeFragments{}, nil, false)
+	s := New(cfg, nil, fakeFragments{}, nil, false, nil)
 
 	rr := httptest.NewRecorder()
 	s.handleProjectsAll(rr, httptest.NewRequest(http.MethodGet, "/projects", nil))
@@ -315,9 +319,47 @@ func TestRosterBackCompatShape(t *testing.T) {
 	}
 }
 
+func TestHandleRegistrations(t *testing.T) {
+	// A nil registry serves an empty RegistrationSet (the route is additive).
+	s := New(&config.DelightConfig{}, nil, fakeFragments{}, nil, false, nil)
+	rr := httptest.NewRecorder()
+	s.handleRegistrations(rr, httptest.NewRequest(http.MethodGet, "/registrations", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("nil registry: code = %d, want 200", rr.Code)
+	}
+	var empty struct {
+		Registrations []json.RawMessage `json:"registrations"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &empty); err != nil {
+		t.Fatalf("decode empty: %v", err)
+	}
+	if len(empty.Registrations) != 0 {
+		t.Fatalf("nil registry should serve empty set, got: %s", rr.Body.String())
+	}
+
+	// A populated registry serves the live set as registry.v1.RegistrationSet (protojson).
+	reg := registry.New(filepath.Join(t.TempDir(), "registry", "registrations.json"), nil)
+	if err := reg.Put(&registryv1.Registration{
+		Project:  "paling",
+		Endpoint: &registryv1.Endpoint{Scheme: "http", Address: "paling.fleet:8090"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s2 := New(&config.DelightConfig{}, nil, fakeFragments{}, nil, false, reg)
+	rr2 := httptest.NewRecorder()
+	s2.handleRegistrations(rr2, httptest.NewRequest(http.MethodGet, "/registrations", nil))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rr2.Code)
+	}
+	body := rr2.Body.String()
+	if !strings.Contains(body, `"project":"paling"`) || !strings.Contains(body, `"address":"paling.fleet:8090"`) {
+		t.Fatalf("registration not surfaced (proto field names expected): %s", body)
+	}
+}
+
 func TestHandleProjectGit(t *testing.T) {
 	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "known", Path: t.TempDir()}}}
-	s := New(cfg, nil, fakeFragments{}, nil, false)
+	s := New(cfg, nil, fakeFragments{}, nil, false, nil)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/projects/known/git", nil)
@@ -340,7 +382,7 @@ func TestHandleProjectGit(t *testing.T) {
 
 func TestMux_RoutingAndMCPGating(t *testing.T) {
 	machines := map[string]*state.Machine{"p": state.NewMachine("p")}
-	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false)
+	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false, nil)
 	s.discover = noDiscovery
 	mux := s.Mux()
 
@@ -350,6 +392,7 @@ func TestMux_RoutingAndMCPGating(t *testing.T) {
 	}{
 		{http.MethodGet, "/projects/p/introspect", http.StatusOK},
 		{http.MethodGet, "/projects", http.StatusOK},
+		{http.MethodGet, "/registrations", http.StatusOK},
 		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/health", http.StatusOK},
 		{http.MethodPost, "/mcp", http.StatusNotFound}, // MCP disabled by default
@@ -367,7 +410,7 @@ func TestMux_MCPEnabled(t *testing.T) {
 	cfg.System.AgentSkills.Enabled = true
 	cfg.System.AgentSkills.ExposeVia = []string{"mcp"}
 	agg := skills.NewAggregator(t.TempDir())
-	s := New(cfg, nil, fakeFragments{}, agg, false)
+	s := New(cfg, nil, fakeFragments{}, agg, false, nil)
 	mux := s.Mux()
 
 	rr := httptest.NewRecorder()

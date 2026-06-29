@@ -21,6 +21,7 @@ import (
 	"delightd/pkg/gitstate"
 	"delightd/pkg/introspect"
 	"delightd/pkg/metrics"
+	"delightd/pkg/registry"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 )
@@ -35,19 +36,25 @@ type Server struct {
 	skills   *skills.Aggregator
 	dryRun   bool
 
+	// reg is the live citizen registry served by GET /registrations. It MAY be nil in
+	// tests that do not exercise registration; handlers treat nil as an empty registry.
+	reg *registry.Registry
+
 	// discover is the local-LLM discovery source, injectable so handlers can be
 	// tested without probing the network.
 	discover func(context.Context, *config.DelightConfig) []discovery.ModelSource
 }
 
-// New constructs a Server wired to the live daemon dependencies.
-func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports introspect.FragmentChecker, skillAgg *skills.Aggregator, dryRun bool) *Server {
+// New constructs a Server wired to the live daemon dependencies. reg MAY be nil (the
+// registry is additive; a nil registry serves an empty set).
+func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports introspect.FragmentChecker, skillAgg *skills.Aggregator, dryRun bool, reg *registry.Registry) *Server {
 	return &Server{
 		cfg:      cfg,
 		machines: machines,
 		exports:  exports,
 		skills:   skillAgg,
 		dryRun:   dryRun,
+		reg:      reg,
 		discover: discovery.DiscoverLocalLLMs,
 	}
 }
@@ -157,6 +164,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
 
 	mux.HandleFunc("GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
+	mux.HandleFunc("GET /registrations", s.handleRegistrations)    // live citizen registrations (registry.v1.RegistrationSet); additive, alongside the roster
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 
@@ -222,6 +230,28 @@ func (s *Server) handleProjectsAll(w http.ResponseWriter, r *http.Request) {
 		projects = append(projects, raw)
 	}
 	writeJSON(w, http.StatusOK, rosterResponse{Status: "ok", Projects: projects})
+}
+
+// handleRegistrations serves the live citizen registry as a registry.v1.RegistrationSet
+// (protojson, the contract type per RULE-3 -- no hand-rolled JSON). It is additive and sits
+// alongside GET /projects: the roster is the static declared set, this is the live
+// registered set. A nil registry (tests) serves an empty set.
+func (s *Server) handleRegistrations(w http.ResponseWriter, r *http.Request) {
+	set := &registryv1.RegistrationSet{}
+	if s.reg != nil {
+		set = s.reg.Set()
+	}
+	b, err := rosterMarshal.Marshal(set)
+	if err != nil {
+		slog.Error("failed to marshal registrations", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode registrations"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(b); err != nil {
+		slog.Error("failed to write registrations response", "error", err)
+	}
 }
 
 func (s *Server) handleGitAll(w http.ResponseWriter, r *http.Request) {
