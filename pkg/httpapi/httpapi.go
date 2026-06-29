@@ -36,7 +36,7 @@ type Server struct {
 	skills   *skills.Aggregator
 	dryRun   bool
 
-	// reg is the live citizen registry served by GET /registrations. It MAY be nil in
+	// reg is the live frood registry served by GET /registrations. It MAY be nil in
 	// tests that do not exercise registration; handlers treat nil as an empty registry.
 	reg *registry.Registry
 
@@ -164,7 +164,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
 
 	mux.HandleFunc("GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
-	mux.HandleFunc("GET /registrations", s.handleRegistrations)    // live citizen registrations (registry.v1.RegistrationSet); additive, alongside the roster
+	mux.HandleFunc("GET /registrations", s.handleRegistrations)    // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 
@@ -232,7 +232,7 @@ func (s *Server) handleProjectsAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rosterResponse{Status: "ok", Projects: projects})
 }
 
-// handleRegistrations serves the live citizen registry as a registry.v1.RegistrationSet
+// handleRegistrations serves the live frood registry as a registry.v1.RegistrationSet
 // (protojson, the contract type per RULE-3 -- no hand-rolled JSON). It is additive and sits
 // alongside GET /projects: the roster is the static declared set, this is the live
 // registered set. A nil registry (tests) serves an empty set.

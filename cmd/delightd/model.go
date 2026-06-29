@@ -143,10 +143,10 @@ func modelCmd() *cobra.Command {
 // defaultDeploymentsPath resolves the deployment set under delightd's config root
 // (DELIGHT_CONFIG_ROOT, default ~/etc), overridable with --deployments.
 //
-// NOTE (blm seam): the descriptor here is delightd-local, but blm owns the wire contract
+// NOTE (Big Little Mesh seam): the descriptor here is delightd-local, but Big Little Mesh owns the wire contract
 // (model.v1), which docs/model-hosting.md makes the umbrella. Reconciling the two --
 // delightd exposing its deployments as model.v1 descriptors for discovery, and the
-// config/paths aligning with good-citizen conventions -- is a later, tracked step.
+// config/paths aligning with frood conventions -- is a later, tracked step.
 func defaultDeploymentsPath() string {
 	root := os.Getenv("DELIGHT_CONFIG_ROOT")
 	if root == "" {

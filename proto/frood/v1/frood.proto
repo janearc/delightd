@@ -1,29 +1,29 @@
 syntax = "proto3";
 
-// Package citizen.v1 is the universal citizen interface for the mesh: the minimum every
-// citizen -- watcher or listener (see docs/services.md) -- must expose so a peer or delightd
-// can learn who it is and what it speaks. It is a good_citizen concept (the shared mesh
-// layer), not specific to any one service. The interface is verified when a citizen
-// registers; see docs/citizens.md.
-package citizen.v1;
+// Package frood.v1 is the universal frood interface for the mesh: the minimum every
+// frood -- watcher or listener (see docs/services.md) -- must expose so a peer or delightd
+// can learn who it is and what it speaks. It is a frood concept (the shared mesh
+// layer), not specific to any one service. The interface is verified when a frood
+// registers; see docs/frood.md.
+package frood.v1;
 
-// Identity is the who-am-I a citizen reports: enough to bind it to a declared project and to
+// Identity is the who-am-I a frood reports: enough to bind it to a declared project and to
 // key its heartbeat, discovery, and registration.
 message Identity {
-  // service_name is the citizen's own name -- the key it heartbeats under and is discovered by.
+  // service_name is the frood's own name -- the key it heartbeats under and is discovered by.
   string service_name = 1;
-  // project is the declared registry.v1 Project name this citizen binds to. It is the name
-  // (a string), not the Project message -- citizen.v1 carries no dependency on the broker's
+  // project is the declared registry.v1 Project name this frood binds to. It is the name
+  // (a string), not the Project message -- frood.v1 carries no dependency on the broker's
   // contract. delightd checks the project is one it manages at register.
   string project = 2;
-  // version is the citizen's build/version string (e.g. a semver or `git describe`).
+  // version is the frood's build/version string (e.g. a semver or `git describe`).
   string version = 3;
 
   // Reserved for future identity facets (instance id, git sha, start time) without renumbering.
   reserved 4 to 15;
 }
 
-// ContractRef names one contract a citizen speaks. subject is the contract's
+// ContractRef names one contract a frood speaks. subject is the contract's
 // RecordNameStrategy identity -- the fully-qualified protobuf message name, e.g.
 // "observability.v1.ServiceHealthHeartbeat" -- which is the same key the bus and the schema
 // registry use, so a claim made here is checkable against what is actually registered.
@@ -36,11 +36,11 @@ message ContractRef {
   reserved 3 to 7;
 }
 
-// ContractDescriptor is what a citizen claims to speak, split by direction so a peer can route
+// ContractDescriptor is what a frood claims to speak, split by direction so a peer can route
 // and delightd can later verify "you speak what you claim":
-//   - emits:    messages this citizen publishes onto the bus;
-//   - consumes: messages this citizen reads from the bus;
-//   - serves:   contracts this citizen answers directly as a service (an RPC / HTTP surface).
+//   - emits:    messages this frood publishes onto the bus;
+//   - consumes: messages this frood reads from the bus;
+//   - serves:   contracts this frood answers directly as a service (an RPC / HTTP surface).
 // A watcher typically emits and consumes; a listener typically serves. These are claims made
 // at register time, to be checked against the registry and known contracts -- not trusted
 // blindly.

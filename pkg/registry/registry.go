@@ -1,10 +1,10 @@
-// Package registry holds delightd's in-memory set of live citizen registrations -- the
+// Package registry holds delightd's in-memory set of live frood registrations -- the
 // state the /register broker maintains. It sits ALONGSIDE the static yaml/poll roster and
 // does not replace it; nothing in the broker is mandatory yet.
 //
 // The on-disk snapshot is a WARM-START CACHE, not the source of truth. Authority is the
 // live process: the snapshot exists only so a delightd bounce does not blank discovery.
-// Entries loaded from it MUST NOT be trusted permanently -- the lease (a later step) reaps
+// Entries loaded from it MUST NOT be trusted permanently -- the lease (a later step) expires
 // any that do not renew. The snapshot's form IS the contract (`registry.v1.RegistrationSet`
 // as protojson), so the cache cannot drift from the wire shape.
 package registry
@@ -27,10 +27,10 @@ import (
 // and on-wire shapes match the contract exactly.
 var marshal = protojson.MarshalOptions{UseProtoNames: true}
 
-// Registry is the live set of citizen registrations, keyed by declared project name -- one
+// Registry is the live set of frood registrations, keyed by declared project name -- one
 // live registration per project. The mesh is nodes==1 today; a multi-replica registry is a
 // future thought, deliberately NOT built here. All access is guarded so handlers and the
-// (later) reap sweep can touch it without a data race.
+// (later) expiry sweep can touch it without a data race.
 type Registry struct {
 	mu        sync.RWMutex
 	byProject map[string]*registryv1.Registration
@@ -85,7 +85,7 @@ func (r *Registry) Put(reg *registryv1.Registration) error {
 	return r.checkpoint()
 }
 
-// Delete removes a project's registration (e.g. a reap) and checkpoints. Deleting an absent
+// Delete removes a project's registration (e.g. an expiry) and checkpoints. Deleting an absent
 // project is a no-op and still checkpoints, so the on-disk form always reflects memory.
 func (r *Registry) Delete(project string) error {
 	r.mu.Lock()
