@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/go-git/go-git/v5 v5.19.1
-	github.com/janearc/big-little-mesh v0.0.0-20260627082936-bd09cacd9686
+	github.com/janearc/big-little-mesh v0.0.0-20260629134544-acb1ed92c4bf
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/twmb/franz-go v1.21.3
@@ -49,10 +49,3 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
-
-// PROVISIONAL (rename in flight): Big Little Mesh is being renamed from
-// github.com/janearc/blm to github.com/janearc/big-little-mesh. Until the renamed
-// module is tagged/published, resolve it from the sibling checkout. Drop this replace
-// and pin a published big-little-mesh version (go get github.com/janearc/big-little-mesh@<rev>)
-// once the repo rename + the big-little-mesh PR have landed.
-replace github.com/janearc/big-little-mesh => ../big-little-mesh
