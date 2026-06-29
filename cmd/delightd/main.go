@@ -372,8 +372,9 @@ func runDaemon(dryRun, immediate bool) error {
 		var refreshedSeen sync.Map
 		// Refresh: consume observability.events; each heartbeat refreshes the lease of the
 		// registration whose identity service_name matches. Heartbeats refresh, never create.
-		// nil-safe: a down broker disables refresh (the sweep then expires unrefreshed
-		// entries), never the daemon.
+		// This is the "your heartbeat is your keepalive" coupling stated in Big Little Mesh's
+		// docs/frood.md: a beat in any state refreshes, only silence expires. nil-safe: a down
+		// broker disables refresh (the sweep then expires unrefreshed entries), never the daemon.
 		if len(cfg.System.Kafka.Brokers) > 0 {
 			hb, err := consume.New(ctx, cfg.System.Kafka.Brokers, frood.TopicObservability, "delightd-registry-lease", logger)
 			if err != nil {
