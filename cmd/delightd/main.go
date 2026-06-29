@@ -8,13 +8,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/janearc/big-little-mesh/consume"
 	"github.com/janearc/big-little-mesh/emit"
 	"github.com/janearc/big-little-mesh/frood"
+	observabilityv1 "github.com/janearc/big-little-mesh/gen/go/observability/v1"
 	observabilityproto "github.com/janearc/big-little-mesh/proto/observability/v1"
 	"github.com/spf13/cobra"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"delightd/config"
@@ -332,6 +337,12 @@ func runDaemon(dryRun, immediate bool) error {
 	}
 	if reg != nil {
 		defer reg.Close()
+		// Warm-loaded registrations are provisional: re-stamp them with a short grace lease so
+		// a frood that died while delightd was down is expired soon after boot unless its
+		// heartbeat refreshes the lease first.
+		if err := reg.ReconcileWarmStart(registry.WarmStartGrace); err != nil {
+			slog.Error("registry: warm-start reconcile failed", "error", err)
+		}
 	}
 
 	// The control-port HTTP surface lives in pkg/httpapi so handlers are
@@ -344,6 +355,78 @@ func runDaemon(dryRun, immediate bool) error {
 		api.UseEvents(emitPub, cfg.System.Kafka.Topic, delightproto.NotRegisteredSchema)
 	}
 	mux := api.Mux()
+
+	// Lease lifecycle (additive): a registration is held by a lease the frood's heartbeat
+	// refreshes, and the expiry sweep removes any that lapse. delightd does not require froods
+	// to re-register -- it consumes the fleet heartbeat they already emit.
+	//
+	// Note: registry liveness is fully gated on the heartbeat pipe -- a fleet-wide broker
+	// outage refreshes nothing and the sweep drains the registry within one lease TTL. That is
+	// safe-by-omission while the yaml/poll roster is still authoritative (the registry is
+	// additive), but it becomes a real availability concern at R-final, when register is
+	// mandatory and the roster is retired.
+	if reg != nil {
+		// refreshedSeen records the service_names whose heartbeat refreshed a lease since boot,
+		// so the sweep can distinguish "went quiet" from "never refreshed at all" (the latter
+		// hints at a heartbeat service_name that does not match any registration's identity).
+		var refreshedSeen sync.Map
+		// Refresh: consume observability.events; each heartbeat refreshes the lease of the
+		// registration whose identity service_name matches. Heartbeats refresh, never create.
+		// This is the "your heartbeat is your keepalive" coupling stated in Big Little Mesh's
+		// docs/frood.md: a beat in any state refreshes, only silence expires. nil-safe: a down
+		// broker disables refresh (the sweep then expires unrefreshed entries), never the daemon.
+		if len(cfg.System.Kafka.Brokers) > 0 {
+			hb, err := consume.New(ctx, cfg.System.Kafka.Brokers, frood.TopicObservability, "delightd-registry-lease", logger)
+			if err != nil {
+				logger.Warn("registry lease refresh disabled: could not start heartbeat consumer", "error", err)
+			} else {
+				defer hb.Close()
+				go hb.Run(ctx, func(_ context.Context, payload []byte, _ *kgo.Record) error {
+					var beat observabilityv1.ServiceHealthHeartbeat
+					if err := proto.Unmarshal(payload, &beat); err != nil {
+						return err
+					}
+					if ok, err := reg.RefreshLease(beat.GetServiceName(), registry.DefaultLeaseTTL); err != nil {
+						return err
+					} else if ok {
+						refreshedSeen.Store(beat.GetServiceName(), true)
+						logger.Debug("registry: refreshed lease from heartbeat", "service", beat.GetServiceName())
+					}
+					return nil
+				})
+			}
+		}
+		// Expiry sweep: a ticker-blocked loop (no busy-wait) expires registrations past their
+		// lease, in one transaction, and logs each one -- expiry is visible, never silent.
+		go func() {
+			ticker := time.NewTicker(registry.DefaultSweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					expired, err := reg.ExpireDue(time.Now().UTC())
+					if err != nil {
+						logger.Error("registry: expiry sweep failed", "error", err)
+						continue
+					}
+					for _, e := range expired {
+						svc := e.GetIdentity().GetServiceName()
+						if _, seen := refreshedSeen.Load(svc); !seen {
+							// never refreshed since boot: a legitimately dead frood, or a live
+							// one whose heartbeat service_name does not match its registration.
+							logger.Warn("registry: expired a registration never refreshed since boot (check the frood's heartbeat service_name matches its identity)",
+								"project", e.GetProject(), "service", svc)
+						} else {
+							logger.Info("registry: expired registration (lease lapsed)",
+								"project", e.GetProject(), "service", svc)
+						}
+					}
+				}
+			}
+		}()
+	}
 
 	// Resolve to the canonical control port (config.DefaultControlPort = 8088) when
 	// the config leaves it unset, so the listener always lands where compose, kube,
