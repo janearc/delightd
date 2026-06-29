@@ -9,6 +9,12 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
+	registryv1 "delightd/gen/go/registry/v1"
 
 	"delightd/config"
 	"delightd/pkg/discovery"
@@ -78,26 +84,60 @@ type gitStateResponse struct {
 	Projects []gitstate.ProjectGit `json:"projects"`
 }
 
-// rosterEntry is one project in the GET /projects listing: the roster fields
-// delightd now owns (the seam in docs/fleet-and-delightd.md) plus the live remote
-// URL. fleet-svc consumes this for its lifecycle, bootstrap, and tier-0
-// classification in place of parsing WorkstationConfig.yaml. RemoteURL is read
-// per-request (cheap: repo config only, no worktree walk) and omitted when no
-// remote can be resolved.
-type rosterEntry struct {
-	Name      string              `json:"name"`
-	Path      string              `json:"path"`
-	Essential bool                `json:"essential"`
-	Deploy    config.DeployConfig `json:"deploy"`
-	RemoteURL string              `json:"remote_url,omitempty"`
+// rosterResponse is the GET /projects body: every managed project as a
+// registry.v1.Project (protojson). This makes fleet membership a first-class,
+// queryable, contract-typed surface rather than something inferred from GET /git.
+// Each entry is a marshaled Project; the {status, projects[]} envelope is unchanged,
+// and the roster fields fleet already reads (name/path/essential/deploy/remote_url)
+// keep their prior JSON shape.
+type rosterResponse struct {
+	Status   string            `json:"status"`
+	Projects []json.RawMessage `json:"projects"`
 }
 
-// rosterResponse is the GET /projects body: every managed project with its
-// roster fields. This makes fleet membership a first-class, queryable surface
-// rather than something inferred from GET /git.
-type rosterResponse struct {
-	Status   string        `json:"status"`
-	Projects []rosterEntry `json:"projects"`
+// rosterMarshal serves the roster wire. UseProtoNames keeps snake_case field names
+// (name/path/essential/deploy/remote_url) byte-identical to the prior hand-written
+// shape. EmitUnpopulated is deliberately left off, so the wire stays sparse
+// (omitempty-equivalent); the one field that must always appear -- essential -- is
+// modeled `optional` and always set, so it emits even when false without zero-filling
+// every other field.
+var rosterMarshal = protojson.MarshalOptions{UseProtoNames: true}
+
+// projectKind maps the yaml kind string to the contract discriminator. Empty/absent is
+// WATCHER -- the default that keeps every existing project unchanged -- and an
+// unrecognized value also falls back to WATCHER rather than emitting UNSPECIFIED.
+func projectKind(s string) registryv1.Kind {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "listener":
+		return registryv1.Kind_KIND_LISTENER
+	default:
+		return registryv1.Kind_KIND_WATCHER
+	}
+}
+
+// projectToProto maps a config project plus its live remote URL into the
+// registry.v1.Project contract. The yaml config stays the loader; this is the seam
+// toward fuller config->contract unification, not the unification itself. essential is
+// always set (incl. false) so it always emits; remote_url is set only when resolved so
+// it stays omitted otherwise; deploy is always present (an empty object for
+// non-deployable projects), each matching the prior wire shape. RemoteURL is read
+// per-request (cheap: repo config only, no worktree walk).
+func projectToProto(p config.ProjectConfig, remoteURL string) *registryv1.Project {
+	proj := &registryv1.Project{
+		Name:      p.Name,
+		Path:      p.Path,
+		Essential: proto.Bool(p.Essential),
+		Deploy: &registryv1.Deploy{
+			Kind:       p.Deploy.Kind,
+			Deployment: p.Deploy.Deployment,
+			Command:    p.Deploy.Command,
+		},
+		Kind: projectKind(p.Kind),
+	}
+	if remoteURL != "" {
+		proj.RemoteUrl = proto.String(remoteURL)
+	}
+	return proj
 }
 
 // errorResponse is the body for any non-2xx control-port reply.
@@ -169,15 +209,17 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 // only); the rest comes straight from the loaded config, so this is the
 // membership query that GET /git only answered implicitly.
 func (s *Server) handleProjectsAll(w http.ResponseWriter, r *http.Request) {
-	projects := make([]rosterEntry, 0, len(s.cfg.Projects))
+	projects := make([]json.RawMessage, 0, len(s.cfg.Projects))
 	for _, p := range s.cfg.Projects {
-		projects = append(projects, rosterEntry{
-			Name:      p.Name,
-			Path:      p.Path,
-			Essential: p.Essential,
-			Deploy:    p.Deploy,
-			RemoteURL: gitstate.RemoteURL(p.Path),
-		})
+		raw, err := rosterMarshal.Marshal(projectToProto(p, gitstate.RemoteURL(p.Path)))
+		if err != nil {
+			// a project that cannot be marshaled is a server fault, not a partial roster:
+			// fail the whole request loudly rather than serve a silently short list.
+			slog.Error("failed to marshal project for roster", "project", p.Name, "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode roster"})
+			return
+		}
+		projects = append(projects, raw)
 	}
 	writeJSON(w, http.StatusOK, rosterResponse{Status: "ok", Projects: projects})
 }

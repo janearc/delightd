@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+// Package registry.v1 is delightd's own contract for the canonical unit it manages: the
+// project. Unlike delight.v1 -- which is vendored from kafka-svc and re-synced by
+// `task sync-proto` (do not edit it here) -- this package is delightd-owned. It lives
+// under proto/ (covered by buf.yaml's glob), and sync-proto never touches it.
+package registry.v1;
+
+// Kind discriminates the two citizen archetypes a project can be: a WATCHER (a pipeline:
+// work is pushed in, walked through the bento lifecycle, ephemeral) or a LISTENER (a
+// resident service: queried, parked on a socket, owns durable state). An absent or
+// UNSPECIFIED kind is treated as WATCHER at load, so every existing project is unchanged.
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_WATCHER = 1;
+  KIND_LISTENER = 2;
+}
+
+// Deploy mirrors the deploy block delightd already serves on the GET /projects wire: how
+// fleet rolls a deployable project. Unset inner fields stay omitted, matching the prior
+// JSON shape (the wire is served sparse, not zero-filled).
+message Deploy {
+  string kind = 1;
+  string deployment = 2;
+  repeated string command = 3;
+}
+
+// Project is the canonical unit delightd manages, promoted from the untyped config struct
+// (config.ProjectConfig) to a first-class contract. It reproduces the current GET /projects
+// wire faithfully and adds the kind discriminator and a listener endpoint.
+message Project {
+  string name = 1;
+  string path = 2;
+  // essential is the project's tier (fleet's tier-0 classification reads it). The
+  // `optional` keyword here is a serialization lever, not a maybe-absent marker: it gives
+  // the field proto3 explicit presence, which is what makes protojson emit it even when
+  // the value is false. Without it, protojson omits a false bool and fleet's tier-0 read
+  // sees the field missing.
+  optional bool essential = 3;
+  // deploy is always present on the wire (an empty object for non-deployable projects),
+  // matching the prior shape.
+  Deploy deploy = 4;
+  // remote_url is the live git remote, resolved per-request. It is `optional` so it is
+  // omitted when no remote resolves, matching the prior omitempty shape.
+  optional string remote_url = 5;
+  // kind is the archetype discriminator. Watcher is the default; see Kind.
+  Kind kind = 6;
+
+  // Reserved: a listener endpoint will be added here as a structured message once the
+  // first listener defines its shape. A bare host:port-or-URL string can't evolve (scheme,
+  // health path, port set) without a protojson-breaking change, so we hold the number
+  // rather than ship a string we'd regret.
+  reserved 7;
+
+  // Reserved for future roster-owned fields (e.g. backup policy, system tier) so they can
+  // be promoted into the contract later without renumbering. The full config system is
+  // deliberately not unified into the contract here.
+  reserved 8 to 15;
+}
