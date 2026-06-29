@@ -37,7 +37,7 @@ func (f fakeSubjects) SubjectExists(_ context.Context, subject string) (bool, er
 // the never-silent behavior.
 type fakeEvents struct {
 	mu    sync.Mutex
-	last  *registryv1.RegisterRefused
+	last  *registryv1.NotRegistered
 	count int
 }
 
@@ -45,13 +45,13 @@ func (f *fakeEvents) Publish(_ context.Context, _, _, _, _ string, msg proto.Mes
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.count++
-	if rr, ok := msg.(*registryv1.RegisterRefused); ok {
-		f.last = rr
+	if nr, ok := msg.(*registryv1.NotRegistered); ok {
+		f.last = nr
 	}
 	return nil
 }
 
-func (f *fakeEvents) refused() (*registryv1.RegisterRefused, int) {
+func (f *fakeEvents) notRegistered() (*registryv1.NotRegistered, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.last, f.count
@@ -112,22 +112,27 @@ func TestRegister_HappyPath(t *testing.T) {
 	if g, ok := s.reg.Get("paling"); !ok || g.GetEndpoint().GetAddress() != "paling.fleet:8090" {
 		t.Fatalf("registration not recorded: %v ok=%v", g, ok)
 	}
-	// a successful join emits no refusal.
-	if _, n := ev.refused(); n != 0 {
-		t.Fatalf("happy path should emit no RegisterRefused, got %d", n)
+	// a completed join emits no NotRegistered event.
+	s.emitWG.Wait()
+	if _, n := ev.notRegistered(); n != 0 {
+		t.Fatalf("happy path should emit no NotRegistered, got %d", n)
 	}
 }
 
-func TestRegister_UndeclaredProject_EmitsRefused(t *testing.T) {
+func TestRegister_UnknownProject_EmitsNotRegistered(t *testing.T) {
 	s, ev := registerServer(t, []string{"paling"}, map[string]bool{requiredEmitSubject: true})
 	rr := post(t, s, validReq("ghost", "ghost:1"))
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("undeclared project: code = %d, want 403; body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown project: code = %d, want 404; body=%s", rr.Code, rr.Body.String())
 	}
-	// never-silent: the refusal is also on the bus, with a stable code.
-	last, n := ev.refused()
-	if n != 1 || last == nil || last.GetCode() != "undeclared_project" || last.GetProject() != "ghost" {
-		t.Fatalf("expected one RegisterRefused{code=undeclared_project, project=ghost}, got n=%d last=%v", n, last)
+	if !contains(rr.Body.String(), `"error":"project not found"`) {
+		t.Fatalf("unknown project body = %s, want project-not-found", rr.Body.String())
+	}
+	// never-silent: the outcome is also on the bus, with a stable code (emit is detached).
+	s.emitWG.Wait()
+	last, n := ev.notRegistered()
+	if n != 1 || last == nil || last.GetCode() != "unknown_project" || last.GetProject() != "ghost" {
+		t.Fatalf("expected one NotRegistered{code=unknown_project, project=ghost}, got n=%d last=%v", n, last)
 	}
 }
 
@@ -139,8 +144,9 @@ func TestRegister_InconsistentIdentity(t *testing.T) {
 	if rr.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("inconsistent identity: code = %d, want 422; body=%s", rr.Code, rr.Body.String())
 	}
-	if last, _ := ev.refused(); last == nil || last.GetCode() != "inconsistent_identity" {
-		t.Fatalf("expected RegisterRefused code=inconsistent_identity, got %v", last)
+	s.emitWG.Wait()
+	if last, _ := ev.notRegistered(); last == nil || last.GetCode() != "inconsistent_identity" {
+		t.Fatalf("expected NotRegistered code=inconsistent_identity, got %v", last)
 	}
 }
 
@@ -153,8 +159,9 @@ func TestRegister_EndpointCollision(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("endpoint collision: code = %d, want 409; body=%s", rr.Code, rr.Body.String())
 	}
-	if last, _ := ev.refused(); last == nil || last.GetCode() != "endpoint_held" {
-		t.Fatalf("expected RegisterRefused code=endpoint_held, got %v", last)
+	s.emitWG.Wait()
+	if last, _ := ev.notRegistered(); last == nil || last.GetCode() != "endpoint_held" {
+		t.Fatalf("expected NotRegistered code=endpoint_held, got %v", last)
 	}
 }
 

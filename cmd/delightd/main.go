@@ -341,7 +341,7 @@ func runDaemon(dryRun, immediate bool) error {
 	// on the bus, not only returned to the caller. Reuses the heartbeat's emit publisher; wired
 	// only when Kafka is available, so a refusal otherwise logs loudly (see emitRefused).
 	if emitPub != nil {
-		api.UseEvents(emitPub, cfg.System.Kafka.Topic, delightproto.RegisterRefusedSchema)
+		api.UseEvents(emitPub, cfg.System.Kafka.Topic, delightproto.NotRegisteredSchema)
 	}
 	mux := api.Mux()
 

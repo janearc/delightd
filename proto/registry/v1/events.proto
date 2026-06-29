@@ -7,24 +7,25 @@ package registry.v1;
 
 import "google/protobuf/timestamp.proto";
 
-// RegisterRefused is emitted when a /register is NOT accepted. The never-silent rule: a
-// refusal is not only an HTTP response to the caller -- it is also a visible event on the
-// bus describing what was asked for and could not be given, so an operator (or an agent
-// watching the stream) sees froods that tried and were turned away, not just the froods that
-// joined. It is flat by design: the salient facts, not the whole request payload.
-message RegisterRefused {
+// NotRegistered is emitted when a /register does not complete -- the registration was not
+// recorded, and this says why. It is a state-and-reason report, not a verdict. The
+// never-silent rule: the outcome is not only an HTTP response to the caller, it is also a
+// visible event on the bus, so an operator (or an agent watching the stream) can see the
+// froods whose registration did not complete, not only the ones that joined. It is flat by
+// design: the salient facts, not the whole request payload.
+message NotRegistered {
   // project is the project the caller claimed to be.
   string project = 1;
   // endpoint is the endpoint authority it tried to claim (may be empty if none was given).
   string endpoint = 2;
-  // code is a stable, machine-readable category for the refusal (e.g. "undeclared_project",
+  // code is a stable, machine-readable category for the outcome (e.g. "unknown_project",
   // "inconsistent_identity", "endpoint_held", "unknown_subject", "missing_required_subject",
   // "malformed_serves", "unreachable").
   string code = 3;
   // reason is the human-readable explanation (the same text returned to the caller).
   string reason = 4;
-  // refused_at is when the refusal happened.
-  google.protobuf.Timestamp refused_at = 5;
+  // occurred_at is when the registration did not complete.
+  google.protobuf.Timestamp occurred_at = 5;
 
   // Reserved for future fields (the claimed identity, contract counts) without renumbering.
   reserved 6 to 15;

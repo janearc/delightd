@@ -28,8 +28,8 @@ type subjectChecker interface {
 // metrics ride emits, they are not a special field.
 const requiredEmitSubject = "observability.v1.ServiceHealthHeartbeat"
 
-// refusedSubject is the RecordNameStrategy subject for the not-accepted event.
-const refusedSubject = "registry.v1.RegisterRefused"
+// notRegisteredSubject is the RecordNameStrategy subject for the not-completed event.
+const notRegisteredSubject = "registry.v1.NotRegistered"
 
 // defaultLeaseTTLSeconds is delightd's lease policy for a fresh registration. The lease is
 // stamped here so the entry can be expired; the renewal/expiry that enforce it are R4.
@@ -62,54 +62,56 @@ func guaranteeHealthCheck(ctx context.Context, e *registryv1.Endpoint) error {
 }
 
 // handleRegister is POST /register: a frood presents its declared project, identity, the
-// contracts it speaks, and the endpoint(s) it has bound; delightd accepts it into the live
-// registry or refuses it. Every refusal is visible twice: an HTTP error to the caller AND a
-// RegisterRefused event on the bus (the never-silent rule -- froods that tried and were
-// turned away are observable, not just the ones that joined). Additive: no frood is required
-// to register yet, and recording here does not touch the yaml/poll roster. Confirm model:
-// delightd records the endpoint the frood reported, it does not assign one.
+// contracts it speaks, and the endpoint(s) it has bound; delightd records it into the live
+// registry, or the registration does not complete. A registration that does not complete is
+// reported twice: an HTTP error to the caller AND a NotRegistered event on the bus (the
+// never-silent rule -- the froods whose registration did not complete are observable, not
+// only the ones that joined). Additive: no frood is required to register yet, and recording
+// here does not touch the yaml/poll roster. Confirm model: delightd records the endpoint the
+// frood reported, it does not assign one.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		s.refuse(r.Context(), w, http.StatusBadRequest, "", "", "unreadable_body", "could not read request body")
+		s.notRegistered(w, http.StatusBadRequest, "", "", "unreadable_body", "could not read request body")
 		return
 	}
 	var req registryv1.RegisterRequest
 	if err := protojson.Unmarshal(body, &req); err != nil {
-		s.refuse(r.Context(), w, http.StatusBadRequest, "", "", "malformed_request", fmt.Sprintf("invalid RegisterRequest: %v", err))
+		s.notRegistered(w, http.StatusBadRequest, "", "", "malformed_request", fmt.Sprintf("invalid RegisterRequest: %v", err))
 		return
 	}
 
 	endpointAddr := firstEndpointAddress(req.GetEndpoints())
 
-	// 1. declared-project: the claimed project MUST be one delightd manages.
+	// 1. declared-project: the claimed project MUST be one delightd manages. An unknown name
+	//    returns 404 (the house convention for a route acting on a project name; there is no
+	//    authz actor here, so 403 would be the wrong axis).
 	if !s.managesProject(req.GetProject()) {
-		s.refuse(r.Context(), w, http.StatusForbidden, req.GetProject(), endpointAddr, "undeclared_project",
-			fmt.Sprintf("project %q is not a project delightd manages", req.GetProject()))
+		s.notRegistered(w, http.StatusNotFound, req.GetProject(), endpointAddr, "unknown_project", "project not found")
 		return
 	}
 	// 2. internal consistency: the project the frood claims MUST equal the project its own
 	//    identity reports. A mismatch is an internally inconsistent registration.
 	if req.GetIdentity().GetProject() != req.GetProject() {
-		s.refuse(r.Context(), w, http.StatusUnprocessableEntity, req.GetProject(), endpointAddr, "inconsistent_identity",
+		s.notRegistered(w, http.StatusUnprocessableEntity, req.GetProject(), endpointAddr, "inconsistent_identity",
 			fmt.Sprintf("internally inconsistent: request.project=%q but identity.project=%q", req.GetProject(), req.GetIdentity().GetProject()))
 		return
 	}
 	// the endpoint to confirm (confirm model: the first endpoint the frood reported).
 	if endpointAddr == "" {
-		s.refuse(r.Context(), w, http.StatusUnprocessableEntity, req.GetProject(), "", "no_endpoint",
+		s.notRegistered(w, http.StatusUnprocessableEntity, req.GetProject(), "", "no_endpoint",
 			"no endpoint with an address was reported")
 		return
 	}
 	endpoint := req.GetEndpoints()[0]
 	// 3. RULE-4: verify the claimed contract descriptor.
 	if status, code, reason := s.verifyContracts(r.Context(), req.GetContracts()); status != 0 {
-		s.refuse(r.Context(), w, status, req.GetProject(), endpointAddr, code, reason)
+		s.notRegistered(w, status, req.GetProject(), endpointAddr, code, reason)
 		return
 	}
 	// 4. reachability guarantee: the reported endpoint MUST answer /health.
 	if err := s.guaranteeHealthCheck(r.Context(), endpoint); err != nil {
-		s.refuse(r.Context(), w, http.StatusUnprocessableEntity, req.GetProject(), endpointAddr, "unreachable",
+		s.notRegistered(w, http.StatusUnprocessableEntity, req.GetProject(), endpointAddr, "unreachable",
 			fmt.Sprintf("endpoint %q did not pass its /health guarantee: %v", endpointAddr, err))
 		return
 	}
@@ -129,7 +131,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	holder, err := s.reg.Upsert(reg)
 	if err != nil {
 		if holder != "" {
-			s.refuse(r.Context(), w, http.StatusConflict, req.GetProject(), endpointAddr, "endpoint_held",
+			s.notRegistered(w, http.StatusConflict, req.GetProject(), endpointAddr, "endpoint_held",
 				fmt.Sprintf("endpoint %q is already held by project %q", endpointAddr, holder))
 			return
 		}
@@ -156,30 +158,41 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// refuse turns a frood away: it emits the never-silent RegisterRefused event to the bus AND
-// returns the HTTP error to the caller. The bus emit is best-effort -- a kafka outage MUST
-// NOT block the HTTP refusal -- but a failure to emit is logged loudly, never swallowed.
-func (s *Server) refuse(ctx context.Context, w http.ResponseWriter, status int, project, endpoint, code, reason string) {
-	s.emitRefused(ctx, project, endpoint, code, reason)
+// notRegistered reports that a registration did not complete, and why. It returns the HTTP
+// error to the caller FIRST, then emits the never-silent NotRegistered event. The response
+// MUST return immediately regardless of broker health, so the emit happens on a detached
+// goroutine with its own bounded context -- never on the request context, never before the
+// response. A failed or lost emit is logged loudly, never swallowed.
+func (s *Server) notRegistered(w http.ResponseWriter, status int, project, endpoint, code, reason string) {
 	writeJSON(w, status, errorResponse{Error: reason})
+	s.emitNotRegistered(project, endpoint, code, reason)
 }
 
-func (s *Server) emitRefused(ctx context.Context, project, endpoint, code, reason string) {
+func (s *Server) emitNotRegistered(project, endpoint, code, reason string) {
 	if s.events == nil {
-		slog.Warn("register refused, but no event publisher is configured: refusal is not on the bus",
+		slog.Warn("registration did not complete, but no event publisher is configured: outcome is not on the bus",
 			"project", project, "code", code, "reason", reason)
 		return
 	}
-	ev := &registryv1.RegisterRefused{
-		Project:   project,
-		Endpoint:  endpoint,
-		Code:      code,
-		Reason:    reason,
-		RefusedAt: timestamppb.Now(),
+	ev := &registryv1.NotRegistered{
+		Project:    project,
+		Endpoint:   endpoint,
+		Code:       code,
+		Reason:     reason,
+		OccurredAt: timestamppb.Now(),
 	}
-	if err := s.events.Publish(ctx, s.eventsTopic, refusedSubject, s.refusedSchema, project, ev); err != nil {
-		slog.Error("register: could not emit RegisterRefused to the bus", "project", project, "code", code, "error", err)
-	}
+	// Detached: a dead or slow broker must not delay the response (already written) or pin
+	// the request goroutine. The WaitGroup lets a graceful shutdown -- and the tests -- wait
+	// for in-flight emits to finish.
+	s.emitWG.Add(1)
+	go func() {
+		defer s.emitWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.events.Publish(ctx, s.eventsTopic, notRegisteredSubject, s.notRegisteredSchema, project, ev); err != nil {
+			slog.Error("register: could not emit NotRegistered to the bus", "project", project, "code", code, "error", err)
+		}
+	}()
 }
 
 // managesProject reports whether name is a project delightd manages (in the roster).
@@ -201,11 +214,12 @@ func firstEndpointAddress(endpoints []*registryv1.Endpoint) string {
 }
 
 // verifyContracts runs RULE-4 on the claimed descriptor. It returns (0, "", "") on pass, or
-// an HTTP status + a stable code + a human reason to refuse with:
+// an HTTP status + a stable code + a human reason for a registration that does not complete:
 //   - emits MUST contain the required heartbeat subject;
 //   - every emits/consumes subject MUST be registered with the schema registry (bus
 //     contracts -- the claim is checkable against what is actually on the bus); an SR that
-//     cannot answer yields 503, not a refusal of the frood;
+//     cannot answer yields 503 (the registration does not complete, but that is not the
+//     frood's fault);
 //   - serves subjects are checked only for fully-qualified-name well-formedness, using the
 //     protobuf library's own name validator (protoreflect.FullName.IsValid) rather than a
 //     hand-rolled pattern. Semantic verification (the subject names a REAL service contract)
