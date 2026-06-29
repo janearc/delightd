@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/janearc/big-little-mesh/frood"
 	"github.com/janearc/big-little-mesh/emit"
+	"github.com/janearc/big-little-mesh/frood"
 	observabilityproto "github.com/janearc/big-little-mesh/proto/observability/v1"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
