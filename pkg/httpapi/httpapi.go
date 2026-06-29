@@ -22,6 +22,7 @@ import (
 	"delightd/pkg/introspect"
 	"delightd/pkg/metrics"
 	"delightd/pkg/registry"
+	"delightd/pkg/schemaregistry"
 	"delightd/pkg/skills"
 	"delightd/pkg/state"
 )
@@ -40,6 +41,12 @@ type Server struct {
 	// tests that do not exercise registration; handlers treat nil as an empty registry.
 	reg *registry.Registry
 
+	// subjects verifies contract subjects against the schema registry at register time.
+	// probeHealth runs the single reachability probe of a registering endpoint. Both are
+	// injectable so handleRegister can be tested without a live SR or network.
+	subjects    subjectChecker
+	probeHealth func(context.Context, *registryv1.Endpoint) error
+
 	// discover is the local-LLM discovery source, injectable so handlers can be
 	// tested without probing the network.
 	discover func(context.Context, *config.DelightConfig) []discovery.ModelSource
@@ -55,7 +62,11 @@ func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports 
 		skills:   skillAgg,
 		dryRun:   dryRun,
 		reg:      reg,
-		discover: discovery.DiscoverLocalLLMs,
+		// The SR read client is built from the same registry delightd publishes to; an
+		// unset URL yields a client whose checks fail loudly rather than silently passing.
+		subjects:    schemaregistry.New(cfg.System.Kafka.SchemaRegistryURL),
+		probeHealth: defaultHealthProbe,
+		discover:    discovery.DiscoverLocalLLMs,
 	}
 }
 
@@ -165,6 +176,7 @@ func (s *Server) Mux() *http.ServeMux {
 
 	mux.HandleFunc("GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
 	mux.HandleFunc("GET /registrations", s.handleRegistrations)    // live citizen registrations (registry.v1.RegistrationSet); additive, alongside the roster
+	mux.HandleFunc("POST /register", s.handleRegister)             // citizen admission into the live registry (additive, optional; not yet required)
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 
