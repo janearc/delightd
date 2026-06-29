@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -249,6 +250,68 @@ func TestHandleProjectsAll(t *testing.T) {
 	// a non-git path yields no remote: remote_url is omitted (empty).
 	if resp.Projects[1].RemoteURL != "" {
 		t.Errorf("non-git path should resolve no remote, got %q", resp.Projects[1].RemoteURL)
+	}
+}
+
+func TestRosterBackCompatShape(t *testing.T) {
+	// The roster JSON for a watcher project must be byte-shape-unchanged for the fields
+	// fleet already reads: name, path, essential, deploy, remote_url. This locks the
+	// protojson serialization against the prior hand-written encoding/json shape. In
+	// particular essential=false must still be emitted -- it would vanish under protojson's
+	// default zero-omission, which is why essential is modeled `optional` and always set.
+
+	// a deployable, essential watcher with a resolved remote (no kind -> watcher default):
+	deployable := config.ProjectConfig{
+		Name:      "alpha",
+		Path:      "/work/alpha",
+		Essential: true,
+		Deploy:    config.DeployConfig{Kind: "kube", Deployment: "alpha", Command: []string{"run", "alpha"}},
+	}
+	raw, err := rosterMarshal.Marshal(projectToProto(deployable, "git@github.com:janearc/alpha.git"))
+	if err != nil {
+		t.Fatalf("marshal deployable: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode deployable: %v", err)
+	}
+	want := map[string]any{
+		"name":       "alpha",
+		"path":       "/work/alpha",
+		"essential":  true,
+		"deploy":     map[string]any{"kind": "kube", "deployment": "alpha", "command": []any{"run", "alpha"}},
+		"remote_url": "git@github.com:janearc/alpha.git",
+	}
+	for k, v := range want {
+		if !reflect.DeepEqual(got[k], v) {
+			t.Errorf("field %q: got %#v, want %#v", k, got[k], v)
+		}
+	}
+	// the new discriminator is additive and defaults to watcher.
+	if got["kind"] != "KIND_WATCHER" {
+		t.Errorf("kind: got %#v, want KIND_WATCHER", got["kind"])
+	}
+
+	// the critical edge: a non-essential, non-deployable watcher with no remote.
+	// essential=false MUST be present (not omitted), deploy MUST be an empty object
+	// (not null/absent), and remote_url MUST be omitted.
+	bare := config.ProjectConfig{Name: "beta", Path: "/work/beta", Essential: false}
+	raw, err = rosterMarshal.Marshal(projectToProto(bare, ""))
+	if err != nil {
+		t.Fatalf("marshal bare: %v", err)
+	}
+	got = nil
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode bare: %v", err)
+	}
+	if v, ok := got["essential"]; !ok || v != false {
+		t.Errorf("essential must be present and false, got %#v (present=%v)", v, ok)
+	}
+	if v, ok := got["deploy"]; !ok || !reflect.DeepEqual(v, map[string]any{}) {
+		t.Errorf("deploy must be an empty object, got %#v (present=%v)", v, ok)
+	}
+	if _, ok := got["remote_url"]; ok {
+		t.Errorf("remote_url must be omitted when unresolved, got %#v", got["remote_url"])
 	}
 }
 

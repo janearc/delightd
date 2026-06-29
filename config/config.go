@@ -174,6 +174,12 @@ type ProjectConfig struct {
 	// workload. Omitted for projects that ship no service (CLI tools, libraries).
 	Deploy DeployConfig `mapstructure:"deploy" json:"deploy,omitempty"`
 	Backup BackupConfig `mapstructure:"backup" json:"backup"`
+	// Kind is the citizen archetype: "watcher" (a pipeline) or "listener" (a resident
+	// service). Empty/absent is treated as "watcher", so existing rosters are unchanged.
+	// It maps to the registry.v1.Kind discriminator on the GET /projects wire.
+	Kind string `mapstructure:"kind" json:"kind,omitempty"`
+	// Endpoint is a listener's address (host:port or URL); empty for watchers.
+	Endpoint string `mapstructure:"endpoint" json:"endpoint,omitempty"`
 }
 
 type DelightConfig struct {
