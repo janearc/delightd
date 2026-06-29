@@ -182,11 +182,17 @@ func (r *Registry) Set() *registryv1.RegistrationSet {
 }
 
 // RefreshLease extends, by ttl from now, the lease of the live registration whose identity
-// service_name matches name. It returns true if a registration was refreshed. A heartbeat
-// for a service with no registration is ignored: heartbeats REFRESH leases, they do not
-// create registrations -- only Upsert (a /register) creates. The match is on
-// identity.service_name, the key a heartbeat carries (registrations are stored by project,
-// so this scans for the matching identity).
+// service_name matches name, and returns true if one was refreshed. A heartbeat for a service
+// with no registration is ignored: heartbeats REFRESH leases, they do not create
+// registrations -- only Upsert (a /register) creates.
+//
+// The match is on identity.service_name, the key a heartbeat carries (registrations are
+// stored by project, so this scans for the matching identity). service_name is fleet-unique
+// -- a frood heartbeats under the identity.service_name it registered, and no two froods
+// share one -- so at most one registration matches. The loop refreshes every match defensively
+// (a duplicate service_name is a misconfiguration, not a state to silently pick a winner in);
+// the canonical home for the uniqueness invariant is frood.v1.Identity.service_name, vendored
+// here from big-little-mesh.
 func (r *Registry) RefreshLease(name string, ttl time.Duration) (bool, error) {
 	if name == "" {
 		return false, nil
@@ -194,6 +200,12 @@ func (r *Registry) RefreshLease(name string, ttl time.Duration) (bool, error) {
 	refreshed := false
 	err := r.db.Update(func(tx *bbolt.Tx) error {
 		bkt := tx.Bucket(bucket)
+		// Collect the (key, new-value) pairs during the cursor scan, then Put them after the
+		// loop: mutating the bucket while its cursor iterates is bbolt undefined behavior.
+		type update struct {
+			key, val []byte
+		}
+		var updates []update
 		c := bkt.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var reg registryv1.Registration
@@ -208,7 +220,10 @@ func (r *Registry) RefreshLease(name string, ttl time.Duration) (bool, error) {
 			if err != nil {
 				return err
 			}
-			if err := bkt.Put(k, b); err != nil {
+			updates = append(updates, update{key: append([]byte(nil), k...), val: b})
+		}
+		for _, u := range updates {
+			if err := bkt.Put(u.key, u.val); err != nil {
 				return err
 			}
 			refreshed = true
@@ -257,6 +272,12 @@ func (r *Registry) ReconcileWarmStart(grace time.Duration) error {
 	until := timestamppb.New(time.Now().UTC().Add(grace))
 	return r.db.Update(func(tx *bbolt.Tx) error {
 		bkt := tx.Bucket(bucket)
+		// Collect (key, new-value) during the cursor scan, then Put after the loop: mutating
+		// the bucket while its cursor iterates is bbolt undefined behavior.
+		type update struct {
+			key, val []byte
+		}
+		var updates []update
 		c := bkt.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var reg registryv1.Registration
@@ -268,7 +289,10 @@ func (r *Registry) ReconcileWarmStart(grace time.Duration) error {
 			if err != nil {
 				return err
 			}
-			if err := bkt.Put(k, b); err != nil {
+			updates = append(updates, update{key: append([]byte(nil), k...), val: b})
+		}
+		for _, u := range updates {
+			if err := bkt.Put(u.key, u.val); err != nil {
 				return err
 			}
 		}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -358,7 +359,17 @@ func runDaemon(dryRun, immediate bool) error {
 	// Lease lifecycle (additive): a registration is held by a lease the frood's heartbeat
 	// refreshes, and the expiry sweep removes any that lapse. delightd does not require froods
 	// to re-register -- it consumes the fleet heartbeat they already emit.
+	//
+	// Note: registry liveness is fully gated on the heartbeat pipe -- a fleet-wide broker
+	// outage refreshes nothing and the sweep drains the registry within one lease TTL. That is
+	// safe-by-omission while the yaml/poll roster is still authoritative (the registry is
+	// additive), but it becomes a real availability concern at R-final, when register is
+	// mandatory and the roster is retired.
 	if reg != nil {
+		// refreshedSeen records the service_names whose heartbeat refreshed a lease since boot,
+		// so the sweep can distinguish "went quiet" from "never refreshed at all" (the latter
+		// hints at a heartbeat service_name that does not match any registration's identity).
+		var refreshedSeen sync.Map
 		// Refresh: consume observability.events; each heartbeat refreshes the lease of the
 		// registration whose identity service_name matches. Heartbeats refresh, never create.
 		// nil-safe: a down broker disables refresh (the sweep then expires unrefreshed
@@ -366,7 +377,7 @@ func runDaemon(dryRun, immediate bool) error {
 		if len(cfg.System.Kafka.Brokers) > 0 {
 			hb, err := consume.New(ctx, cfg.System.Kafka.Brokers, frood.TopicObservability, "delightd-registry-lease", logger)
 			if err != nil {
-				slog.Warn("registry lease refresh disabled: could not start heartbeat consumer", "error", err)
+				logger.Warn("registry lease refresh disabled: could not start heartbeat consumer", "error", err)
 			} else {
 				defer hb.Close()
 				go hb.Run(ctx, func(_ context.Context, payload []byte, _ *kgo.Record) error {
@@ -377,7 +388,8 @@ func runDaemon(dryRun, immediate bool) error {
 					if ok, err := reg.RefreshLease(beat.GetServiceName(), registry.DefaultLeaseTTL); err != nil {
 						return err
 					} else if ok {
-						slog.Debug("registry: refreshed lease from heartbeat", "service", beat.GetServiceName())
+						refreshedSeen.Store(beat.GetServiceName(), true)
+						logger.Debug("registry: refreshed lease from heartbeat", "service", beat.GetServiceName())
 					}
 					return nil
 				})
@@ -395,12 +407,20 @@ func runDaemon(dryRun, immediate bool) error {
 				case <-ticker.C:
 					expired, err := reg.ExpireDue(time.Now().UTC())
 					if err != nil {
-						slog.Error("registry: expiry sweep failed", "error", err)
+						logger.Error("registry: expiry sweep failed", "error", err)
 						continue
 					}
 					for _, e := range expired {
-						slog.Info("registry: expired registration (lease lapsed)",
-							"project", e.GetProject(), "service", e.GetIdentity().GetServiceName())
+						svc := e.GetIdentity().GetServiceName()
+						if _, seen := refreshedSeen.Load(svc); !seen {
+							// never refreshed since boot: a legitimately dead frood, or a live
+							// one whose heartbeat service_name does not match its registration.
+							logger.Warn("registry: expired a registration never refreshed since boot (check the frood's heartbeat service_name matches its identity)",
+								"project", e.GetProject(), "service", svc)
+						} else {
+							logger.Info("registry: expired registration (lease lapsed)",
+								"project", e.GetProject(), "service", svc)
+						}
 					}
 				}
 			}
