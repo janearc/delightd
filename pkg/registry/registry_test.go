@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	citizenv1 "delightd/gen/go/citizen/v1"
+	froodv1 "delightd/gen/go/frood/v1"
 	registryv1 "delightd/gen/go/registry/v1"
 )
 
@@ -17,7 +17,7 @@ import (
 func reg(project, addr string) *registryv1.Registration {
 	return &registryv1.Registration{
 		Project:      project,
-		Identity:     &citizenv1.Identity{ServiceName: project, Project: project, Version: "v1"},
+		Identity:     &froodv1.Identity{ServiceName: project, Project: project, Version: "v1"},
 		Endpoint:     &registryv1.Endpoint{Scheme: "http", Address: addr},
 		RegisteredAt: timestamppb.New(time.Unix(1000, 0).UTC()),
 	}

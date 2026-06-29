@@ -1,12 +1,12 @@
 # Changelog
 
 All notable changes to delightd are recorded here. delightd follows semantic
-versioning; its releases are coordinated with the blm release line.
+versioning; its releases are coordinated with the Big Little Mesh release line.
 
 ## [Unreleased] — toward v0.5
 
-- Adopt the shared `good-citizen` library for the git oracle / watcher, secrets,
-  and Kafka emission (flag-day cutover; tracked in the **blm v0.5** milestone).
+- Adopt the shared `frood` library for the git oracle / watcher, secrets,
+  and Kafka emission (flag-day cutover; tracked in the **Big Little Mesh v0.5** milestone).
   delightd remains the source of truth and roster brain — it consumes the
   library, it is not a pipeline orchestrator.
 

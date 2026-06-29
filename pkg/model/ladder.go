@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	observabilityv1 "github.com/janearc/blm/gen/go/observability/v1"
+	observabilityv1 "github.com/janearc/big-little-mesh/gen/go/observability/v1"
 )
 
 // The model-health ladder (docs/model-hosting.md §4): a model's "green" is not one bit but

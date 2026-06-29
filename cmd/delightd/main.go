@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/janearc/blm/citizen"
-	"github.com/janearc/blm/emit"
-	observabilityproto "github.com/janearc/blm/proto/observability/v1"
+	"github.com/janearc/big-little-mesh/frood"
+	"github.com/janearc/big-little-mesh/emit"
+	observabilityproto "github.com/janearc/big-little-mesh/proto/observability/v1"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -205,10 +205,10 @@ func runDaemon(dryRun, immediate bool) error {
 		}
 	}
 
-	// delightd joins the fleet as a good-citizen: a liveness heartbeat on
-	// observability.events via blm's good-citizen helper, so the daemon is
+	// delightd joins the fleet as a frood: a liveness heartbeat on
+	// observability.events via Big Little Mesh's frood helper, so the daemon is
 	// visible to obs-svc like every other service. It rides the same broker and
-	// schema-registry config as the backup publisher above, but as its own blm
+	// schema-registry config as the backup publisher above, but as its own Big Little Mesh
 	// emit.Publisher on the observability.v1 contracts -- the backup publisher
 	// stays on delight.v1 (different contract, different topic). Best-effort and
 	// nil-safe, exactly like the backup publisher: a Kafka/SR outage disables the
@@ -216,13 +216,13 @@ func runDaemon(dryRun, immediate bool) error {
 	if len(cfg.System.Kafka.Brokers) > 0 {
 		emitPub, err := emit.New(ctx, cfg.System.Kafka.Brokers, cfg.System.Kafka.SchemaRegistryURL)
 		if err != nil {
-			slog.Warn("good-citizen heartbeat disabled: could not init emit publisher", "error", err)
+			slog.Warn("frood heartbeat disabled: could not init emit publisher", "error", err)
 		} else {
 			defer emitPub.Close()
-			// 15s liveness cadence (blm defaults to the same when interval <= 0).
+			// 15s liveness cadence (Big Little Mesh defaults to the same when interval <= 0).
 			// Heartbeat blocks, so it runs in its own goroutine until ctx cancels.
-			go citizen.Heartbeat(ctx, emitPub, "delightd", observabilityproto.Schema, 15*time.Second, logger)
-			slog.Info("good-citizen heartbeat started", "service", "delightd", "topic", citizen.TopicObservability)
+			go frood.Heartbeat(ctx, emitPub, "delightd", observabilityproto.Schema, 15*time.Second, logger)
+			slog.Info("frood heartbeat started", "service", "delightd", "topic", frood.TopicObservability)
 		}
 	}
 
@@ -315,7 +315,7 @@ func runDaemon(dryRun, immediate bool) error {
 		}(proj)
 	}
 
-	// The live citizen registry (the /register broker's state). Its snapshot is a
+	// The live frood registry (the /register broker's state). Its snapshot is a
 	// warm-start cache under DaemonRoot; loading it on boot means discovery is available
 	// immediately rather than blank until the first re-register. Additive: it sits
 	// alongside the yaml/poll roster and replaces nothing. A failed load is logged and the

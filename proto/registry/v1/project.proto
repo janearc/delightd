@@ -6,7 +6,7 @@ syntax = "proto3";
 // under proto/ (covered by buf.yaml's glob), and sync-proto never touches it.
 package registry.v1;
 
-// Kind discriminates the two citizen archetypes a project can be: a WATCHER (a pipeline:
+// Kind discriminates the two frood archetypes a project can be: a WATCHER (a pipeline:
 // work is pushed in, walked through the bento lifecycle, ephemeral) or a LISTENER (a
 // resident service: queried, parked on a socket, owns durable state). An absent or
 // UNSPECIFIED kind is treated as WATCHER at load, so every existing project is unchanged.
