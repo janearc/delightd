@@ -14,6 +14,8 @@ import (
 
 	froodv1 "delightd/gen/go/frood/v1"
 	registryv1 "delightd/gen/go/registry/v1"
+
+	"delightd/pkg/registry"
 )
 
 // subjectChecker answers whether a contract subject is registered with the schema registry.
@@ -30,10 +32,6 @@ const requiredEmitSubject = "observability.v1.ServiceHealthHeartbeat"
 
 // notRegisteredSubject is the RecordNameStrategy subject for the not-completed event.
 const notRegisteredSubject = "registry.v1.NotRegistered"
-
-// defaultLeaseTTLSeconds is delightd's lease policy for a fresh registration. The lease is
-// stamped here so the entry can be expired; the renewal/expiry that enforce it are R4.
-const defaultLeaseTTLSeconds = 90
 
 // guaranteeHealthCheck is the single reachability guarantee delightd makes at join time: the
 // reported endpoint MUST answer GET /health with 2xx. It is named as a guarantee, not a
@@ -126,7 +124,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Contracts:      req.GetContracts(),
 		Endpoint:       endpoint,
 		RegisteredAt:   timestamppb.New(now),
-		LeaseExpiresAt: timestamppb.New(now.Add(defaultLeaseTTLSeconds * time.Second)),
+		LeaseExpiresAt: timestamppb.New(now.Add(registry.DefaultLeaseTTL)),
 	}
 	holder, err := s.reg.Upsert(reg)
 	if err != nil {
@@ -143,7 +141,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp := &registryv1.RegisterResponse{
 		Identity:        req.GetIdentity(),
 		Endpoint:        endpoint,
-		LeaseTtlSeconds: defaultLeaseTTLSeconds,
+		LeaseTtlSeconds: uint32(registry.DefaultLeaseTTL / time.Second),
 	}
 	b, err := rosterMarshal.Marshal(resp)
 	if err != nil {

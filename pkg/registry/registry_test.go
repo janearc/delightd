@@ -6,9 +6,24 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	froodv1 "delightd/gen/go/frood/v1"
 	registryv1 "delightd/gen/go/registry/v1"
 )
+
+// leased builds a registration with an identity service_name (= project) and an explicit
+// lease expiry, for the lease tests.
+func leased(project, addr string, exp time.Time) *registryv1.Registration {
+	return &registryv1.Registration{
+		Project:        project,
+		Identity:       &froodv1.Identity{ServiceName: project, Project: project},
+		Endpoint:       &registryv1.Endpoint{Address: addr},
+		LeaseExpiresAt: timestamppb.New(exp),
+	}
+}
 
 func reg(project, addr string) *registryv1.Registration {
 	return &registryv1.Registration{
@@ -134,5 +149,88 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	if got := len(r.List()); got != 8 {
 		t.Fatalf("want 8 registrations, got %d", got)
+	}
+}
+
+// A heartbeat refreshes the lease of the registration whose identity service_name matches.
+func TestRefreshLease_ExtendsMatchingService(t *testing.T) {
+	r := openTmp(t)
+	if err := r.Put(leased("paling", "p:1", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := r.RefreshLease("paling", time.Hour)
+	if err != nil || !ok {
+		t.Fatalf("refresh: ok=%v err=%v, want true/nil", ok, err)
+	}
+	g, _ := r.Get("paling")
+	if !g.GetLeaseExpiresAt().AsTime().After(time.Now()) {
+		t.Fatalf("lease not extended into the future: %v", g.GetLeaseExpiresAt().AsTime())
+	}
+}
+
+// A heartbeat for a service with no registration refreshes nothing and creates nothing.
+func TestRefreshLease_UnknownServiceIsNoOp(t *testing.T) {
+	r := openTmp(t)
+	ok, err := r.RefreshLease("ghost", time.Hour)
+	if err != nil || ok {
+		t.Fatalf("unknown service: ok=%v err=%v, want false/nil", ok, err)
+	}
+	if _, exists := r.Get("ghost"); exists {
+		t.Fatal("a heartbeat must not create a registration")
+	}
+}
+
+// ExpireDue removes lapsed leases and returns them; live ones stay.
+func TestExpireDue_RemovesLapsedKeepsLive(t *testing.T) {
+	r := openTmp(t)
+	if err := r.Put(leased("dead", "d:1", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Put(leased("live", "l:1", time.Now().Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := r.ExpireDue(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0].GetProject() != "dead" {
+		t.Fatalf("expected only 'dead' expired, got %v", expired)
+	}
+	if _, ok := r.Get("dead"); ok {
+		t.Fatal("lapsed registration not removed")
+	}
+	if _, ok := r.Get("live"); !ok {
+		t.Fatal("live registration wrongly removed")
+	}
+}
+
+// Warm-start reconciliation: loaded entries get a short grace; one whose heartbeat refreshes
+// survives, one that never refreshes is expired once the grace lapses.
+func TestReconcileWarmStart_GraceThenExpiry(t *testing.T) {
+	r := openTmp(t)
+	// stale leases, as if written before a delightd bounce.
+	if err := r.Put(leased("survivor", "s:1", time.Now().Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Put(leased("phantom", "p:1", time.Now().Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ReconcileWarmStart(50 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	// survivor's heartbeat refreshes it to a long lease; phantom never heartbeats.
+	if ok, _ := r.RefreshLease("survivor", time.Hour); !ok {
+		t.Fatal("survivor refresh failed")
+	}
+	time.Sleep(80 * time.Millisecond) // let the grace lapse
+	expired, err := r.ExpireDue(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0].GetProject() != "phantom" {
+		t.Fatalf("expected only 'phantom' expired after grace, got %v", expired)
+	}
+	if _, ok := r.Get("survivor"); !ok {
+		t.Fatal("survivor should have survived via its heartbeat refresh")
 	}
 }

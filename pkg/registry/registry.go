@@ -21,6 +21,7 @@ import (
 
 	"go.etcd.io/bbolt"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	registryv1 "delightd/gen/go/registry/v1"
 )
@@ -35,6 +36,20 @@ var marshal = protojson.MarshalOptions{UseProtoNames: true}
 // ErrEndpointHeld means a DIFFERENT project's live registration already holds the endpoint
 // address an Upsert tried to claim. The caller gets the holding project's name back.
 var ErrEndpointHeld = errors.New("endpoint already held by another project")
+
+// Lease policy. A registration is held by a lease that the frood's heartbeat refreshes; it
+// expires unless refreshed. The policy lives here, with the leases.
+const (
+	// DefaultLeaseTTL is how long a registration holds after a heartbeat (or a fresh
+	// /register) before it must be refreshed again.
+	DefaultLeaseTTL = 90 * time.Second
+	// WarmStartGrace is the short lease re-stamped onto registrations loaded from the store
+	// on boot: a frood that died while delightd was down is expired shortly after boot
+	// unless its heartbeat refreshes the lease first.
+	WarmStartGrace = 30 * time.Second
+	// DefaultSweepInterval is how often the expiry sweep runs.
+	DefaultSweepInterval = 15 * time.Second
+)
 
 // Registry is the bbolt-backed set of frood registrations. bbolt handles its own locking,
 // so the Registry needs no mutex.
@@ -164,4 +179,99 @@ func (r *Registry) List() []*registryv1.Registration {
 // Set returns the live registrations as the contract message.
 func (r *Registry) Set() *registryv1.RegistrationSet {
 	return &registryv1.RegistrationSet{Registrations: r.List()}
+}
+
+// RefreshLease extends, by ttl from now, the lease of the live registration whose identity
+// service_name matches name. It returns true if a registration was refreshed. A heartbeat
+// for a service with no registration is ignored: heartbeats REFRESH leases, they do not
+// create registrations -- only Upsert (a /register) creates. The match is on
+// identity.service_name, the key a heartbeat carries (registrations are stored by project,
+// so this scans for the matching identity).
+func (r *Registry) RefreshLease(name string, ttl time.Duration) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	refreshed := false
+	err := r.db.Update(func(tx *bbolt.Tx) error {
+		bkt := tx.Bucket(bucket)
+		c := bkt.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var reg registryv1.Registration
+			if err := protojson.Unmarshal(v, &reg); err != nil {
+				continue
+			}
+			if reg.GetIdentity().GetServiceName() != name {
+				continue
+			}
+			reg.LeaseExpiresAt = timestamppb.New(time.Now().UTC().Add(ttl))
+			b, err := marshal.Marshal(&reg)
+			if err != nil {
+				return err
+			}
+			if err := bkt.Put(k, b); err != nil {
+				return err
+			}
+			refreshed = true
+		}
+		return nil
+	})
+	return refreshed, err
+}
+
+// ExpireDue removes every registration whose lease_expires_at is at or before now, in one
+// transaction, and returns the removed registrations so the caller can log them -- expiry is
+// visible, never silent. A registration with no lease stamped is treated as expired (it can
+// never be refreshed, so it cannot be trusted).
+func (r *Registry) ExpireDue(now time.Time) ([]*registryv1.Registration, error) {
+	var expired []*registryv1.Registration
+	err := r.db.Update(func(tx *bbolt.Tx) error {
+		bkt := tx.Bucket(bucket)
+		var dueKeys [][]byte
+		c := bkt.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var reg registryv1.Registration
+			if err := protojson.Unmarshal(v, &reg); err != nil {
+				continue
+			}
+			exp := reg.GetLeaseExpiresAt()
+			if exp == nil || !exp.AsTime().After(now) {
+				dueKeys = append(dueKeys, append([]byte(nil), k...))
+				expired = append(expired, &reg)
+			}
+		}
+		for _, k := range dueKeys {
+			if err := bkt.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return expired, err
+}
+
+// ReconcileWarmStart re-stamps every registration loaded from the store with a short grace
+// lease (now + grace). Warm-loaded registrations are provisional: a frood that died while
+// delightd was down is expired shortly after boot unless its heartbeat refreshes the lease
+// within the grace.
+func (r *Registry) ReconcileWarmStart(grace time.Duration) error {
+	until := timestamppb.New(time.Now().UTC().Add(grace))
+	return r.db.Update(func(tx *bbolt.Tx) error {
+		bkt := tx.Bucket(bucket)
+		c := bkt.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var reg registryv1.Registration
+			if err := protojson.Unmarshal(v, &reg); err != nil {
+				continue
+			}
+			reg.LeaseExpiresAt = until
+			b, err := marshal.Marshal(&reg)
+			if err != nil {
+				return err
+			}
+			if err := bkt.Put(k, b); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
