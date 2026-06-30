@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	registryv1 "delightd/gen/go/registry/v1"
+	resolvev1 "delightd/gen/go/resolve/v1"
 
 	"delightd/config"
 	"delightd/pkg/discovery"
@@ -567,6 +570,59 @@ func TestHandleServicesAll(t *testing.T) {
 	s.handleServicesAll(rr, httptest.NewRequest(http.MethodGet, "/services?type=bogus", nil))
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("type=bogus: code = %d, want 400", rr.Code)
+	}
+}
+
+func TestHandleResolve(t *testing.T) {
+	// A nil registry resolves nothing: every name is a 404 (delightd holds no address it
+	// could return). A miss is always 404, never 503.
+	s := New(&config.DelightConfig{}, nil, fakeFragments{}, nil, false, nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/resolve/obs-agg", nil)
+	req.SetPathValue("name", "obs-agg")
+	s.handleResolve(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("nil registry: code = %d, want 404", rr.Code)
+	}
+
+	// A registered project resolves to its live endpoint as a bare resolve.v1.ResolvedService.
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "registry", "registry.db"), nil)
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	defer reg.Close()
+	if err := reg.Put(&registryv1.Registration{
+		Project:  "obs-agg",
+		Endpoint: &registryv1.Endpoint{Scheme: "http", Address: "obs-svc-agg.fleet:8090"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s2 := New(&config.DelightConfig{}, nil, fakeFragments{}, nil, false, reg)
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/resolve/obs-agg", nil)
+	req.SetPathValue("name", "obs-agg")
+	s2.handleResolve(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("registered: code = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	// The body is the bare ResolvedService -- the three strings the widget's narrow crate
+	// deserializes, with proto field names.
+	var got resolvev1.ResolvedService
+	if err := protojson.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode ResolvedService: %v (body: %s)", err, rr.Body.String())
+	}
+	if got.GetName() != "obs-agg" || got.GetScheme() != "http" || got.GetAddress() != "obs-svc-agg.fleet:8090" {
+		t.Fatalf("resolved = %+v, want {obs-agg http obs-svc-agg.fleet:8090}", &got)
+	}
+
+	// A name with no live registration is a 404 -- "not resolvable" is distinct from "down".
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/resolve/ghost", nil)
+	req.SetPathValue("name", "ghost")
+	s2.handleResolve(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unregistered: code = %d, want 404", rr.Code)
 	}
 }
 

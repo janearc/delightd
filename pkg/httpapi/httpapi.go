@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	registryv1 "delightd/gen/go/registry/v1"
+	resolvev1 "delightd/gen/go/resolve/v1"
 
 	"delightd/config"
 	"delightd/pkg/discovery"
@@ -227,6 +228,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /register", s.handleRegister)             // a frood joins the live registry (additive, optional; not yet required)
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
+	mux.HandleFunc("GET /resolve/{name}", s.handleResolve)         // narrow widget-facing resolution (resolve.v1.ResolvedService): scheme+address for one project
 
 	// The composed entity-query surface (#42): ask delightd about one roster entry and get
 	// it back with its facets (git/backup/reachable/endpoint) as fields, instead of pulling a
@@ -469,6 +471,44 @@ func parseServiceType(s string) (registryv1.ServiceType, bool) {
 	default:
 		return registryv1.ServiceType_SERVICE_TYPE_UNSPECIFIED, false
 	}
+}
+
+// handleResolve serves the narrow widget-facing resolution: given a project name, the one
+// address to reach it as a resolve.v1.ResolvedService (protojson, the contract type per RULE-3).
+// It is the size-constrained projection the tiny-monitor widget consumes -- where
+// registry.v1.Service (#42) is the rich composed entity, this answers only "where does it
+// answer". The answer is composed from the live registry: a name delightd holds a registration
+// for resolves to that registration's endpoint. A resolution miss is ALWAYS 404, never 503: a
+// name delightd cannot resolve -- no live registration, or (only in tests) no registry at all --
+// is a not-found, which is NOT the same as "the service is down" and is NOT a server-degraded
+// status. A widget that cannot reach delightd at all learns that from the transport failure, not
+// from a body here.
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if s.reg == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "service not resolvable"})
+		return
+	}
+	reg, ok := s.reg.Get(name)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "service not resolvable"})
+		return
+	}
+	ep := reg.GetEndpoint()
+	resolved := &resolvev1.ResolvedService{
+		Name:    name,
+		Scheme:  ep.GetScheme(),
+		Address: ep.GetAddress(),
+	}
+	raw, err := rosterMarshal.Marshal(resolved)
+	if err != nil {
+		slog.Error("failed to marshal resolved service", "project", name, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode resolution"})
+		return
+	}
+	// Write the resolved entity directly (json.RawMessage round-trips its own bytes) so the body
+	// is the bare resolve.v1.ResolvedService the widget's generated crate deserializes.
+	writeJSON(w, http.StatusOK, json.RawMessage(raw))
 }
 
 // logGitErrors emits a warning for each project whose git state could not be
