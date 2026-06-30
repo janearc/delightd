@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+// Package registry.v1 also carries the composed entity-query contract: a consumer asks
+// delightd about ONE thing (a roster entry) and gets it back composed -- its facets (git,
+// backup, reachability, the served endpoint) as fields -- instead of pulling a facet
+// aggregate (GET /git dumps every project's git) and reassembling delightd's internals.
+// The unit is the roster entry (a Service); git / backup / reachable / endpoint are
+// facets of it. This file is the composed shape served on GET /services and GET
+// /services/{name}; the facet collectors (git oracle, backup state machine, registry) stay
+// internal. delightd owns this contract (it is the source of truth that composes the answer).
+// See proto/README.md and issue #42.
+package registry.v1;
+
+import "registry/v1/register.proto"; // Endpoint -- the served-address facet
+
+// ServiceType discriminates roster entries so a consumer can ask for one kind (GET
+// /services?type=model). Today every roster entry composes as SERVICE; MODEL is modeled now
+// so the filter is forward-compatible, but model entries do not enter the roster until #34
+// folds model deployments in (adding the model facet then). TOOL/LIBRARY are reserved: the
+// config has no field distinguishing them yet, so promoting them would be a fabricated
+// discriminator, not an observed one.
+enum ServiceType {
+  SERVICE_TYPE_UNSPECIFIED = 0;
+  SERVICE_TYPE_SERVICE = 1;
+  SERVICE_TYPE_MODEL = 2;
+
+  // Reserved for TOOL, LIBRARY, ... once the roster carries a real source for them.
+  reserved 3 to 7;
+}
+
+// GitFacet is the composed git facet of a roster entry -- the subset of the git oracle's read
+// a consumer asks for via $svc->git->clean, NOT the whole gitstate record. clean is `optional`
+// so it is ABSENT (not a misleading false-is-clean) when the working tree could not be read;
+// in that case error carries why. This is a fail-CLOSED composition: an unread tree never
+// reports clean.
+message GitFacet {
+  // clean is the inverse of the oracle's "dirty": true when the working tree has no
+  // uncommitted changes. Absent when error is set (the read failed), so a consumer never
+  // mistakes an unread tree for a clean one.
+  optional bool clean = 1;
+  string branch = 2;
+  int32 unpushed = 3;
+  // error is the per-entry git read failure (missing path, unreadable HEAD, timeout), empty
+  // on success. Carried in-band so one bad tree composes its own error rather than failing the
+  // whole roster answer.
+  string error = 4;
+
+  // Reserved for future git facets (has_upstream, ahead/behind) without renumbering.
+  reserved 5 to 15;
+}
+
+// BackupFacet is the composed backup facet: the backup state-machine's current state for this
+// entry ("fallow"/"monitoring"/"backing_up"/"error"). Absent (the whole message nil) when
+// delightd runs no backup machine for the entry.
+message BackupFacet {
+  string state = 1;
+
+  // Reserved for future backup facets (error_count, next_retry) without renumbering.
+  reserved 2 to 15;
+}
+
+// Service is one composed roster entry: the entity (name/type) with its facets as fields. It
+// is what GET /services/{name} returns and what GET /services repeats. Each facet is composed
+// from a delightd internal (git oracle, backup state machine, live registry); a facet delightd
+// has no basis to answer is absent rather than zero-filled, so a consumer can tell "unknown"
+// from a real value.
+message Service {
+  string name = 1;
+  ServiceType type = 2;
+  // git is the working-tree facet, composed from the git oracle.
+  GitFacet git = 3;
+  // reachable is `optional`: true when delightd holds an UNEXPIRED registration lease for the
+  // entry. This is a provisional read from the entry's last heartbeat, NOT a real-time probe --
+  // it can lag actual liveness by up to one heartbeat interval, so treat it as a cached "was
+  // reachable as of the last lease renewal", not "is reachable right now". Absent when there is
+  // no registration -- delightd has no basis to assert reachability, which is NOT "unreachable".
+  optional bool reachable = 4;
+  // backup is the backup state-machine facet; absent when no machine runs for the entry.
+  BackupFacet backup = 5;
+  // endpoint is the served address, composed from the entry's live registration. Absent when
+  // the entry is not registered (delightd does not know where it answers).
+  Endpoint endpoint = 6;
+
+  // Field 7 is intentionally free: #34 adds the model facet when model deployments fold into
+  // the roster (a proto3 field can be added then at zero cost).
+  // Reserved for future entry-level facets without renumbering.
+  reserved 8 to 15;
+}
+
+// ServiceSet is the whole composed roster: every roster entry as a Service. It is what GET
+// /services (and GET /services?type=) returns -- the entity-query list form, composed, not a
+// facet aggregate.
+message ServiceSet {
+  repeated Service services = 1;
+
+  // Reserved for future set-level fields (e.g. a generated-at stamp) without renumbering.
+  reserved 2 to 15;
+}

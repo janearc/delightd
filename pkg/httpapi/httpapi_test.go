@@ -388,6 +388,188 @@ func TestHandleProjectGit(t *testing.T) {
 	}
 }
 
+// decodeServices unmarshals a {status, services[]} body into name-keyed composed entities.
+func decodeServices(t *testing.T, body []byte) (string, map[string]map[string]any) {
+	t.Helper()
+	var resp struct {
+		Status   string            `json:"status"`
+		Services []json.RawMessage `json:"services"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode services envelope: %v", err)
+	}
+	byName := make(map[string]map[string]any, len(resp.Services))
+	for _, raw := range resp.Services {
+		var svc map[string]any
+		if err := json.Unmarshal(raw, &svc); err != nil {
+			t.Fatalf("decode service: %v", err)
+		}
+		name, _ := svc["name"].(string)
+		byName[name] = svc
+	}
+	return resp.Status, byName
+}
+
+func TestHandleServiceByName(t *testing.T) {
+	// paling: registered (so endpoint + reachable compose from the live registration) with a
+	// backup machine; a non-git temp path so the git facet composes an error and clean is
+	// ABSENT (fail-closed -- an unread tree never reports clean).
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "registry", "registry.db"), nil)
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	defer reg.Close()
+	if err := reg.Put(&registryv1.Registration{
+		Project:  "paling",
+		Endpoint: &registryv1.Endpoint{Scheme: "http", Address: "paling.fleet:8090"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "paling", Path: t.TempDir()}}}
+	machines := map[string]*state.Machine{"paling": state.NewMachine("paling")}
+	s := New(cfg, machines, fakeFragments{}, nil, false, reg)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/services/paling", nil)
+	req.SetPathValue("name", "paling")
+	s.handleServiceByName(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("found: code = %d, want 200", rr.Code)
+	}
+
+	// The body is the bare composed entity (not a list envelope).
+	var svc map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &svc); err != nil {
+		t.Fatalf("decode entity: %v", err)
+	}
+	if svc["name"] != "paling" {
+		t.Errorf("name = %#v", svc["name"])
+	}
+	if svc["type"] != "SERVICE_TYPE_SERVICE" {
+		t.Errorf("type = %#v, want SERVICE_TYPE_SERVICE", svc["type"])
+	}
+	if svc["reachable"] != true {
+		t.Errorf("reachable = %#v, want true (entry is registered)", svc["reachable"])
+	}
+	// endpoint composed from the live registration.
+	if ep, ok := svc["endpoint"].(map[string]any); !ok || ep["address"] != "paling.fleet:8090" {
+		t.Errorf("endpoint not composed from registration: %#v", svc["endpoint"])
+	}
+	// backup facet from the state machine (fallow at rest).
+	if bk, ok := svc["backup"].(map[string]any); !ok || bk["state"] != string(state.StateFallow) {
+		t.Errorf("backup facet = %#v, want state=%q", svc["backup"], state.StateFallow)
+	}
+	// git facet: a non-git path surfaces an error and OMITS clean.
+	gf, ok := svc["git"].(map[string]any)
+	if !ok {
+		t.Fatalf("git facet missing: %#v", svc["git"])
+	}
+	if e, _ := gf["error"].(string); e == "" {
+		t.Errorf("git error should be surfaced for a non-git path: %#v", gf)
+	}
+	if _, present := gf["clean"]; present {
+		t.Errorf("clean must be absent when the git read failed, got %#v", gf["clean"])
+	}
+
+	// An entry the daemon does not manage is a 404.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/services/ghost", nil)
+	req.SetPathValue("name", "ghost")
+	s.handleServiceByName(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("unknown: code = %d, want 404", rr.Code)
+	}
+}
+
+func TestHandleServicesAll(t *testing.T) {
+	// paling is registered and has a backup machine; taco is neither -- so the composed
+	// entities must differ exactly in the facets delightd has a basis to answer.
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "registry", "registry.db"), nil)
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	defer reg.Close()
+	if err := reg.Put(&registryv1.Registration{
+		Project:  "paling",
+		Endpoint: &registryv1.Endpoint{Scheme: "http", Address: "paling.fleet:8090"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{
+		{Name: "paling", Path: t.TempDir()},
+		{Name: "taco", Path: t.TempDir()},
+	}}
+	machines := map[string]*state.Machine{"paling": state.NewMachine("paling")}
+	s := New(cfg, machines, fakeFragments{}, nil, false, reg)
+
+	// Unfiltered: the whole roster, composed.
+	rr := httptest.NewRecorder()
+	s.handleServicesAll(rr, httptest.NewRequest(http.MethodGet, "/services", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rr.Code)
+	}
+	status, byName := decodeServices(t, rr.Body.Bytes())
+	if status != "ok" || len(byName) != 2 {
+		t.Fatalf("unexpected roster: %s", rr.Body.String())
+	}
+
+	// paling: registered + machine -> reachable, endpoint, backup all present.
+	paling := byName["paling"]
+	if paling["reachable"] != true {
+		t.Errorf("paling reachable = %#v, want true", paling["reachable"])
+	}
+	if _, ok := paling["endpoint"]; !ok {
+		t.Errorf("paling endpoint should be composed from its registration")
+	}
+	if _, ok := paling["backup"]; !ok {
+		t.Errorf("paling backup facet should be present")
+	}
+
+	// taco: no registration, no machine -> reachable/endpoint/backup ABSENT, but type is set.
+	taco := byName["taco"]
+	if _, ok := taco["reachable"]; ok {
+		t.Errorf("taco has no registration; reachable must be absent (unknown), got %#v", taco["reachable"])
+	}
+	if _, ok := taco["endpoint"]; ok {
+		t.Errorf("taco has no registration; endpoint must be absent, got %#v", taco["endpoint"])
+	}
+	if _, ok := taco["backup"]; ok {
+		t.Errorf("taco has no backup machine; backup facet must be absent, got %#v", taco["backup"])
+	}
+	if taco["type"] != "SERVICE_TYPE_SERVICE" {
+		t.Errorf("taco type = %#v, want SERVICE_TYPE_SERVICE", taco["type"])
+	}
+
+	// ?type=service matches every step-1 entry.
+	rr = httptest.NewRecorder()
+	s.handleServicesAll(rr, httptest.NewRequest(http.MethodGet, "/services?type=service", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("type=service: code = %d, want 200", rr.Code)
+	}
+	if _, byName := decodeServices(t, rr.Body.Bytes()); len(byName) != 2 {
+		t.Errorf("type=service should match both entries, got %d", len(byName))
+	}
+
+	// ?type=model is a valid filter with no entries yet (#34 populates the model roster).
+	rr = httptest.NewRecorder()
+	s.handleServicesAll(rr, httptest.NewRequest(http.MethodGet, "/services?type=model", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("type=model: code = %d, want 200", rr.Code)
+	}
+	if _, byName := decodeServices(t, rr.Body.Bytes()); len(byName) != 0 {
+		t.Errorf("type=model should be empty in step 1, got %d", len(byName))
+	}
+
+	// An unrecognized type is a loud 400, not a silent empty list.
+	rr = httptest.NewRecorder()
+	s.handleServicesAll(rr, httptest.NewRequest(http.MethodGet, "/services?type=bogus", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("type=bogus: code = %d, want 400", rr.Code)
+	}
+}
+
 func TestMux_RoutingAndMCPGating(t *testing.T) {
 	machines := map[string]*state.Machine{"p": state.NewMachine("p")}
 	s := New(&config.DelightConfig{}, machines, fakeFragments{}, nil, false, nil)
@@ -400,6 +582,7 @@ func TestMux_RoutingAndMCPGating(t *testing.T) {
 	}{
 		{http.MethodGet, "/projects/p/introspect", http.StatusOK},
 		{http.MethodGet, "/projects", http.StatusOK},
+		{http.MethodGet, "/services", http.StatusOK},
 		{http.MethodGet, "/registrations", http.StatusOK},
 		{http.MethodGet, "/metrics", http.StatusOK},
 		{http.MethodGet, "/health", http.StatusOK},
