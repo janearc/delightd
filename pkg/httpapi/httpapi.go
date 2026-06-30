@@ -152,6 +152,15 @@ type registrationsResponse struct {
 	Registrations []json.RawMessage `json:"registrations"`
 }
 
+// servicesResponse is the GET /services body: every roster entry composed as a
+// registry.v1.Service (protojson), in the same {status, items[]} envelope the other roster
+// surfaces use. GET /services/{name} returns the bare composed entity instead (one thing, not
+// a list), matching the entity-query shape in #42.
+type servicesResponse struct {
+	Status   string            `json:"status"`
+	Services []json.RawMessage `json:"services"`
+}
+
 // rosterMarshal serves the roster wire. UseProtoNames keeps snake_case field names
 // (name/path/essential/deploy/remote_url) byte-identical to the prior hand-written
 // shape. EmitUnpopulated is deliberately left off, so the wire stays sparse
@@ -218,6 +227,13 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /register", s.handleRegister)             // a frood joins the live registry (additive, optional; not yet required)
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
+
+	// The composed entity-query surface (#42): ask delightd about one roster entry and get
+	// it back with its facets (git/backup/reachable/endpoint) as fields, instead of pulling a
+	// facet aggregate and reassembling delightd's internals. Additive -- /git, /projects, and
+	// /registrations stay; internalizing those aggregates is a separate, later step of #42.
+	mux.HandleFunc("GET /services", s.handleServicesAll)          // composed roster (entity-query list), optional ?type= filter
+	mux.HandleFunc("GET /services/{name}", s.handleServiceByName) // one composed roster entry, facets as fields
 
 	// Service introspection composes backup-state-machine status with the
 	// exports engine's view of generated shims. Unknown services return 200
@@ -322,6 +338,137 @@ func (s *Server) handleProjectGit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusNotFound, errorResponse{Error: "project not found"})
+}
+
+// handleServicesAll serves the composed roster: every managed entry as a registry.v1.Service
+// with its facets (git/backup/reachable/endpoint) as fields. An optional ?type= filter narrows
+// the roster (today only `service` matches; `model` is a valid, currently-empty filter that
+// #34 will populate). An unrecognized type is a 400 rather than a silent empty list -- delightd
+// never-silent. The git facet is collected with the same concurrent, per-entry-deadline sweep
+// GET /git uses, so one slow tree cannot starve the whole answer.
+func (s *Server) handleServicesAll(w http.ResponseWriter, r *http.Request) {
+	want := registryv1.ServiceType_SERVICE_TYPE_UNSPECIFIED // unset means "no filter"
+	if raw := strings.TrimSpace(r.URL.Query().Get("type")); raw != "" {
+		t, ok := parseServiceType(raw)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unknown service type: " + raw})
+			return
+		}
+		want = t
+	}
+
+	// One bounded, concurrent git sweep for the whole roster, then index by name so each entry
+	// composes its own facet. logGitErrors honors gitstate's "the caller logs" contract.
+	gits := gitstate.CollectAll(s.cfg.Projects)
+	logGitErrors(gits)
+	gitByName := make(map[string]gitstate.GitState, len(gits))
+	for _, pg := range gits {
+		gitByName[pg.Name] = pg.Git
+	}
+
+	services := make([]json.RawMessage, 0, len(s.cfg.Projects))
+	for _, p := range s.cfg.Projects {
+		svc := s.composeService(p, gitByName[p.Name])
+		// An unset filter passes everything; otherwise only entries of the requested type.
+		if want != registryv1.ServiceType_SERVICE_TYPE_UNSPECIFIED && svc.GetType() != want {
+			continue
+		}
+		raw, err := rosterMarshal.Marshal(svc)
+		if err != nil {
+			// A entry that cannot be marshaled is a server fault, not a partial roster: fail
+			// loudly rather than serve a silently short list.
+			slog.Error("failed to marshal composed service", "service", p.Name, "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode services"})
+			return
+		}
+		services = append(services, raw)
+	}
+	writeJSON(w, http.StatusOK, servicesResponse{Status: "ok", Services: services})
+}
+
+// handleServiceByName serves one composed roster entry: the bare registry.v1.Service (not a
+// list envelope), facets as fields. An entry delightd does not manage is a 404 -- the entity
+// must be in the roster for its facets to mean anything.
+func (s *Server) handleServiceByName(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	for _, p := range s.cfg.Projects {
+		if p.Name != name {
+			continue
+		}
+		gs := gitstate.Collect(p.Path)
+		logGitErrors([]gitstate.ProjectGit{{Name: p.Name, Git: gs}})
+		raw, err := rosterMarshal.Marshal(s.composeService(p, gs))
+		if err != nil {
+			slog.Error("failed to marshal composed service", "service", p.Name, "error", err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to encode service"})
+			return
+		}
+		// Write the composed entity directly (json.RawMessage round-trips its own bytes), so
+		// the body is the single composed thing, not a one-element list.
+		writeJSON(w, http.StatusOK, json.RawMessage(raw))
+		return
+	}
+	writeJSON(w, http.StatusNotFound, errorResponse{Error: "service not found"})
+}
+
+// composeService builds the composed entity for one roster project: its declared identity plus
+// the facets delightd holds today. git comes from the (already-collected) oracle read; backup
+// from the backup state machine when one runs for the entry; endpoint and reachable from the
+// live registration where the entry is registered. A facet delightd has no basis to answer is
+// left absent rather than zero-filled, so a consumer can tell "unknown" from a real value. The
+// model facet is not composed today -- model deployments are not yet roster entries (#34 folds
+// them in and adds the field then).
+func (s *Server) composeService(p config.ProjectConfig, gs gitstate.GitState) *registryv1.Service {
+	svc := &registryv1.Service{
+		Name: p.Name,
+		Type: registryv1.ServiceType_SERVICE_TYPE_SERVICE,
+		Git:  composeGitFacet(gs),
+	}
+	if m, ok := s.machines[p.Name]; ok && m != nil {
+		svc.Backup = &registryv1.BackupFacet{State: string(m.GetState())}
+	}
+	// The endpoint and reachability facets come from the live registry: a present registration
+	// means the entry is registered (endpoint known) and holds an unexpired lease, so reachable
+	// is set true. That is a provisional read from the entry's last heartbeat, not a real-time
+	// probe -- it can lag liveness by up to one heartbeat interval. No registration means
+	// delightd does not know where it answers -- endpoint absent, reachable left unknown (which
+	// is NOT the same as "unreachable").
+	if s.reg != nil {
+		if reg, ok := s.reg.Get(p.Name); ok {
+			svc.Endpoint = reg.GetEndpoint()
+			svc.Reachable = proto.Bool(true)
+		}
+	}
+	return svc
+}
+
+// composeGitFacet projects the git oracle's full read down to the facet a consumer asks for.
+// On a read failure clean is left ABSENT (not a misleading false-is-clean) and error carries
+// why -- a fail-closed composition, so an unread tree never reports clean.
+func composeGitFacet(gs gitstate.GitState) *registryv1.GitFacet {
+	f := &registryv1.GitFacet{
+		Branch:   gs.Branch,
+		Unpushed: int32(gs.Unpushed),
+		Error:    gs.Error,
+	}
+	if gs.Error == "" {
+		f.Clean = proto.Bool(!gs.Dirty)
+	}
+	return f
+}
+
+// parseServiceType maps a ?type= query value to the contract discriminator. It accepts the
+// friendly short forms a consumer writes (`service`, `model`), case-insensitively; ok is false
+// for anything else so the handler can answer 400 rather than silently filter to nothing.
+func parseServiceType(s string) (registryv1.ServiceType, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "service":
+		return registryv1.ServiceType_SERVICE_TYPE_SERVICE, true
+	case "model":
+		return registryv1.ServiceType_SERVICE_TYPE_MODEL, true
+	default:
+		return registryv1.ServiceType_SERVICE_TYPE_UNSPECIFIED, false
+	}
 }
 
 // logGitErrors emits a warning for each project whose git state could not be
