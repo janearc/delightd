@@ -11,3 +11,31 @@ plugins:
   - local: protoc-gen-go
     out: gen/go
     opt: paths=source_relative
+  # protoc-gen-rust-serde emits a plain serde crate (no prost, no protobuf runtime) for the
+  # narrow widget-facing packages a Rust consumer speaks: the tiny-monitor widget consumes
+  # delightd's resolve.v1 this way, speaking protojson over the wire (not binary protobuf), the
+  # same way the Swift targets in other repos do. Scoped to resolve.v1 ONLY -- registry.v1's
+  # Service/Endpoint carry int32 and proto3-`optional` bool fields the narrow plugin does not
+  # emit, so those stay Go-served. crate_name and the package allowlist are the plugin's buf
+  # opt: params, so this is the SAME binary big-little-mesh builds, run unforked here with
+  # delightd's own crate name. It is NOT vendored in this repo; install it from big-little-mesh,
+  # pinned to the SAME commit CI uses (never @latest -- the committed crate is the widget's
+  # source of truth, and an unpinned plugin could regenerate it into silent drift):
+  #   go install github.com/janearc/big-little-mesh/cmd/protoc-gen-rust-serde@cf1411c5
+  # (or `go install ./cmd/protoc-gen-rust-serde` from a blm checkout at that commit), and make
+  # sure "$(go env GOPATH)/bin" is on PATH when buf runs. Unlike gen/go (gitignored, regenerated),
+  # the gen/rust crate IS committed -- the widget consumes it as a path/git dependency and does
+  # not regenerate it; only gen/rust/target and Cargo.lock are ignored.
+  # strategy: all invokes the plugin ONCE over the whole module instead of buf's default of once
+  # per proto directory, so the packages=resolve.v1 allowlist filters to the one in-scope package
+  # in a single pass. This is deliberate, not cosmetic: under the default (directory) strategy
+  # each run sees only one package, and how the plugin treats a run with no allowlisted package
+  # is a plugin-version detail -- the pinned cf1411c build skips such a run silently, but other
+  # builds error on it. strategy: all sidesteps that -- one run, it contains resolve.v1, the rest
+  # are filtered in-process -- so generation is robust regardless of which plugin build runs.
+  - local: protoc-gen-rust-serde
+    out: gen/rust
+    strategy: all
+    opt:
+      - crate_name=delightd-contracts
+      - packages=resolve.v1

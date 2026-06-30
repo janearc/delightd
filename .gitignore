@@ -15,7 +15,17 @@ coverage.out.tmp
 
 # generated protobuf bindings — never committed; run `task generate` (buf) to
 # produce them locally from the vendored proto/ (source of truth: kafka-svc).
-gen/
+# gen/* (not gen/) so a single subtree can be re-included below: the Go bindings
+# stay ignored, but the Rust contracts crate is committed.
+gen/*
+
+# EXCEPTION: the gen/rust serde crate IS committed. The tiny-monitor widget consumes it
+# as a path/git dependency and does NOT regenerate it (it has no buf/protoc toolchain), so
+# the checked-in tree is the source of truth for the widget. Only its build output and the
+# consumer-resolved lockfile stay ignored.
+!gen/rust/
+gen/rust/target/
+gen/rust/Cargo.lock
 
 # delightd runtime artifact
 traefik.json
