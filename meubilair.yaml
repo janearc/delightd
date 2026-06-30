@@ -1,0 +1,162 @@
+# meubilair.yaml -- the furniture inventory.
+#
+# "Meubilair" (furniture) is the third-party infrastructure delightd depends on
+# but does NOT own: the brokers, stores, and dashboards a frood talks to, but
+# which never register with delightd, carry no frood Identity, and speak no
+# delightd contract. delightd manages PROJECTS (see delight.yaml); furniture is
+# the room those projects sit in. This file is the declarative inventory of that
+# furniture -- one curated entry per piece -- shipped in delightd source.
+#
+# SCOPE: this is the DECLARATIVE descriptor only. The delightd code that ingests
+# this file and polls these probes is a separate, later bucket; nothing reads
+# this YAML yet. It is authored now so the inventory exists and is reviewable
+# before the poller is built.
+#
+# This descriptor is an INDEX, not a copy. Each entry references the real kube
+# manifest it was derived from (source_manifest) and carries only the minimal
+# projection a health poller needs -- the served endpoints and the one health
+# probe. The manifest stays the single source of truth; embedding the full
+# manifests here (they live in OTHER repos -- kafka-logging, obs-svc) would fork
+# them and rot. The endpoints and probe below are DERIVED from those manifests;
+# keeping them in sync is the later ingest bucket's job (a conformance check
+# against source_manifest is the natural guard, mirroring the contracts pattern).
+#
+# Field shape (one entry per furniture):
+#   name             stable inventory name (matches the kube Service name).
+#   endpoints        the addresses the furniture serves on, each {scheme,
+#                    address}. Shape mirrors registry.v1.Endpoint so the later
+#                    ingest maps cleanly onto the existing contract. Addresses
+#                    are the stable in-cluster service DNS in namespace `fleet`
+#                    (<name>.fleet.svc.cluster.local:<port>).
+#   probe            the health probe in kube-probe form -- exactly one of
+#                    httpGet / tcpSocket / exec -- taken from the manifest's
+#                    READINESS probe (the manifest author's "is it serving?"
+#                    gate), kept verbatim as the recorded provenance from the
+#                    source manifest. delightd's health model reads k8s pod
+#                    readiness directly (a later bucket); the probe here is the
+#                    manifest projection, not a script the poller runs.
+#   source_manifest  the kube manifest this entry was derived from, as
+#                    {repo, path} -- a cross-repo reference, never an absolute
+#                    host path.
+#
+# All seven pieces live in the `fleet` namespace. None of xpack/grafana/kibana
+# auth is on (the trust boundary is the edge, per each manifest's header), so the
+# probes need no credentials.
+
+meubilair:
+  # --- kafka-logging/kube: the bus and its coordination/contract services ---
+
+  - name: kafka
+    endpoints:
+      # INTERNAL listener: the in-cluster path clients reconnect to.
+      - scheme: kafka
+        address: "kafka.fleet.svc.cluster.local:9092"
+      # EXTERNAL listener: the host/compose migration bridge (traefik TCP route).
+      - scheme: kafka
+        address: "kafka.localhost:9094"
+    probe:
+      # Manifest readiness is an in-pod exec (a real client API call).
+      exec:
+        command:
+          - sh
+          - -c
+          - kafka-broker-api-versions --bootstrap-server localhost:9092
+    source_manifest:
+      repo: kafka-logging
+      path: kube/kafka.yaml
+
+  - name: zookeeper
+    endpoints:
+      - scheme: tcp
+        address: "zookeeper.fleet.svc.cluster.local:2181"
+    probe:
+      # Manifest readiness is an in-pod exec (the "ruok" four-letter-word check).
+      exec:
+        command:
+          - sh
+          - -c
+          - echo ruok | nc -w 2 localhost 2181 | grep -q imok
+    source_manifest:
+      repo: kafka-logging
+      path: kube/zookeeper.yaml
+
+  - name: schema-registry
+    endpoints:
+      - scheme: http
+        address: "schema-registry.fleet.svc.cluster.local:8081"
+    probe:
+      # /subjects returns 200 only after the registry has connected to kafka and
+      # initialized the _schemas topic.
+      httpGet:
+        path: /subjects
+        port: 8081
+    source_manifest:
+      repo: kafka-logging
+      path: kube/schema-registry.yaml
+
+  # --- obs-svc/kube/elk: the log/event store and its dashboards ---
+
+  - name: elasticsearch
+    endpoints:
+      - scheme: http
+        address: "elasticsearch.fleet.svc.cluster.local:9200"
+      # Inter-node transport; unused at one node, exposed for a future topology.
+      - scheme: tcp
+        address: "elasticsearch.fleet.svc.cluster.local:9300"
+    probe:
+      # HTTP root returns 200 once the node has started and the REST layer serves.
+      httpGet:
+        path: /
+        port: 9200
+    source_manifest:
+      repo: obs-svc
+      path: kube/elk/elasticsearch.yaml
+
+  - name: grafana
+    endpoints:
+      - scheme: http
+        address: "grafana.fleet.svc.cluster.local:3000"
+      # Also fronted at the edge by a traefik IngressRoute (Host `grafana.local`,
+      # an identity-safe placeholder hostname); the real public host is set at
+      # go-live, so only the stable in-cluster address is recorded here.
+    probe:
+      # /api/health returns 200 with {"database":"ok"} once Grafana is serving.
+      httpGet:
+        path: /api/health
+        port: 3000
+    source_manifest:
+      repo: obs-svc
+      path: kube/elk/grafana.yaml
+
+  - name: kibana
+    endpoints:
+      - scheme: http
+        address: "kibana.fleet.svc.cluster.local:5601"
+      # Also fronted at the edge (Host `kibana.local`, identity-safe placeholder).
+    probe:
+      # /api/status returns 200 only when Kibana has connected to ES and finished
+      # its own migrations.
+      httpGet:
+        path: /api/status
+        port: 5601
+    source_manifest:
+      repo: obs-svc
+      path: kube/elk/kibana.yaml
+
+  - name: logstash
+    endpoints:
+      # Beats/lumberjack ingest input.
+      - scheme: tcp
+        address: "logstash.fleet.svc.cluster.local:5044"
+      # Node monitoring API (the readiness surface below).
+      - scheme: http
+        address: "logstash.fleet.svc.cluster.local:9600"
+    probe:
+      # The :9600 node API answers 200 once the pipeline is compiled and running,
+      # which is exactly when it can accept Beats input.
+      httpGet:
+        path: /
+        port: 9600
+    source_manifest:
+      repo: obs-svc
+      path: kube/elk/logstash.yaml
