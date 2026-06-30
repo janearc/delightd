@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+// Package resolve.v1 is the narrow, widget-facing resolution contract: given a project name,
+// the one address a consumer needs to reach it. It is deliberately string-only -- no enums, no
+// optional scalars, no well-known types -- so the size-constrained Rust codegen plugin (#58)
+// can emit it for the tiny-monitor widget. The rich, Go-served registry.v1.Service (#42)
+// carries the full composed entity; this is its projection down to "where do I send a request".
+// delightd owns this contract; it composes the answer from its own live registry.
+package resolve.v1;
+
+// ResolvedService is one project's reachable address, composed from delightd's live registry.
+// It is the body of GET /resolve/{name}: a consumer wanted to talk to `name` and delightd
+// resolved it to scheme://address. Every field is a plain string so the message crosses the
+// narrow Rust codegen boundary unchanged -- keep it that way (see the reserved note below).
+message ResolvedService {
+  // name is the project name that was resolved, echoed so a consumer batching lookups can
+  // correlate the answer with the request it sent.
+  string name = 1;
+  // scheme is the transport the service answers on, e.g. "http", "https", "grpc". Composed
+  // from the live registration's endpoint.
+  string scheme = 2;
+  // address is the host:port or URL authority to reach the service, e.g.
+  // "obs-svc-agg.fleet:8090". Composed from the live registration's endpoint.
+  string address = 3;
+
+  // Reserved for future widget-facing fields without renumbering. Keep any addition STRING-typed
+  // so the narrow Rust plugin (#58) can continue to emit this message -- an enum or optional
+  // scalar here would break the widget's codegen.
+  reserved 4 to 15;
+}
