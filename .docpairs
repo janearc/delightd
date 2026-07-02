@@ -1,11 +1,15 @@
-# .docpairs — the doc-pairing gate's map (mechanical half only).
+# .docpairs — the doc-implication map.
 #
-# A pull request that touches a path matching a glob on the left MUST also
-# touch the doc on the right, or the docpairs check fails. This proves the
-# doc was TOUCHED, not that it is true — content truth is a review question.
+# Each line pairs a code surface with the document that describes it. The map
+# is DATA for the judgment gate: when a pull request changes paths matching a
+# glob on the left, the document on the right is IMPLICATED — the judge
+# receives its full content alongside the diff and rules on whether the change
+# falsifies it. A falsified, un-updated implicated document is a bounce.
 #
-# Format: one pairing per line, "<glob> -> <doc path>". Globs support exact
-# paths, single-star segments, and a trailing "/**" prefix match.
+# Nothing mechanical counts touches against this file (ADR-0002: doc pairing
+# binds through the judge). Keep pairs few and obviously true.
+#
+# Format: one pairing per line, "<glob> -> <doc path>"; "#" comments.
 
 pkg/httpapi/**  -> docs/api.md
 Taskfile.yml    -> docs/operations.md

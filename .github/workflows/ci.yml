@@ -85,17 +85,3 @@ jobs:
       - name: cargo test (generated crate conformance)
         working-directory: gen/rust
         run: cargo test
-
-  docpairs:
-    # the doc-pairing gate, mechanical half: a PR touching a path paired in
-    # .docpairs must touch the paired doc too. pure path logic, no model.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: go run ./tools/docpairs --base "origin/${GITHUB_BASE_REF}"
