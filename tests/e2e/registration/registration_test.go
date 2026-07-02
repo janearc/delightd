@@ -4,7 +4,8 @@
 // a REAL delightd (built from this tree) accepts a registration sent by magpie's
 // REAL client (register_once, via uv in the magpie checkout), and the result is
 // observed on the delightd side via GET /registrations — service A talks to
-// service B and the product comes out (ADR-0001 pilot criterion 4).
+// service B and the product comes out. That observable, cross-service behavior
+// is the test that counts for this seam; unit tests around it are hygiene.
 //
 // What is real: the delightd binary, every gate in handleRegister (roster
 // membership, identity consistency, contract verification over live HTTP,
@@ -13,8 +14,9 @@
 // What is stubbed, stated plainly:
 //   - the schema registry: a minimal HTTP stub that answers the version-list
 //     probe for any subject. The verification CODE PATH runs for real against
-//     a live server; the registry's CONTENT is kafka-svc's concern and the bus
-//     is out of pilot scope by the ratified sprint T0.
+//     a live server; the registry's CONTENT belongs to kafka-svc (the bus
+//     layer), which this proof deliberately does not reach -- the seam under
+//     test ends at delightd's registry, not at the broker.
 //   - magpie's /health endpoint: this test listens on magpie's behalf. The
 //     daemon under test here is delightd; launching magpie's full watch daemon
 //     would add its filesystem side effects without strengthening the seam

@@ -170,10 +170,12 @@ split roots remove both problems.)
 The Taskfile is the entry point (`buf` required for proto generation):
 
 ```bash
-task generate    # buf generate -> gen/ (gitignored, never committed)
-task build       # generate, then go build -o bin/delightd ./cmd/delightd
-task test        # generate, then go test ./...
-task sync-proto  # re-vendor delight.v1 from kafka-svc, then run generate
+task generate          # buf generate -> gen/ (gitignored, never committed)
+task build             # generate, then go build -o bin/delightd ./cmd/delightd
+task test              # generate, then go test ./...
+task sync-proto        # re-vendor delight.v1 from kafka-svc, then run generate
+task e2e-registration  # prove the magpie->delightd registration seam end to end
+                       # (local-first: needs ~/work/magpie checked out and uv on PATH)
 ```
 
 ## Removed and stale
