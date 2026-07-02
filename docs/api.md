@@ -31,11 +31,14 @@ Two distinct 404 semantics apply across the surface, and the difference is
 deliberate:
 
 - **Unknown project, control/state routes** (`/state`, `/backup`, `/reset`,
-  `/projects/{name}/git`) → `404` with `{"error": "project not found"}`. These
-  act on a project; an unknown name has no machine to act on.
+  `/projects/{name}/git`, `/services/{name}`) → `404` with an `error` body. These
+  act on a project; an unknown name has no machine to act on. `POST /register`
+  uses the same axis: an unknown project is `404`, not a permission error.
 - **Unknown project, introspection** (`/introspect`) → `200` with
   `is_known_to_daemon: false`. Introspection is a *query about whether the
   daemon knows a project*; "no" is a valid answer, not an error.
+- **Resolution** (`/resolve/{name}`) → a miss is **always `404`, never `503`**:
+  "not resolvable right now" is an answer about the name, not a daemon fault.
 
 ---
 
@@ -287,6 +290,97 @@ Clear a stuck `error` state, returning the machine toward `fallow`.
 | `200` | error cleared; `{"status": "error_cleared", "project": "<name>"}` |
 | `404` | unknown project; `{"error": "project not found"}` |
 | `409` | the clear transition was rejected; `{"error": "<reason>"}` |
+
+## POST /register
+
+A frood joins the live registry (additive today: delightd does not yet require a
+frood to register). The body is a protojson `registry.v1.RegisterRequest`; the
+daemon runs five gates in order — roster membership, identity consistency, a
+reported endpoint, contract verification against the schema registry
+(fail-closed), and a live `/health` dial-back to the reported endpoint — and only
+then records the registration under a lease.
+
+```json
+{
+  "identity": { "serviceName": "magpie", "project": "magpie", "version": "0.1.0" },
+  "endpoint": { "scheme": "http", "address": "magpie:8092" },
+  "leaseTtlSeconds": 90
+}
+```
+
+| Status | Condition |
+|--------|-----------|
+| `200` | accepted; protojson `registry.v1.RegisterResponse` (identity, confirmed endpoint, lease TTL) |
+| `400` | unreadable or malformed `RegisterRequest` |
+| `404` | unknown project (the roster convention: no project, nothing to act on) |
+| `409` | endpoint already held by a different project |
+| `422` | inconsistent identity, missing endpoint, unknown subject, or the `/health` guarantee failed |
+| `503` | the schema registry could not be reached to verify a subject (fail-closed) |
+
+Every decline also emits a never-silent `registry.v1.NotRegistered` event on a
+detached goroutine — the HTTP response never waits on the broker.
+
+## GET /registrations
+
+The live registered set (`registry.v1.RegistrationSet`, each entry protojson) —
+who has actually joined, alongside the static roster `GET /projects` declares.
+
+```json
+{
+  "status": "ok",
+  "registrations": [
+    {
+      "project": "magpie",
+      "identity": { "serviceName": "magpie", "project": "magpie", "version": "0.1.0" },
+      "contracts": { "emits": [ { "subject": "observability.v1.ServiceHealthHeartbeat" } ] },
+      "endpoint": { "scheme": "http", "address": "magpie:8092" },
+      "registeredAt": "2026-07-02T08:00:00Z",
+      "leaseExpiresAt": "2026-07-02T08:01:30Z"
+    }
+  ]
+}
+```
+
+Status: always `200`; an empty `registrations` array means nothing is currently
+registered (a nil registry, as in tests, serves the empty set).
+
+## GET /resolve/{name}
+
+Narrow, widget-facing resolution: the scheme + address to reach one project, as a
+protojson `resolve.v1.ResolvedService`. A resolution miss is **always `404`,
+never `503`** — "not resolvable right now" is an answer about the name, not a
+daemon fault.
+
+```json
+{ "scheme": "http", "address": "127.0.0.1:8092" }
+```
+
+| Status | Condition |
+|--------|-----------|
+| `200` | resolvable; protojson `resolve.v1.ResolvedService` |
+| `404` | `{"error": "service not resolvable"}` — unknown name, or no live registration to resolve to |
+
+## GET /services
+
+The composed roster as an entity-query list: every managed project with its
+facets (git / backup / reachable / endpoint) as fields. An optional `?type=`
+filter narrows by service type; an unrecognized type is a `400` rather than a
+silent empty list.
+
+| Status | Condition |
+|--------|-----------|
+| `200` | `{"status": "ok", ...}` list envelope of composed entries |
+| `400` | `{"error": "unknown service type: <type>"}` |
+
+## GET /services/{name}
+
+One composed roster entry, facets as fields. An entity delightd does not manage
+is a `404` — same axis as the control routes: no project, nothing to compose.
+
+| Status | Condition |
+|--------|-----------|
+| `200` | the composed entry for `{name}` |
+| `404` | not a managed project |
 
 ## POST /mcp
 
