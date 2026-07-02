@@ -31,3 +31,8 @@ tasks:
     deps: [generate]
     cmds:
       - go test ./...
+
+  e2e-registration:
+    desc: Prove the magpie->delightd registration seam end to end (local-first; needs ~/work/magpie + uv).
+    cmds:
+      - go test -tags e2e ./tests/e2e/registration/ -v
