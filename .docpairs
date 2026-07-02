@@ -1,0 +1,16 @@
+# .docpairs — the doc-implication map.
+#
+# Each line pairs a code surface with the document that describes it. The map
+# is DATA for the judgment gate: when a pull request changes paths matching a
+# glob on the left, the document on the right is IMPLICATED — the judge
+# receives its full content alongside the diff and rules on whether the change
+# falsifies it. A falsified, un-updated implicated document is a bounce.
+#
+# Nothing mechanical counts touches against this file (ADR-0002: doc pairing
+# binds through the judge). Keep pairs few and obviously true.
+#
+# Format: one pairing per line, "<glob> -> <doc path>"; "#" comments.
+
+pkg/httpapi/**  -> docs/api.md
+Taskfile.yml    -> docs/operations.md
+config/**       -> docs/operations.md
