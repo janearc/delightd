@@ -1,0 +1,12 @@
+# .docpairs — the doc-pairing gate's map (mechanical half only).
+#
+# A pull request that touches a path matching a glob on the left MUST also
+# touch the doc on the right, or the docpairs check fails. This proves the
+# doc was TOUCHED, not that it is true — content truth is a review question.
+#
+# Format: one pairing per line, "<glob> -> <doc path>". Globs support exact
+# paths, single-star segments, and a trailing "/**" prefix match.
+
+pkg/httpapi/**  -> docs/api.md
+Taskfile.yml    -> docs/operations.md
+config/**       -> docs/operations.md

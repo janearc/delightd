@@ -9,12 +9,18 @@ surface registered in `Mux()`.
 | GET | `/health` | liveness + active project count |
 | GET | `/metrics` | prometheus exposition |
 | GET | `/discovery/llms` | currently discoverable local LLM endpoints |
+| GET | `/projects` | authoritative roster (name/path/essential/deploy/remote_url) for all managed projects |
 | GET | `/git` | live git state for every managed project |
 | GET | `/projects/{name}/git` | live git state for one project |
 | GET | `/projects/{name}/state` | backup state-machine diagnostics |
 | GET | `/projects/{name}/introspect` | known / backing-up / has-fragment view |
 | POST | `/projects/{name}/backup` | manually trigger a checkpoint |
 | POST | `/projects/{name}/reset` | clear a stuck error state |
+| POST | `/register` | a frood joins the live registry (additive, optional; not yet required) |
+| GET | `/registrations` | live frood registrations (`registry.v1.RegistrationSet`), alongside the static roster |
+| GET | `/resolve/{name}` | narrow widget-facing resolution (`resolve.v1.ResolvedService`): scheme + address for one project |
+| GET | `/services` | composed roster (entity-query list), optional `?type=` filter |
+| GET | `/services/{name}` | one composed roster entry, facets as fields |
 | POST | `/mcp` | agent skill aggregator (MCP JSON-RPC); only when MCP is enabled |
 
 `/mcp` is registered only when `system.agent_skills.enabled` is true **and**
