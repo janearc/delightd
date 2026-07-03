@@ -147,15 +147,16 @@ type rosterResponse struct {
 }
 
 // registrationsResponse is the GET /registrations body: the live frood registrations in the
-// same {status, items[]} envelope GET /projects uses, each item a protojson Registration.
+// same {status, <plural>[]} envelope SHAPE GET /projects uses -- projects[] there,
+// registrations[] here; no surface uses an items[] key -- each entry a protojson Registration.
 type registrationsResponse struct {
 	Status        string            `json:"status"`
 	Registrations []json.RawMessage `json:"registrations"`
 }
 
 // servicesResponse is the GET /services body: every roster entry composed as a
-// registry.v1.Service (protojson), in the same {status, items[]} envelope the other roster
-// surfaces use. GET /services/{name} returns the bare composed entity instead (one thing, not
+// registry.v1.Service (protojson), in the same {status, <plural>[]} envelope shape the other
+// roster surfaces use (services[] here). GET /services/{name} returns the bare composed entity instead (one thing, not
 // a list), matching the entity-query shape in #42.
 type servicesResponse struct {
 	Status   string            `json:"status"`
