@@ -3,9 +3,11 @@ package events
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -74,12 +76,27 @@ func (r *recorder) count() int {
 	return len(r.recs)
 }
 
-// srServer returns an httptest schema registry that counts POSTs to the
-// versions endpoint and answers each with a fixed schema id.
-func srServer(t *testing.T, id int32, registrations *int32) *httptest.Server {
+// srCapture records what the fake registry actually RECEIVED, so a test can
+// assert a real registration happened — right method, right subject endpoint,
+// right schema payload — not merely that the server was contacted (the
+// "we heard of this guy" vs "we registered" distinction, PR 74 review).
+type srCapture struct {
+	mu     sync.Mutex
+	method string
+	path   string
+	body   string
+}
+
+// srServer returns an httptest schema registry that counts every request,
+// captures the last one's shape into seen, and answers with a fixed schema id.
+func srServer(t *testing.T, id int32, registrations *int32, seen *srCapture) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(registrations, 1)
+		b, _ := io.ReadAll(r.Body)
+		seen.mu.Lock()
+		seen.method, seen.path, seen.body = r.Method, r.URL.Path, string(b)
+		seen.mu.Unlock()
 		w.Header().Set("Content-Type", "application/vnd.schemaregistry.v1+json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"id":` + strconv.Itoa(int(id)) + `}`))
@@ -92,7 +109,8 @@ func srServer(t *testing.T, id int32, registrations *int32) *httptest.Server {
 // writes that PublishBackup used to make from detached goroutines.
 func TestPublishBackup_RegistersExactlyOnceUnderRace(t *testing.T) {
 	var registrations int32
-	sr := srServer(t, 9, &registrations)
+	var seen srCapture
+	sr := srServer(t, 9, &registrations, &seen)
 	defer sr.Close()
 
 	rec := &recorder{}
@@ -123,6 +141,31 @@ func TestPublishBackup_RegistersExactlyOnceUnderRace(t *testing.T) {
 	if got := rec.count(); got != goroutines {
 		t.Errorf("produced %d records, want %d", got, goroutines)
 	}
+
+	// registration took EFFECT, not just occurred: every produced frame must
+	// carry the id the registry assigned — the "we registered" half (PR 74
+	// review), proving all racing publishers consumed the one registration.
+	rec.mu.Lock()
+	for i, r := range rec.recs {
+		if id := binary.BigEndian.Uint32(r.Value[1:5]); id != 9 {
+			t.Errorf("record %d frame carries schema id %d, want 9 (the registered id)", i, id)
+		}
+	}
+	rec.mu.Unlock()
+
+	// and the registration itself was real: the right method, the
+	// RecordNameStrategy subject endpoint, the schema payload we hold.
+	seen.mu.Lock()
+	if seen.method != http.MethodPost {
+		t.Errorf("registry saw method %s, want POST", seen.method)
+	}
+	if want := "/subjects/delight.v1.BackupEvent/versions"; seen.path != want {
+		t.Errorf("registry saw path %q, want %q", seen.path, want)
+	}
+	if !strings.Contains(seen.body, `"schemaType":"PROTOBUF"`) || !strings.Contains(seen.body, "proto3") {
+		t.Errorf("registration body missing schema payload: %q", seen.body)
+	}
+	seen.mu.Unlock()
 }
 
 // TestPublishBackup_ProducesFramedRecord asserts the record reaching the produce
@@ -130,7 +173,8 @@ func TestPublishBackup_RegistersExactlyOnceUnderRace(t *testing.T) {
 // frame shape (magic byte, schema id, message index) around the payload.
 func TestPublishBackup_ProducesFramedRecord(t *testing.T) {
 	var registrations int32
-	sr := srServer(t, 42, &registrations)
+	var seen srCapture
+	sr := srServer(t, 42, &registrations, &seen)
 	defer sr.Close()
 
 	rec := &recorder{}

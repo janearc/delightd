@@ -107,7 +107,10 @@ func New(ctx context.Context, brokers []string, schemaRegistryURL, topic, schema
 		http:       &http.Client{Timeout: 5 * time.Second},
 		schemaText: schemaText,
 	}
-	// wire the produce seam to the real client. tests replace this with a recorder.
+	// wire the produce seam to the real client; tests replace it with a recorder.
+	// the injected-seam convention comes from the ADR-0001 process chain (the
+	// coding-process gates, see docs/contract-ownership.md) as ratified in the
+	// sprint 10 T0 — the same shape as the judge's injected fetch.
 	p.produce = func(ctx context.Context, rec *kgo.Record) error {
 		return p.client.ProduceSync(ctx, rec).FirstErr()
 	}
