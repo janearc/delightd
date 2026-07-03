@@ -36,6 +36,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -59,6 +60,14 @@ type Publisher struct {
 	http       *http.Client
 	schemaText string
 
+	// produce is the seam for the terminal produce call. New wires it to the real
+	// client; tests inject a recorder. one field, no interface.
+	produce func(ctx context.Context, rec *kgo.Record) error
+
+	// mu guards lazy registration below. PublishBackup runs on detached goroutines,
+	// so the registered flag and schemaID it writes are shared state and must be
+	// serialized -- an unguarded write here is a data race under the Go memory model.
+	mu         sync.Mutex
 	schemaID   int32
 	registered bool
 }
@@ -92,12 +101,17 @@ func New(ctx context.Context, brokers []string, schemaRegistryURL, topic, schema
 		cl.Close()
 		return nil, fmt.Errorf("kafka unreachable: %w", err)
 	}
-	return &Publisher{
+	p := &Publisher{
 		cfg:        config{brokers: brokers, schemaRegistryURL: schemaRegistryURL, topic: topic},
 		client:     cl,
 		http:       &http.Client{Timeout: 5 * time.Second},
 		schemaText: schemaText,
-	}, nil
+	}
+	// wire the produce seam to the real client. tests replace this with a recorder.
+	p.produce = func(ctx context.Context, rec *kgo.Record) error {
+		return p.client.ProduceSync(ctx, rec).FirstErr()
+	}
+	return p, nil
 }
 
 // Close releases the producer.
@@ -115,13 +129,8 @@ func (p *Publisher) PublishBackup(ctx context.Context, ev *delightv1.BackupEvent
 	if p == nil {
 		return nil
 	}
-	if !p.registered {
-		id, err := p.registerSchema(ctx)
-		if err != nil {
-			return fmt.Errorf("schema registration: %w", err)
-		}
-		p.schemaID = id
-		p.registered = true
+	if err := p.ensureRegistered(ctx); err != nil {
+		return fmt.Errorf("schema registration: %w", err)
 	}
 
 	frame, err := p.encode(ev)
@@ -129,7 +138,27 @@ func (p *Publisher) PublishBackup(ctx context.Context, ev *delightv1.BackupEvent
 		return err
 	}
 	rec := &kgo.Record{Topic: p.cfg.topic, Key: []byte(ev.GetProjectName()), Value: frame}
-	return p.client.ProduceSync(ctx, rec).FirstErr()
+	return p.produce(ctx, rec)
+}
+
+// ensureRegistered registers the schema on first use and caches the id, under mu
+// so concurrent first publishes serialize instead of racing the registered flag.
+// a mutex + flag, deliberately NOT sync.Once: a registry briefly down at startup
+// must self-heal, so a failed registration returns the error and leaves the flag
+// clear -- the next call retries. Once would capture that transient failure forever.
+func (p *Publisher) ensureRegistered(ctx context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.registered {
+		return nil
+	}
+	id, err := p.registerSchema(ctx)
+	if err != nil {
+		return err
+	}
+	p.schemaID = id
+	p.registered = true
+	return nil
 }
 
 // encode builds the Confluent protobuf wire format:
