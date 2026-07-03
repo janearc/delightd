@@ -35,6 +35,18 @@ system:
     enabled: true
     expose_via: ["cli", "mcp"]
 
+  # Event emission: delight.v1 events onto the bus. This block is the committed
+  # wiring of record and matches the fleet deployment -- the broker and
+  # schema-registry names resolve on the compose network. Empty brokers =>
+  # event publishing disabled and the daemon runs exactly as before; an
+  # unreachable broker is fail-soft (a logged warning and a no-op publisher),
+  # so backups never depend on Kafka being present.
+  kafka:
+    brokers:
+      - "kafka:9092"
+    schema_registry_url: "http://schema-registry:8081"
+    topic: "delight.events"
+
 projects:
   - name: "paling"
     path: "~/work/paling"
