@@ -113,7 +113,9 @@ that degrades silently and never blocks a backup.
 
 `scripts/install.sh` updates a checkout (or clones it if absent), builds
 `bin/delightd`, and links it onto `$HOME/var/bin`. It is idempotent and takes no
-hand steps -- run it again any time to rebuild against the latest commit.
+hand steps -- run it again any time to rebuild against the latest commit. It
+requires the `task` + `buf` toolchain (bindings are generated at build time,
+never committed) and fails loud naming whichever tool is missing.
 
 ```bash
 scripts/install.sh   # override the checkout path with DELIGHTD_SRC

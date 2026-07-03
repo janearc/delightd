@@ -21,20 +21,33 @@ else
   git clone "$REMOTE" "$SRC"
 fi
 
-# Build. Prefer the Taskfile; fall back to a plain go build against the COMMITTED
-# generated bindings -- gen-freshness holds on main, so building without the buf
-# toolchain is legitimate and keeps this script working on a bare machine.
-if command -v task >/dev/null 2>&1; then
-  ( cd "$SRC" && task build )
-else
-  ( cd "$SRC" && go build -o bin/delightd ./cmd/delightd )
-fi
+# Build. The Go bindings are generated at build time and never committed
+# (docs/events.md, Proto ownership), so there is no honest build without the
+# task + buf toolchain -- a plain go build on a fresh clone cannot compile.
+# Fail loud naming what is missing rather than pretending a fallback exists.
+for tool in task buf go; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "install: missing required tool: $tool (see docs/operations.md, Build)" >&2
+    exit 1
+  fi
+done
+( cd "$SRC" && task build )
 
-# Link the built binary onto the PATH surface.
+# Link the built binary onto the bin surface.
 mkdir -p "$BIN_DIR"
 ln -sf "$SRC/bin/delightd" "$BIN_DIR/delightd"
 
-# Smoke check: --help exits 0 with no side effects. Never start the daemon.
+# An install that lands off PATH helps nobody (PR 75 review): say so loudly.
+# Informational only -- editing shell config is the operator's decision, and
+# this script takes no hand steps on their behalf.
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo "note: $BIN_DIR is NOT on your PATH; to invoke delightd add:" >&2
+     echo "  export PATH=\"$BIN_DIR:\$PATH\"" >&2 ;;
+esac
+
+# Smoke check: --help exits 0 with no side effects (documented in the
+# operations flags table). Never start the daemon.
 "$BIN_DIR/delightd" --help >/dev/null 2>&1
 
 echo "installed: $BIN_DIR/delightd ($(git -C "$SRC" rev-parse --short HEAD))"

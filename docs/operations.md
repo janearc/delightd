@@ -120,6 +120,7 @@ These govern where generated wrappers, shims, and the registry live:
 |------|--------|
 | `--dry-run` | walk manifests and exports without writing any archive, symlink, or shim |
 | `--immediate` | evaluate every project once on startup instead of waiting for the first interval tick |
+| `--help` | print usage and exit 0; no side effects (cobra built-in; the install smoke check rests on it) |
 
 ## Kubernetes deployment
 
@@ -190,9 +191,10 @@ network but git. Override the checkout path with `DELIGHTD_SRC` (default
 scripts/install.sh
 ```
 
-It builds via the Taskfile when `task` is on PATH, and otherwise falls back to a
-plain `go build` against the committed bindings, so a machine without the buf
-toolchain can still build a working daemon reproducibly.
+It requires the `task` + `buf` toolchain (and Go) and fails loud naming
+whichever is missing: the Go bindings are generated at build time and never
+committed (see Proto ownership in [docs/events.md](events.md)), so there is no
+honest build path without the toolchain on a fresh clone.
 
 ## Removed and stale
 
