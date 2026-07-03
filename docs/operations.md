@@ -178,6 +178,22 @@ task e2e-registration  # prove the magpie->delightd registration seam end to end
                        # (local-first: needs ~/work/magpie checked out and uv on PATH)
 ```
 
+## Install from a checkout
+
+`scripts/install.sh` brings a checkout up to date (or clones it if absent),
+builds the daemon, and links the binary onto `$HOME/var/bin/delightd`. It is
+idempotent and takes no hand steps -- no prompts, no sudo, and nothing over the
+network but git. Override the checkout path with `DELIGHTD_SRC` (default
+`$HOME/work/delightd`).
+
+```bash
+scripts/install.sh
+```
+
+It builds via the Taskfile when `task` is on PATH, and otherwise falls back to a
+plain `go build` against the committed bindings, so a machine without the buf
+toolchain can still build a working daemon reproducibly.
+
 ## Removed and stale
 
 | Removed | Replacement |

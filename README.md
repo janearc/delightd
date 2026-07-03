@@ -109,6 +109,16 @@ that degrades silently and never blocks a backup.
 | config schema, env, kube deploy, build | [docs/operations.md](docs/operations.md) |
 | where delightd is headed | [docs/fleet-and-delightd.md](docs/fleet-and-delightd.md) |
 
+## Install
+
+`scripts/install.sh` updates a checkout (or clones it if absent), builds
+`bin/delightd`, and links it onto `$HOME/var/bin`. It is idempotent and takes no
+hand steps -- run it again any time to rebuild against the latest commit.
+
+```bash
+scripts/install.sh   # override the checkout path with DELIGHTD_SRC
+```
+
 ## Run it
 
 ```bash
