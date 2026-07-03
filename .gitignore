@@ -27,5 +27,10 @@ gen/*
 gen/rust/target/
 gen/rust/Cargo.lock
 
+# delightd binaries: the root binary was tracked by mistake; the build output
+# lives in bin/. Neither is ever tracked -- build locally via task/go build.
+/delightd
+/bin/
+
 # delightd runtime artifact
 traefik.json

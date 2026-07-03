@@ -120,6 +120,7 @@ These govern where generated wrappers, shims, and the registry live:
 |------|--------|
 | `--dry-run` | walk manifests and exports without writing any archive, symlink, or shim |
 | `--immediate` | evaluate every project once on startup instead of waiting for the first interval tick |
+| `--help` | print usage and exit 0; no side effects (cobra built-in; the install smoke check rests on it) |
 
 ## Kubernetes deployment
 
@@ -177,6 +178,23 @@ task sync-proto        # re-vendor delight.v1 from kafka-svc, then run generate
 task e2e-registration  # prove the magpie->delightd registration seam end to end
                        # (local-first: needs ~/work/magpie checked out and uv on PATH)
 ```
+
+## Install from a checkout
+
+`scripts/install.sh` brings a checkout up to date (or clones it if absent),
+builds the daemon, and links the binary onto `$HOME/var/bin/delightd`. It is
+idempotent and takes no hand steps -- no prompts, no sudo, and nothing over the
+network but git. Override the checkout path with `DELIGHTD_SRC` (default
+`$HOME/work/delightd`).
+
+```bash
+scripts/install.sh
+```
+
+It requires the `task` + `buf` toolchain (and Go) and fails loud naming
+whichever is missing: the Go bindings are generated at build time and never
+committed (see Proto ownership in [docs/events.md](events.md)), so there is no
+honest build path without the toolchain on a fresh clone.
 
 ## Removed and stale
 
