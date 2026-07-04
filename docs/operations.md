@@ -131,11 +131,12 @@ namespace **`fleet`**, with the third-party furniture it depends on moving in
 under its own directory as it lands (see `meubilair.yaml`). A top-level
 `kube/kustomization.yaml` aggregates them.
 
-Converging a cluster onto what these manifests declare is delightd's own job: the
-`furnish` command (forthcoming) trues the running environment against this
-directory, so you drive delightd rather than hand-running `kubectl` against the
-cluster. Until it lands, applying the manifests is a manual step — a gap this
-branch is closing, not the model to learn.
+Converging a cluster onto what these manifests declare is delightd's own job,
+through the `furnish` command: it trues the running environment against this
+directory — standing up what is missing, reconciling what has drifted — and rolls
+or pauses an individual piece. You drive delightd; you do not hand-run `kubectl`
+against the cluster. Furnishing the environment from these per-piece directories
+is what this branch builds.
 
 To check that the manifests build — no cluster, no API server contact — render
 them locally with kustomize:
