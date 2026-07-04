@@ -1,12 +1,14 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# The furniture aggregator. One directory per piece under kube/ -- delightd's
-# own workload and, as they move in, the third-party furniture it depends on
-# (see meubilair.yaml). This root builds them all; each subdir owns its own
-# namespace, labels, and resources. `-k kube/` rolls the whole environment;
-# `-k kube/<piece>/` targets one. Adding a piece is adding its dir here, nothing
-# hand-wired -- the shape a future `furnish` step iterates.
+# Aggregates the per-piece kustomizations under kube/. Each subdirectory
+# (kube/delightd, and others as they are added) is a self-contained kustomization
+# for one workload; listing its directory name below includes it in a
+# whole-environment build. Each subdir owns its own namespace and labels.
+#   kubectl kustomize kube/            renders every piece
+#   kubectl kustomize kube/<piece>/    renders one piece in isolation
+# To add a piece: create kube/<piece>/ with its manifests + kustomization, then
+# add <piece> to the resources list here.
 
 resources:
   - delightd

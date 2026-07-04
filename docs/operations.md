@@ -124,19 +124,26 @@ These govern where generated wrappers, shims, and the registry live:
 
 ## Kubernetes deployment
 
-Live manifests are under **`kube/`**, one directory per piece. delightd's own
-workload lives in **`kube/delightd/`** (`deployment.yaml`, `service.yaml`,
-`kustomization.yaml`), namespace **`fleet`**. A top-level `kube/kustomization.yaml`
-aggregates every piece; third-party furniture moves in under its own dir as it
-lands (see `meubilair.yaml`). Validate without a cluster:
+delightd's environment is declared, not hand-assembled. Every piece runs from a
+manifest under **`kube/`**, one directory per piece: delightd's own workload in
+**`kube/delightd/`** (`deployment.yaml`, `service.yaml`, `kustomization.yaml`),
+namespace **`fleet`**, with the third-party furniture it depends on moving in
+under its own directory as it lands (see `meubilair.yaml`). A top-level
+`kube/kustomization.yaml` aggregates them.
+
+Converging a cluster onto what these manifests declare is delightd's own job: the
+`furnish` command (forthcoming) trues the running environment against this
+directory, so you drive delightd rather than hand-running `kubectl` against the
+cluster. Until it lands, applying the manifests is a manual step — a gap this
+branch is closing, not the model to learn.
+
+To check that the manifests build — no cluster, no API server contact — render
+them locally with kustomize:
 
 ```bash
-kubectl apply --dry-run=client -k kube/           # the whole environment
-kubectl apply --dry-run=client -k kube/delightd/  # just the daemon
+kubectl kustomize kube/           # the whole environment
+kubectl kustomize kube/delightd/  # just the daemon
 ```
-
-Do not `kubectl apply` to the cluster and do not pull/import images — that is the
-primary agent's gated step.
 
 ### Mounts (the storage contract)
 
