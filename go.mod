@@ -9,10 +9,10 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/twmb/franz-go v1.21.3
 	go.etcd.io/bbolt v1.5.0
-	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
+	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.36.2
-	k8s.io/apimachinery v0.36.2
+	k8s.io/api v0.35.0
+	k8s.io/apimachinery v0.35.0
 )
 
 require (
