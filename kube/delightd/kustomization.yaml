@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fleet
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: fleet
+
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# No RBAC: delightd does not call the Kubernetes API (no client-go in go.mod).
+# fleet-svc is the API consumer; do not grant delightd a ServiceAccount role.
+# No ingress here: traefik IngressRoute for the edge is owned by the ingress
+# migration, not this manifest set (delightd is reachable in-cluster by Service
+# name and via the existing traefik edge).

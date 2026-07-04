@@ -1,19 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: fleet
-
-labels:
-  - includeSelectors: false
-    pairs:
-      app.kubernetes.io/part-of: fleet
+# The furniture aggregator. One directory per piece under kube/ -- delightd's
+# own workload and, as they move in, the third-party furniture it depends on
+# (see meubilair.yaml). This root builds them all; each subdir owns its own
+# namespace, labels, and resources. `-k kube/` rolls the whole environment;
+# `-k kube/<piece>/` targets one. Adding a piece is adding its dir here, nothing
+# hand-wired -- the shape a future `furnish` step iterates.
 
 resources:
-  - deployment.yaml
-  - service.yaml
-
-# No RBAC: delightd does not call the Kubernetes API (no client-go in go.mod).
-# fleet-svc is the API consumer; do not grant delightd a ServiceAccount role.
-# No ingress here: traefik IngressRoute for the edge is owned by the ingress
-# migration, not this manifest set (delightd is reachable in-cluster by Service
-# name and via the existing traefik edge).
+  - delightd

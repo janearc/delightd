@@ -124,11 +124,15 @@ These govern where generated wrappers, shims, and the registry live:
 
 ## Kubernetes deployment
 
-Live manifests are under **`kube/`** (`deployment.yaml`, `service.yaml`,
-`kustomization.yaml`), namespace **`fleet`**. Validate without a cluster:
+Live manifests are under **`kube/`**, one directory per piece. delightd's own
+workload lives in **`kube/delightd/`** (`deployment.yaml`, `service.yaml`,
+`kustomization.yaml`), namespace **`fleet`**. A top-level `kube/kustomization.yaml`
+aggregates every piece; third-party furniture moves in under its own dir as it
+lands (see `meubilair.yaml`). Validate without a cluster:
 
 ```bash
-kubectl apply --dry-run=client -k kube/
+kubectl apply --dry-run=client -k kube/           # the whole environment
+kubectl apply --dry-run=client -k kube/delightd/  # just the daemon
 ```
 
 Do not `kubectl apply` to the cluster and do not pull/import images — that is the
@@ -200,7 +204,7 @@ honest build path without the toolchain on a fresh clone.
 
 | Removed | Replacement |
 |---------|-------------|
-| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | `kube/` manifests (namespace `fleet`, `:8088`, live) |
+| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | `kube/delightd/` manifests (namespace `fleet`, `:8088`, live) |
 | `envoy.yaml` (abandoned proxy path) | traefik is the single edge; no Envoy |
 
 Both were deleted in this docs rewrite. The Envoy/"dual proxy profile"
