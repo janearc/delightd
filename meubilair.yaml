@@ -39,7 +39,7 @@
 #                    {repo, path} -- a cross-repo reference, never an absolute
 #                    host path.
 #
-# All seven pieces live in the `fleet` namespace. None of xpack/grafana/kibana
+# Every piece here lives in the `fleet` namespace. None of xpack/grafana/kibana
 # auth is on (the trust boundary is the edge, per each manifest's header), so the
 # probes need no credentials.
 
