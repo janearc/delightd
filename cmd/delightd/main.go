@@ -26,6 +26,7 @@ import (
 	delightv1 "delightd/gen/go/delight/v1"
 	"delightd/pkg/backup"
 	"delightd/pkg/discovery"
+	"delightd/pkg/enablement"
 	"delightd/pkg/events"
 	"delightd/pkg/exports"
 	"delightd/pkg/httpapi"
@@ -346,9 +347,26 @@ func runDaemon(dryRun, immediate bool) error {
 		}
 	}
 
+	// The enablement state home: per-project enable/disable, fail-closed.
+	// Unlike the registry above, a store that cannot open is NOT
+	// carried as an empty answer -- the /state surface serves 503 degraded until
+	// a store exists. The daemon still comes up (availability mandate); the
+	// answer just never lies.
+	stateHome, err := enablement.Open(filepath.Join(cfg.System.DaemonRoot, "state", "enablement.db"))
+	if err != nil {
+		slog.Error("enablement: could not open state home; /state serves 503 degraded (fail closed)", "error", err)
+	} else {
+		defer stateHome.Close()
+	}
+
 	// The control-port HTTP surface lives in pkg/httpapi so handlers are
 	// unit-testable; main retains only wiring and the daemon control loop.
 	api := httpapi.New(cfg, machines, exportEngine, skillAggregator, dryRun, reg)
+	// Guarded: a nil *Store must never enter the interface (a typed-nil would
+	// dodge the handlers' nil check and panic on first use).
+	if stateHome != nil {
+		api.UseEnablement(stateHome)
+	}
 	// never-silent: a /register that does not complete is emitted as registry.v1.NotRegistered
 	// on the bus, not only returned to the caller. Reuses the heartbeat's emit publisher; wired
 	// only when Kafka is available, so the outcome otherwise logs loudly (see emitNotRegistered).

@@ -43,6 +43,11 @@ type Server struct {
 	// tests that do not exercise registration; handlers treat nil as an empty registry.
 	reg *registry.Registry
 
+	// enablement is the per-project enable/disable state home, wired by main via
+	// UseEnablement. nil is NOT an empty answer here (contrast reg above): the
+	// /state surface serves 503 degraded until a store is wired -- fail closed.
+	enablement enablementStore
+
 	// subjects verifies contract subjects against the schema registry at join time, and
 	// guaranteeHealthCheck runs the reachability guarantee on a joining endpoint. Both are
 	// injectable so handleRegister can be tested without a live SR or network.
@@ -224,9 +229,13 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("POST /projects/{name}/backup", s.handleBackup)     // manually trigger a checkpoint
 	mux.HandleFunc("POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
 
-	mux.HandleFunc("GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
-	mux.HandleFunc("GET /registrations", s.handleRegistrations)    // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
-	mux.HandleFunc("POST /register", s.handleRegister)             // a frood joins the live registry (additive, optional; not yet required)
+	mux.HandleFunc("GET /projects", s.handleProjectsAll)        // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
+	mux.HandleFunc("GET /registrations", s.handleRegistrations) // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
+	mux.HandleFunc("POST /register", s.handleRegister)          // a frood joins the live registry (additive, optional; not yet required)
+	mux.HandleFunc("GET /state", s.handleStateAll)              // enablement home: every project's effective state (absent reads disabled)
+	mux.HandleFunc("GET /state/{name}", s.handleStateGet)       // one project's enablement (NOT the backup diagnostics at /projects/{name}/state)
+	mux.HandleFunc("PUT /state/{name}", s.handleStatePut)       // idempotent enable/disable; roster-bound, reason required on disable
+
 	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
 	mux.HandleFunc("GET /resolve/{name}", s.handleResolve)         // narrow widget-facing resolution (resolve.v1.ResolvedService): scheme+address for one project
