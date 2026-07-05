@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fleet
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: fleet
+
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# The first furniture manifest that lives IN delightd's kube/ rather than in
+# another repo (see meubilair.yaml's source_manifest entries for the pieces
+# that have not moved in yet). Reachable in-cluster by Service name only; no
+# edge exposure for a datastore.
