@@ -1,5 +1,4 @@
-// Package enablement is delightd's per-project enable/disable state home --
-// sprint 11 Phase C (delightd issue 78; the public musing thread is issue 23).
+// Package enablement is delightd's per-project enable/disable state home.
 //
 // Doctrine, stated once: reads FAIL CLOSED. An absent record reads disabled.
 // A store that could not open never pretends -- the HTTP surface serves 503

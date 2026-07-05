@@ -347,8 +347,8 @@ func runDaemon(dryRun, immediate bool) error {
 		}
 	}
 
-	// The enablement state home (sprint 11 Phase C): per-project enable/disable,
-	// fail-closed. Unlike the registry above, a store that cannot open is NOT
+	// The enablement state home: per-project enable/disable, fail-closed.
+	// Unlike the registry above, a store that cannot open is NOT
 	// carried as an empty answer -- the /state surface serves 503 degraded until
 	// a store exists. The daemon still comes up (availability mandate); the
 	// answer just never lies.

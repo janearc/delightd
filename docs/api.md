@@ -13,6 +13,9 @@ surface registered in `Mux()`.
 | GET | `/git` | live git state for every managed project |
 | GET | `/projects/{name}/git` | live git state for one project |
 | GET | `/projects/{name}/state` | backup state-machine diagnostics |
+| GET | `/state` | enablement home: every project's effective enable/disable state |
+| GET | `/state/{name}` | one project's enablement state |
+| PUT | `/state/{name}` | idempotent enable/disable write (roster-bound) |
 | GET | `/projects/{name}/introspect` | known / backing-up / has-fragment view |
 | POST | `/projects/{name}/backup` | manually trigger a checkpoint |
 | POST | `/projects/{name}/reset` | clear a stuck error state |
@@ -27,11 +30,16 @@ surface registered in `Mux()`.
 `system.agent_skills.expose_via` contains `"mcp"`. When disabled, the route does
 not exist and a request returns 404 from the mux.
 
-Two distinct 404 semantics apply across the surface, and the difference is
-deliberate:
+Two routes share the word "state" and mean different things; the bare word
+always means enablement. `/state` and `/state/{name}` are the fleet-wide
+enable/disable home; `/projects/{name}/state` is the backup state machine's
+diagnostics and nothing else. They share a word, never a surface.
 
-- **Unknown project, control/state routes** (`/state`, `/backup`, `/reset`,
-  `/projects/{name}/git`, `/services/{name}`) → `404` with an `error` body. These
+The status semantics across the surface differ deliberately:
+
+- **Unknown project, control/state routes** (`/projects/{name}/state`,
+  `/backup`, `/reset`, `/projects/{name}/git`, `/services/{name}`, and the
+  enablement routes at `/state/{name}`) → `404` with an `error` body. These
   act on a project; an unknown name has no machine to act on. `POST /register`
   uses the same axis: an unknown project is `404`, not a permission error.
 - **Unknown project, introspection** (`/introspect`) → `200` with
@@ -39,6 +47,11 @@ deliberate:
   daemon knows a project*; "no" is a valid answer, not an error.
 - **Resolution** (`/resolve/{name}`) → a miss is **always `404`, never `503`**:
   "not resolvable right now" is an answer about the name, not a daemon fault.
+- **Enablement, store unavailable** (the `/state` family) → **`503` with
+  `degraded: true`**, the one deliberate `503` on the surface. Enablement
+  reads fail closed: when the store could not open, "no answer" is served as
+  a named daemon fault, never invented as a state. This does not soften the
+  resolution rule above — `/resolve` misses stay `404`.
 
 ---
 
@@ -227,6 +240,65 @@ Backup state-machine diagnostics for a project.
 
 Status: `200` for a known project; `404` `{"error": "project not found"}`
 otherwise.
+
+## GET /state
+
+The enablement home: every managed project's effective enable/disable state,
+roster-driven — a project with no stored record appears as
+`disabled`/`recorded: false` rather than being omitted. This is the
+fail-closed read: absence is rendered as disabled, never as a hole.
+
+```json
+{
+  "projects": [
+    { "project": "delightd", "state": "enabled", "recorded": true,
+      "actor": "max", "changed_at": "2026-07-05T07:20:38Z" },
+    { "project": "paling", "state": "disabled", "recorded": false }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `project` | roster name |
+| `state` | `enabled` \| `disabled` — the effective answer after doctrine |
+| `recorded` | whether a stored record exists (`false` means the disabled answer is the absent-record default) |
+| `reason` | why, when recorded; required on every disable |
+| `actor` | who ruled, when recorded |
+| `changed_at` | when the record last changed, when recorded |
+
+Status: `200`; `503` `{"degraded": true, ...}` when the store is unavailable
+(see the status-semantics list above).
+
+## GET /state/{name}
+
+One project's effective enablement, same rendering and doctrine as the list.
+
+Status: `200` for a known project (absent record reads
+`disabled`/`recorded: false`); `404` `{"error": "project not found"}` for a
+name outside the roster; `503` degraded when the store is unavailable.
+
+## PUT /state/{name}
+
+The idempotent enablement write: the full desired state in the body, the
+project in the path, last write wins. Roster-bound — state binds to the
+canonical unit list, not free text.
+
+```json
+{ "state": "disabled", "reason": "flaky disk", "actor": "max" }
+```
+
+| Field | Meaning |
+|-------|---------|
+| `state` | `enabled` or `disabled`; anything else is `400` |
+| `reason` | required when disabling — a disabled project with no recorded why is an operational lie |
+| `actor` | who is ruling; required |
+
+The response is the stored record as `GET /state/{name}` would render it.
+
+Status: `200` on success; `400` on an unparseable body, an unknown state, or
+a disable without a reason; `404` for a name outside the roster; `503`
+degraded when the store is unavailable.
 
 ## GET /projects/{name}/introspect
 

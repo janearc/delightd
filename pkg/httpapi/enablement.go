@@ -7,9 +7,9 @@ import (
 	"delightd/pkg/enablement"
 )
 
-// Enablement routes: the fleet-wide enable/disable state home (sprint 11
-// Phase C). NOT /projects/{name}/state -- that existing route is the backup
-// state machine's diagnostics. The two share a word, never a surface.
+// Enablement routes: the fleet-wide enable/disable state home. NOT
+// /projects/{name}/state -- that existing route is the backup state
+// machine's diagnostics. The two share a word, never a surface.
 
 // enablementStore is the slice of pkg/enablement the handlers use, injectable
 // so they can be tested with an in-memory fake.
@@ -93,7 +93,7 @@ func (s *Server) handleStateGet(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("name")
 	if !s.knownProject(name) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown project " + name})
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "project not found"})
 		return
 	}
 	rec, found, err := s.enablement.Get(name)
@@ -113,7 +113,7 @@ func (s *Server) handleStatePut(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("name")
 	if !s.knownProject(name) {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown project " + name})
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "project not found"})
 		return
 	}
 	var body struct {
