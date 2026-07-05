@@ -30,10 +30,11 @@ surface registered in `Mux()`.
 `system.agent_skills.expose_via` contains `"mcp"`. When disabled, the route does
 not exist and a request returns 404 from the mux.
 
-Two routes share the word "state" and mean different things; the bare word
-always means enablement. `/state` and `/state/{name}` are the fleet-wide
-enable/disable home; `/projects/{name}/state` is the backup state machine's
-diagnostics and nothing else. They share a word, never a surface.
+The word "state" appears in two route families that do different jobs.
+`/state` and `/state/{name}` are enablement: the fleet-wide enable/disable
+home. `/projects/{name}/state` is unrelated: it reports the backup state
+machine for one project. When a path starts with `/state`, it is always
+enablement.
 
 The status semantics across the surface differ deliberately:
 

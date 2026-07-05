@@ -7,9 +7,15 @@ import (
 	"delightd/pkg/enablement"
 )
 
-// Enablement routes: the fleet-wide enable/disable state home. NOT
-// /projects/{name}/state -- that existing route is the backup state
-// machine's diagnostics. The two share a word, never a surface.
+// Enablement routes: the fleet-wide enable/disable state home.
+//
+// Shape rule, stated once: the handle* methods have net/http's handler
+// signature (w, r) and no Go return -- the JSON written to w IS the return
+// value, exactly like every other handler in this package (what a PUT
+// returns is the stored record, on the wire, as GET would render it).
+// Everything else in this file is a pure helper: values in, values out,
+// never a write to w. Every write to the wire happens inside a handler,
+// where it is visible.
 
 // enablementStore is the slice of pkg/enablement the handlers use, injectable
 // so they can be tested with an in-memory fake.
@@ -18,14 +24,19 @@ type enablementStore interface {
 	Put(rec enablement.Record) error
 }
 
-// UseEnablement wires the state home. Never wired (or open failed at boot)
-// leaves the /state surface serving 503 degraded -- fail closed, loudly;
-// nil is NOT an empty answer here, unlike the registry.
+// UseEnablement wires the state home. Until it is wired, the /state routes
+// serve 503 degraded -- fail closed.
 func (s *Server) UseEnablement(st enablementStore) { s.enablement = st }
 
+// degradedBody is the fail-closed 503 payload served while no store is wired.
+var degradedBody = map[string]any{
+	"degraded": true,
+	"error":    "enablement store unavailable; reads fail closed",
+}
+
 // stateResponse is one project's effective enablement as the wire renders it:
-// absent records read disabled with recorded=false, so a reader always sees
-// the doctrine applied, never a hole.
+// an absent record reads disabled with recorded=false, so a reader always
+// sees the doctrine applied, never a hole.
 type stateResponse struct {
 	Project   string `json:"project"`
 	State     string `json:"state"`
@@ -35,6 +46,7 @@ type stateResponse struct {
 	ChangedAt string `json:"changed_at,omitempty"`
 }
 
+// renderState is pure: record in, wire shape out.
 func renderState(project string, rec enablement.Record, found bool) stateResponse {
 	if !found {
 		return stateResponse{Project: project, State: enablement.StateDisabled, Recorded: false}
@@ -45,20 +57,8 @@ func renderState(project string, rec enablement.Record, found bool) stateRespons
 	}
 }
 
-// stateDegraded is the fail-closed answer: no store, no invented state.
-func (s *Server) stateDegraded(w http.ResponseWriter) bool {
-	if s.enablement != nil {
-		return false
-	}
-	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-		"degraded": true,
-		"error":    "enablement store unavailable; reads fail closed",
-	})
-	return true
-}
-
-// knownProject reports whether name is in the roster -- state binds to the
-// canonical unit list, not to free text.
+// knownProject reports whether name is in the roster. Enablement binds to
+// managed projects; any other name is a 404, never a new key.
 func (s *Server) knownProject(name string) bool {
 	for _, p := range s.cfg.Projects {
 		if p.Name == name {
@@ -72,7 +72,8 @@ func (s *Server) knownProject(name string) bool {
 // roster-driven: a project with no record appears as disabled/unrecorded
 // rather than being omitted.
 func (s *Server) handleStateAll(w http.ResponseWriter, r *http.Request) {
-	if s.stateDegraded(w) {
+	if s.enablement == nil {
+		writeJSON(w, http.StatusServiceUnavailable, degradedBody)
 		return
 	}
 	out := make([]stateResponse, 0, len(s.cfg.Projects))
@@ -88,7 +89,8 @@ func (s *Server) handleStateAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStateGet(w http.ResponseWriter, r *http.Request) {
-	if s.stateDegraded(w) {
+	if s.enablement == nil {
+		writeJSON(w, http.StatusServiceUnavailable, degradedBody)
 		return
 	}
 	name := r.PathValue("name")
@@ -105,10 +107,12 @@ func (s *Server) handleStateGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStatePut is the idempotent write: the full desired state in the body,
-// the project from the path, last write wins. Unknown projects and unknown
-// states get an error, never a coercion.
+// the project from the path, last write wins. The 200 body is the stored
+// record as GET renders it; unknown projects and unknown states get an error
+// status, never a coercion.
 func (s *Server) handleStatePut(w http.ResponseWriter, r *http.Request) {
-	if s.stateDegraded(w) {
+	if s.enablement == nil {
+		writeJSON(w, http.StatusServiceUnavailable, degradedBody)
 		return
 	}
 	name := r.PathValue("name")
