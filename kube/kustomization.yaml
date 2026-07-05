@@ -1,19 +1,14 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: fleet
-
-labels:
-  - includeSelectors: false
-    pairs:
-      app.kubernetes.io/part-of: fleet
+# Aggregates the per-piece kustomizations under kube/. Each subdirectory
+# (kube/delightd, and others as they are added) is a self-contained kustomization
+# for one workload; listing its directory name below includes it in a
+# whole-environment build. Each subdir owns its own namespace and labels.
+#   kubectl kustomize kube/            renders every piece
+#   kubectl kustomize kube/<piece>/    renders one piece in isolation
+# To add a piece: create kube/<piece>/ with its manifests + kustomization, then
+# add <piece> to the resources list here.
 
 resources:
-  - deployment.yaml
-  - service.yaml
-
-# No RBAC: delightd does not call the Kubernetes API (no client-go in go.mod).
-# fleet-svc is the API consumer; do not grant delightd a ServiceAccount role.
-# No ingress here: traefik IngressRoute for the edge is owned by the ingress
-# migration, not this manifest set (delightd is reachable in-cluster by Service
-# name and via the existing traefik edge).
+  - delightd

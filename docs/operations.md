@@ -124,15 +124,27 @@ These govern where generated wrappers, shims, and the registry live:
 
 ## Kubernetes deployment
 
-Live manifests are under **`kube/`** (`deployment.yaml`, `service.yaml`,
-`kustomization.yaml`), namespace **`fleet`**. Validate without a cluster:
+delightd's environment is declared, not hand-assembled. Every piece runs from a
+manifest under **`kube/`**, one directory per piece: delightd's own workload in
+**`kube/delightd/`** (`deployment.yaml`, `service.yaml`, `kustomization.yaml`),
+namespace **`fleet`**, with the third-party furniture it depends on moving in
+under its own directory as it lands (see `meubilair.yaml`). A top-level
+`kube/kustomization.yaml` aggregates them.
+
+Converging a cluster onto what these manifests declare is delightd's own job,
+through the `furnish` command: it trues the running environment against this
+directory — standing up what is missing, reconciling what has drifted — and rolls
+or pauses an individual piece. You drive delightd; you do not hand-run `kubectl`
+against the cluster. Furnishing the environment from these per-piece directories
+is what this branch builds.
+
+To check that the manifests build — no cluster, no API server contact — render
+them locally with kustomize:
 
 ```bash
-kubectl apply --dry-run=client -k kube/
+kubectl kustomize kube/           # the whole environment
+kubectl kustomize kube/delightd/  # just the daemon
 ```
-
-Do not `kubectl apply` to the cluster and do not pull/import images — that is the
-primary agent's gated step.
 
 ### Mounts (the storage contract)
 
@@ -200,7 +212,7 @@ honest build path without the toolchain on a fresh clone.
 
 | Removed | Replacement |
 |---------|-------------|
-| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | `kube/` manifests (namespace `fleet`, `:8088`, live) |
+| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | `kube/delightd/` manifests (namespace `fleet`, `:8088`, live) |
 | `envoy.yaml` (abandoned proxy path) | traefik is the single edge; no Envoy |
 
 Both were deleted in this docs rewrite. The Envoy/"dual proxy profile"

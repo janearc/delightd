@@ -34,3 +34,6 @@ gen/rust/Cargo.lock
 
 # delightd runtime artifact
 traefik.json
+
+# ignore claude dir obv
+.claude/*
