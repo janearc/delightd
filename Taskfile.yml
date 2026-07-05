@@ -36,3 +36,8 @@ tasks:
     desc: Prove the magpie->delightd registration seam end to end (local-first; needs ~/work/magpie + uv).
     cmds:
       - go test -tags e2e ./tests/e2e/registration/ -v
+
+  e2e-enablement:
+    desc: Prove the enablement state home survives a daemon restart (real binary, hermetic HOME).
+    cmds:
+      - go test -tags e2e ./tests/e2e/enablement/ -v
