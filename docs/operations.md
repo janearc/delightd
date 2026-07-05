@@ -149,6 +149,11 @@ kubectl kustomize kube/           # the whole environment
 kubectl kustomize kube/delightd/  # just the daemon
 ```
 
+When the machine itself has just come back — a reboot, an OS upgrade, a power
+event — start with [recovery.md](recovery.md) instead: it trues the whole
+stack (toolchain, colima, k3d, the daemon, furnishings) in order, and none of
+the commands above are useful until it has run.
+
 ### Mounts (the storage contract)
 
 | Mount | Path in container | Mode | Why |
