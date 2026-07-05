@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: surrealdb
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: surrealdb
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: surrealdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: surrealdb
+        app.kubernetes.io/part-of: fleet
+    spec:
+      containers:
+        - name: surrealdb
+          # Pinned point release, never a rolling tag: the piece must mean the
+          # same thing on every converge.
+          image: surrealdb/surrealdb:v2.6.5
+          # Dev-grade by design: the in-memory engine, and no credentials --
+          # secrets never live in manifests. Without a configured root user
+          # the server refuses privileged access; /health serves regardless.
+          # Persistence and auth are the schemaless-datastore work, not this
+          # piece's first landing.
+          args: ["start", "--bind", "0.0.0.0:8000", "memory"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http

@@ -12,3 +12,4 @@ kind: Kustomization
 
 resources:
   - delightd
+  - surrealdb

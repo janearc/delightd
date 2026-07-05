@@ -44,6 +44,23 @@
 # probes need no credentials.
 
 meubilair:
+  # --- delightd/kube: furniture whose manifests have moved in ---
+
+  - name: surrealdb
+    endpoints:
+      - scheme: http
+        address: "surrealdb.fleet.svc.cluster.local:8000"
+    probe:
+      # /health answers 200 once the server can serve; it needs no credentials
+      # (the piece ships credential-free and memory-engined -- dev-grade until
+      # the schemaless-datastore work configures persistence and auth).
+      httpGet:
+        path: /health
+        port: 8000
+    source_manifest:
+      repo: delightd
+      path: kube/surrealdb/deployment.yaml
+
   # --- kafka-logging/kube: the bus and its coordination/contract services ---
 
   - name: kafka
