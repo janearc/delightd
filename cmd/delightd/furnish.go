@@ -13,21 +13,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// furnishRunner is the seam between the furnish verbs and kubectl: production
-// runs the real binary, tests substitute a recorder. Arguments arrive without
-// the program name ("apply", "-k", <dir>).
-//
 // kubectl-by-subprocess is a ruled decision, not a shortcut (sprint 11
 // Phase A, issue 77): the programmatic stack (client-go + the kustomize
 // library) drags k8s.io/* to v0.36 and google.golang.org/protobuf off its
 // v1.36.11 pin -- the dep the generated contract code shares. kubectl is a
 // runtime requirement instead, checked fail-loud before any verb touches the
 // cluster.
+
+// furnishRunner is the seam between the furnish verbs and kubectl: production
+// runs the real binary, tests substitute a recorder. Arguments arrive without
+// the program name ("apply", "-k", <dir>).
 type furnishRunner func(ctx context.Context, args ...string) ([]byte, error)
 
 // kubectlRunner is the production runner. KUBECONFIG is deliberately left
 // alone -- furnish converges whatever cluster the operator's environment
-// points at (k3d "fleet" on this machine).
+// points at (locally, the k3d cluster).
 func kubectlRunner(ctx context.Context, args ...string) ([]byte, error) {
 	if _, err := exec.LookPath("kubectl"); err != nil {
 		return nil, fmt.Errorf("kubectl not found on PATH; furnish requires it at runtime: %w", err)
@@ -39,10 +39,9 @@ func kubectlRunner(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// aggregator is the slice of kube/kustomization.yaml furnish consumes: the
-// resources list IS the declaration of pieces. Reading the directory instead
-// would pick up half-built or abandoned dirs; the aggregator names what is
-// real, and adding a piece there is what makes it exist to furnish.
+// aggregator is the part of kube/kustomization.yaml furnish reads: the
+// resources list. A directory under kube/ is a piece only if it is named
+// there -- the declaration, not the filesystem, says what exists.
 type aggregator struct {
 	Resources []string `yaml:"resources"`
 }
