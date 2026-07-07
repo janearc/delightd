@@ -9,7 +9,16 @@ kind: Kustomization
 #   kubectl kustomize kube/<piece>/    renders one piece in isolation
 # To add a piece: create kube/<piece>/ with its manifests + kustomization, then
 # add <piece> to the resources list here.
+#
+# namespace.yaml (the fleet Namespace) is listed directly so `kubectl apply -k
+# kube/` is self-contained; kustomize applies the Namespace kind first regardless
+# of list order. It was relocated in from kafka-svc so delightd owns the namespace
+# ahead of that repo's sunset -- nothing outside delightd creates it anymore.
 
 resources:
+  - namespace.yaml
   - delightd
   - surrealdb
+  - kafka
+  - zookeeper
+  - schema-registry

@@ -1,0 +1,205 @@
+# Zookeeper: broker coordination for kafka. Modeled as a single-replica
+# StatefulSet so it gets a stable network identity (zookeeper-0) and a stable
+# volume. The compose zookeeper ran without a persistent volume (its state was
+# ephemeral and rebuilt from the broker on restart); under k8s we give it real
+# storage so a pod reschedule does not silently drop the in-flight ensemble
+# state. The path is NEW (~/var/zookeeper) -- it does not touch the kafka log
+# dir -- and the primary agent creates it on the node before first apply.
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zookeeper-data
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fleet
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  # storageClassName "" pins this to manual (static) binding so the cluster's
+  # default dynamic provisioner does not hand zookeeper a throwaway volume
+  # instead of this host path.
+  storageClassName: ""
+  hostPath:
+    path: /Users/jane/var/zookeeper
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zookeeper-data
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fleet
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: zookeeper-data
+  resources:
+    requests:
+      storage: 2Gi
+---
+# Separate volume for the transaction log (dataLogDir, /var/lib/zookeeper/log).
+# Persisted independently of the snapshot dir so a freshly written znode such as
+# kafka's /cluster/id survives a zookeeper restart -- see the env note above.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zookeeper-txnlog
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fleet
+spec:
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /Users/jane/var/zookeeper-log
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zookeeper-txnlog
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fleet
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: zookeeper-txnlog
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fleet
+spec:
+  # Headless: kafka addresses zookeeper by the stable pod DNS the StatefulSet
+  # gives it (zookeeper-0.zookeeper.fleet.svc.cluster.local) and by the service
+  # name zookeeper:2181 -- matching the compose KAFKA_ZOOKEEPER_CONNECT value.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: zookeeper
+  ports:
+    - name: client
+      port: 2181
+      targetPort: 2181
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: zookeeper
+    app.kubernetes.io/part-of: fleet
+spec:
+  serviceName: zookeeper
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zookeeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zookeeper
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # disable kubernetes docker-link service-env injection so the confluent
+      # image only sees our explicit ZOOKEEPER_* config (see the same note on
+      # kafka and schema-registry, where an injected <SVC>_PORT=tcp://... value
+      # collides with the image's config convention).
+      enableServiceLinks: false
+      containers:
+        - name: zookeeper
+          image: confluentinc/cp-zookeeper:7.5.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ZOOKEEPER_CLIENT_PORT
+              value: "2181"
+            - name: ZOOKEEPER_TICK_TIME
+              value: "2000"
+            # cp-zookeeper writes its dataDir (snapshots) under
+            # /var/lib/zookeeper/data and its dataLogDir (transaction log) under
+            # /var/lib/zookeeper/log. BOTH must be persisted: zookeeper appends a
+            # new znode to the txn log first and only folds it into a snapshot
+            # after snapCount txns (default 100k), so a recently written znode
+            # such as kafka's /cluster/id lives only in the txn log for a long
+            # time. if the txn log is not persisted, a zookeeper restart loses
+            # /cluster/id, the broker mints a fresh cluster id, and it no longer
+            # matches kafka's persisted meta.properties
+            # (InconsistentClusterIdException). the confluent config converter
+            # maps ZOOKEEPER_FOO_BAR to the property foo.bar, so it cannot target
+            # the camelCase dataLogDir; instead we leave dataLogDir at its default
+            # and persist that exact path with its own volume (see volumeMounts).
+            - name: ZOOKEEPER_DATA_DIR
+              value: /var/lib/zookeeper/data
+            # zookeeper 3.6 ships with the four-letter-word commands locked down
+            # to a whitelist; only "srvr" answers by default. the readiness probe
+            # below issues "ruok", so it must be whitelisted explicitly or the
+            # probe never sees "imok" and the pod stays NotReady -- which in turn
+            # leaves this headless service with no published endpoint, so the DNS
+            # name "zookeeper" does not resolve and kafka cannot connect. compose
+            # never hit this because it ran zookeeper with no healthcheck at all.
+            # the confluent config converter does not translate a ZOOKEEPER_*
+            # env for this digit-leading key, so set it as a jvm system property
+            # via KAFKA_OPTS (which cp-zookeeper appends to the launch command).
+            - name: KAFKA_OPTS
+              value: "-Dzookeeper.4lw.commands.whitelist=srvr,ruok"
+          ports:
+            - name: client
+              containerPort: 2181
+          # readiness: zookeeper answers the four-letter "ruok" with "imok" on
+          # the client port once it is actually serving. schema-registry and
+          # kafka both depend on this being true, not merely on the pod existing
+          # (the lesson from compose: depends_on is start-order, not readiness).
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "echo ruok | nc -w 2 localhost 2181 | grep -q imok"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 2181
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: zookeeper-data
+              mountPath: /var/lib/zookeeper/data
+            - name: zookeeper-txnlog
+              mountPath: /var/lib/zookeeper/log
+      volumes:
+        - name: zookeeper-data
+          persistentVolumeClaim:
+            claimName: zookeeper-data
+        - name: zookeeper-txnlog
+          persistentVolumeClaim:
+            claimName: zookeeper-txnlog

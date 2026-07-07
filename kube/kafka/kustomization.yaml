@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fleet
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: fleet
+
+resources:
+  - kafka.yaml
+
+# Relocated from kafka-svc (repo kafka-logging, kube/kafka.yaml) so delightd owns
+# the bus manifest ahead of that repo's sunset (T8). Manifest kept verbatim;
+# bring-current is a separate follow-on.

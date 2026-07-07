@@ -1,0 +1,9 @@
+# The fleet namespace is shared across every migrated service. It is declared
+# here so `kubectl apply -k kube/` is self-contained, but the primary agent may
+# also create it once for the whole cluster; apply is idempotent either way.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fleet
+  labels:
+    app.kubernetes.io/part-of: fleet
