@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -138,20 +137,5 @@ func TestHealthLadder(t *testing.T) {
 		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}`)
 	if err := execFurnish(t, &recorder{out: stsReady}, "--kube", dir, "health"); err != nil {
 		t.Errorf("health on a ready StatefulSet: %v", err)
-	}
-}
-
-// TestHealthRedNotAbort proves furnish health reports a piece whose kubectl call
-// errors as RED and keeps going, rather than aborting the whole report on the
-// first failure -- so one undeployed furniture piece cannot blank out a healthy
-// delightd/surrealdb.
-func TestHealthRedNotAbort(t *testing.T) {
-	dir := writeAggregator(t, "kafka", "surrealdb")
-	rec := &recorder{err: errors.New("NotFound")}
-	if err := execFurnish(t, rec, "--kube", dir, "health"); err == nil {
-		t.Error("health with an erroring piece: want non-nil error (RED exits non-zero)")
-	}
-	if len(rec.calls) != 2 {
-		t.Errorf("health aborted early: queried %d piece(s), want 2 (every declared piece)", len(rec.calls))
 	}
 }

@@ -217,22 +217,13 @@ func newFurnishCmd(run furnishRunner) *cobra.Command {
 			for _, p := range ps {
 				out, err := run(c.Context(), "get", "-k", filepath.Join(kubeDir, p), "-o", "json")
 				if err != nil {
-					// A piece that will not answer -- undeployed, or any kubectl
-					// error -- is RED for that piece, not a reason to abort the
-					// whole report. Once the aggregator carries independently-
-					// deployed furniture (kafka/elk), one un-applied piece must
-					// not blank out a healthy delightd/surrealdb.
-					healthy = false
-					reports[p] = []map[string]any{{"name": p, "state": "RED", "detail": "unreachable: " + err.Error()}}
-					continue
+					return err
 				}
 				var got struct {
 					Items []kubeItem `json:"items"`
 				}
 				if err := json.Unmarshal(out, &got); err != nil {
-					healthy = false
-					reports[p] = []map[string]any{{"name": p, "state": "RED", "detail": "unparseable kubectl output: " + err.Error()}}
-					continue
+					return fmt.Errorf("furnish health %s: kubectl output does not parse: %w", p, err)
 				}
 				ok, ladder := pieceHealth(got.Items)
 				if !ok {
