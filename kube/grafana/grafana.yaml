@@ -1,0 +1,169 @@
+# Grafana -- the dashboard layer on top of the ELK store.
+#
+# Grafana reads Elasticsearch as a datasource and renders dashboards over the
+# fleet-logs-* indices. It is a separate query/visualization surface from Kibana:
+# Kibana is the Elastic-native explorer; Grafana is the fleet's general dashboard
+# tool (and the same place fleet metrics dashboards will live).
+#
+# Trust model: same as the rest of the stack. Anonymous access with the Admin
+# role, login form disabled -- no credential stored, because the trust boundary
+# is the edge (Cloudflare Access in front of cloudflared), not the data plane.
+# This mirrors xpack.security being off on Elasticsearch. Real Grafana auth is
+# the same deferred, separate change as ES/kafka auth, not an omission here.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+data:
+  # Provisioned at startup so the ES datasource exists with no manual click-ops.
+  # index pattern + timeField match the Logstash output (fleet-logs-%{+YYYY.MM.dd}
+  # in logstash.yaml); @timestamp is the field Logstash/Beats stamp by default.
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Elasticsearch
+        type: elasticsearch
+        access: proxy
+        url: http://elasticsearch:9200
+        isDefault: true
+        jsonData:
+          index: "fleet-logs-*"
+          timeField: "@timestamp"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+spec:
+  # small dynamic local-path volume so user-created dashboards survive a restart
+  # (provisioned datasources re-apply on boot regardless).
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # grafana image runs as uid 472; make the local-path data volume writable.
+      securityContext:
+        fsGroup: 472
+      enableServiceLinks: false
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # anonymous Admin + no login form -- see header trust-model note.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Admin
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "true"
+            # served at root behind the edge route.
+            - name: GF_SERVER_ROOT_URL
+              value: http://grafana.local
+          ports:
+            - name: http
+              containerPort: 3000
+          # /api/health returns 200 with {"database":"ok"} once Grafana is serving.
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-data
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+spec:
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: traefik.io/v1alpha1   # traefik v3 CRD group (k3s v1.35.x). NOT containo.us (v2).
+kind: IngressRoute
+metadata:
+  name: grafana
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+spec:
+  entryPoints:
+    - web
+  routes:
+    - kind: Rule
+      # Identity-safe internal hostname; the real public hostname is set at
+      # cloudflared/go-live, not baked in here.
+      match: Host(`grafana.local`)
+      services:
+        - kind: Service
+          name: grafana
+          port: 3000
+          passHostHeader: true

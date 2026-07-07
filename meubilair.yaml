@@ -111,7 +111,7 @@ meubilair:
       repo: delightd
       path: kube/schema-registry/schema-registry.yaml
 
-  # --- obs-svc/kube/elk: the log/event store and its dashboards ---
+  # --- the log/event store and its dashboards (moved in from obs-svc) ---
 
   - name: elasticsearch
     endpoints:
@@ -126,8 +126,8 @@ meubilair:
         path: /
         port: 9200
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/elasticsearch.yaml
+      repo: delightd
+      path: kube/elasticsearch/elasticsearch.yaml
 
   - name: grafana
     endpoints:
@@ -142,8 +142,8 @@ meubilair:
         path: /api/health
         port: 3000
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/grafana.yaml
+      repo: delightd
+      path: kube/grafana/grafana.yaml
 
   - name: kibana
     endpoints:
@@ -157,8 +157,8 @@ meubilair:
         path: /api/status
         port: 5601
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/kibana.yaml
+      repo: delightd
+      path: kube/kibana/kibana.yaml
 
   - name: logstash
     endpoints:
@@ -175,5 +175,5 @@ meubilair:
         path: /
         port: 9600
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/logstash.yaml
+      repo: delightd
+      path: kube/logstash/logstash.yaml

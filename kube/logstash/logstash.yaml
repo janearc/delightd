@@ -1,0 +1,151 @@
+# Logstash -- the ingest/transform stage of ELK (the "L").
+#
+# SCOPE / HONESTY NOTE: this is the STOCK Logstash. Its pipeline accepts the
+# canonical Elastic ingest input (Beats/lumberjack on 5044) and writes to
+# Elasticsearch. It is up, reachable, and will index anything sent to it.
+#
+# What it deliberately does NOT do yet: consume the fleet's Kafka bus. The fleet
+# publishes Confluent-framed Protobuf (RecordNameStrategy, schema-registry magic
+# byte + schema id prefix) on topics like delight.events. Stock Logstash cannot
+# decode that -- it needs the protobuf codec plugin plus compiled descriptors and
+# a schema-registry-aware deframer. That is a build, not stock config, so it is a
+# tracked follow-up (see kube/elk/README.md), NOT silently half-wired here.
+# Until then the kafka -> ES path belongs to obs-svc-agg, which already speaks
+# the protobuf contracts.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: logstash
+    app.kubernetes.io/part-of: fleet
+data:
+  # Node-level settings. http.host exposes the :9600 monitoring API (used by the
+  # readiness probe). xpack monitoring is off to match the credential-free local
+  # ES (xpack.security disabled there).
+  logstash.yml: |
+    http.host: "0.0.0.0"
+    xpack.monitoring.enabled: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: logstash
+    app.kubernetes.io/part-of: fleet
+data:
+  # Stock starter pipeline: Beats in, Elasticsearch out. Daily index. This is the
+  # honest, working baseline; the kafka-protobuf input is the follow-up noted in
+  # this file's header.
+  pipeline.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch:9200"]
+        index => "fleet-logs-%{+YYYY.MM.dd}"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: logstash
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logstash
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logstash
+        app.kubernetes.io/part-of: fleet
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:8.15.3
+          imagePullPolicy: IfNotPresent
+          env:
+            # modest fixed heap, same reasoning as ES -- bound it so it cannot
+            # OOM the laptop VM next to the rest of the fleet.
+            - name: LS_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+          ports:
+            - name: beats
+              containerPort: 5044
+            - name: monitor
+              containerPort: 9600
+          # readiness: the :9600 node API answers 200 once the pipeline is
+          # compiled and running, which is exactly when it can accept Beats input.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: monitor
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: monitor
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 200m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            # logstash.yml replaces the node settings file; pipeline.conf is
+            # dropped into the conf.d dir the image's default pipeline reads.
+            - name: config
+              mountPath: /usr/share/logstash/config/logstash.yml
+              subPath: logstash.yml
+            - name: pipeline
+              mountPath: /usr/share/logstash/pipeline
+      volumes:
+        - name: config
+          configMap:
+            name: logstash-config
+        - name: pipeline
+          configMap:
+            name: logstash-pipeline
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: logstash
+    app.kubernetes.io/part-of: fleet
+spec:
+  # ClusterIP: in-cluster ingest endpoint (Beats shippers send to
+  # logstash.fleet.svc.cluster.local:5044). No edge surface.
+  selector:
+    app.kubernetes.io/name: logstash
+  ports:
+    - name: beats
+      port: 5044
+      targetPort: 5044
+    - name: monitor
+      port: 9600
+      targetPort: 9600

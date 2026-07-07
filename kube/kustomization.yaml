@@ -22,3 +22,7 @@ resources:
   - kafka
   - zookeeper
   - schema-registry
+  - elasticsearch
+  - kibana
+  - logstash
+  - grafana
