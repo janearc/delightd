@@ -9,9 +9,15 @@ labels:
       app.kubernetes.io/part-of: fleet
 
 resources:
+  - namespace.yaml
   - deployment.yaml
   - service.yaml
 
+# namespace.yaml (the fleet Namespace) lives here, on the foundational piece, so
+# `furnish up delightd` creates the namespace on the way up -- delightd owns it
+# independent of the sunsetting source repos. kustomize's `namespace: fleet` above
+# is a no-op on the cluster-scoped Namespace object.
+#
 # No RBAC: delightd does not call the Kubernetes API (no client-go in go.mod).
 # fleet-svc is the API consumer; do not grant delightd a ServiceAccount role.
 # No ingress here: traefik IngressRoute for the edge is owned by the ingress

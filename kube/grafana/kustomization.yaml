@@ -12,5 +12,6 @@ resources:
   - grafana.yaml
 
 # Relocated from obs-svc (kube/elk/grafana.yaml) so delightd owns the manifest
-# ahead of obs-svc's sunset (T9). Manifest kept verbatim; the edge IngressRoute
-# and the 1Gi local-path PVC are part of the bring-current follow-on.
+# ahead of obs-svc's sunset (T9). Manifest kept verbatim -- it carries its edge
+# IngressRoute and 1Gi local-path PVC as-is; bring-current (reviewing those
+# configs) is the follow-on.

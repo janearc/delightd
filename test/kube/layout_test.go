@@ -98,15 +98,22 @@ func decodeKube(t *testing.T, data []byte) []runtime.Object {
 			// so they are still validated, while every core/apps kind we register
 			// stays strictly typed.
 			if runtime.IsNotRegisteredError(err) {
+				// Only CRD groups we do not register are tolerated. A miss in the
+				// core ("") or apps group is a typo in a kind we DO register
+				// (e.g. "Deploymnet", or apiVersion "apps/v2") -- keep that a hard
+				// failure so the gate still catches misspelled core/apps manifests.
+				if gvk == nil || gvk.Group == "" || gvk.Group == "apps" {
+					t.Fatalf("unregistered core/apps kind (likely a typo) gvk=%v: %v\n---\n%s", gvk, err, doc)
+				}
 				var tm struct {
 					APIVersion string `json:"apiVersion"`
 					Kind       string `json:"kind"`
 				}
 				if ferr := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(doc), len(doc)).Decode(&tm); ferr != nil {
-					t.Fatalf("unregistered kind %v; fallback decode failed: %v\n---\n%s", gvk, ferr, doc)
+					t.Fatalf("CRD %v; fallback decode failed: %v\n---\n%s", gvk, ferr, doc)
 				}
 				if tm.APIVersion == "" || tm.Kind == "" {
-					t.Fatalf("unregistered object missing apiVersion/kind:\n---\n%s", doc)
+					t.Fatalf("CRD object missing apiVersion/kind:\n---\n%s", doc)
 				}
 				continue
 			}
@@ -246,6 +253,42 @@ func TestAggregatorRendersValidKube(t *testing.T) {
 		}
 		if !haveSvc {
 			t.Errorf("kustomize %s did not render a delightd Service in fleet", target)
+		}
+	}
+}
+
+// TestAggregatorEntriesArePieceDirs asserts every entry in the top-level
+// aggregator resources list is a piece DIRECTORY carrying its own
+// kustomization.yaml -- never a bare manifest file. furnish
+// (cmd/delightd/furnish.go pieces()) reads this same list and runs
+// `kubectl -k kube/<entry>` per entry, which requires a kustomization directory;
+// a bare file entry silently breaks `furnish health/up/down` while
+// `kubectl kustomize kube/` still succeeds. This is the regression guard for that
+// gap (kubectl-kustomize alone does not catch it).
+func TestAggregatorEntriesArePieceDirs(t *testing.T) {
+	root := repoRoot(t)
+	var agg struct {
+		Resources []string `json:"resources"`
+	}
+	b := readFile(t, filepath.Join(root, "kube/kustomization.yaml"))
+	if err := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), len(b)).Decode(&agg); err != nil {
+		t.Fatalf("decode aggregator kustomization.yaml: %v", err)
+	}
+	if len(agg.Resources) == 0 {
+		t.Fatal("aggregator declares no resources")
+	}
+	for _, r := range agg.Resources {
+		info, err := os.Stat(filepath.Join(root, "kube", r))
+		if err != nil {
+			t.Errorf("aggregator entry %q: %v", r, err)
+			continue
+		}
+		if !info.IsDir() {
+			t.Errorf("aggregator entry %q is a file, not a piece directory; furnish feeds it to `kubectl -k` and will fail", r)
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, "kube", r, "kustomization.yaml")); err != nil {
+			t.Errorf("piece %q has no kustomization.yaml: %v", r, err)
 		}
 	}
 }

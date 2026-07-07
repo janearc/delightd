@@ -8,15 +8,14 @@ kind: Kustomization
 #   kubectl kustomize kube/            renders every piece
 #   kubectl kustomize kube/<piece>/    renders one piece in isolation
 # To add a piece: create kube/<piece>/ with its manifests + kustomization, then
-# add <piece> to the resources list here.
-#
-# namespace.yaml (the fleet Namespace) is listed directly so `kubectl apply -k
-# kube/` is self-contained; kustomize applies the Namespace kind first regardless
-# of list order. It was relocated in from kafka-svc so delightd owns the namespace
-# ahead of that repo's sunset -- nothing outside delightd creates it anymore.
+# add <piece> to the resources list here. Every entry MUST be a piece DIRECTORY:
+# furnish reads this list (cmd/delightd/furnish.go pieces()) and runs
+# `kubectl -k kube/<entry>` per entry, so a bare file here would break
+# furnish health/up/down. The fleet Namespace is owned by the delightd piece
+# (kube/delightd/namespace.yaml), created on the way up, independent of the
+# sunsetting source repos.
 
 resources:
-  - namespace.yaml
   - delightd
   - surrealdb
   - kafka

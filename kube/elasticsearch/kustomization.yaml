@@ -12,5 +12,6 @@ resources:
   - elasticsearch.yaml
 
 # Relocated from obs-svc (kube/elk/elasticsearch.yaml) so delightd owns the
-# manifest ahead of obs-svc's sunset (T9). Manifest kept verbatim; adopt-and-
-# bring-current (the 5Gi local-path PVC, xpack off) is a separate follow-on.
+# manifest ahead of obs-svc's sunset (T9). Manifest kept verbatim -- its 5Gi
+# local-path PVC and xpack-off config come as-is; adopt-and-bring-current
+# (reviewing those) is a separate follow-on.
