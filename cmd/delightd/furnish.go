@@ -64,7 +64,8 @@ func pieces(kubeDir string) ([]string, error) {
 }
 
 // kubeItem is the minimal slice of `kubectl get -o json` that health reads:
-// enough to judge a Deployment's readiness and to name everything else.
+// enough to judge a Deployment's or StatefulSet's readiness and to name
+// everything else (both expose spec.replicas + status.readyReplicas).
 type kubeItem struct {
 	Kind     string `json:"kind"`
 	Metadata struct {
@@ -79,9 +80,12 @@ type kubeItem struct {
 }
 
 // pieceHealth walks one piece's rendered objects and reports a ladder:
-// a Deployment is GREEN when readyReplicas meets spec.replicas (unset means
-// 1, kube's own default), RED otherwise; any other kind that exists is GREEN
-// by existence. The piece is healthy only if nothing is RED.
+// a Deployment or StatefulSet is GREEN when readyReplicas meets spec.replicas
+// (unset means 1, kube's own default), RED otherwise; any other kind that
+// exists is GREEN by existence. The piece is healthy only if nothing is RED.
+// StatefulSet matters here because the relocated bus/store pieces (kafka,
+// zookeeper, elasticsearch) are StatefulSets: without this a CrashLooping
+// kafka-0 would report GREEN by mere existence and furnish health would lie.
 func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 	healthy := true
 	// results is the per-object ladder rendered into the health JSON.
@@ -89,7 +93,7 @@ func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 	for _, it := range items {
 		state := "GREEN"
 		detail := "present"
-		if it.Kind == "Deployment" {
+		if it.Kind == "Deployment" || it.Kind == "StatefulSet" {
 			want := int32(1)
 			if it.Spec.Replicas != nil {
 				want = *it.Spec.Replicas

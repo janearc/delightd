@@ -1,0 +1,95 @@
+# Schema Registry: contract enforcement over the broker. Stateless from k8s's
+# view (its state lives in the kafka _schemas topic), so it is a Deployment, not
+# a StatefulSet. It bootstraps against the broker's in-cluster INTERNAL listener.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schema-registry
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: schema-registry
+    app.kubernetes.io/part-of: fleet
+spec:
+  selector:
+    app.kubernetes.io/name: schema-registry
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schema-registry
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: schema-registry
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: schema-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: schema-registry
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # kubernetes injects docker-link-style env vars (e.g.
+      # SCHEMA_REGISTRY_PORT=tcp://<clusterip>:8081) for every service in the
+      # namespace. the confluent image reads SCHEMA_REGISTRY_* as its own config
+      # convention, so SCHEMA_REGISTRY_PORT is misparsed as the deprecated
+      # integer "port" setting (value "tcp://...:8081" is not an integer) and the
+      # container exits 1 during configure. disabling service links removes those
+      # injected vars so only our explicit env reaches the image.
+      enableServiceLinks: false
+      containers:
+        - name: schema-registry
+          image: confluentinc/cp-schema-registry:7.5.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SCHEMA_REGISTRY_HOST_NAME
+              value: schema-registry
+            # Bootstrap against the broker's in-cluster listener. The broker
+            # advertises kafka.fleet.svc.cluster.local back, so the registry's
+            # follow-up connections resolve in-cluster.
+            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+              value: PLAINTEXT://kafka.fleet.svc.cluster.local:9092
+            - name: SCHEMA_REGISTRY_LISTENERS
+              value: http://0.0.0.0:8081
+            # fleet-wide default: never break forward or backward across history.
+            - name: SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL
+              value: full_transitive
+          ports:
+            - name: http
+              containerPort: 8081
+          # readiness on the HTTP port: /subjects returns 200 only after the
+          # registry has connected to kafka and initialized the _schemas topic.
+          # The generous initialDelay + failureThreshold absorb the window where
+          # the broker is still coming ready -- this is the explicit fix for the
+          # compose race where the registry started before kafka was serving.
+          readinessProbe:
+            httpGet:
+              path: /subjects
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi

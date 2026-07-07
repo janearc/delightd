@@ -15,11 +15,10 @@
 # This descriptor is an INDEX, not a copy. Each entry references the real kube
 # manifest it was derived from (source_manifest) and carries only the minimal
 # projection a health poller needs -- the served endpoints and the one health
-# probe. The manifest stays the single source of truth; embedding the full
-# manifests here (they live in OTHER repos -- kafka-logging, obs-svc) would fork
-# them and rot. The endpoints and probe below are DERIVED from those manifests;
-# keeping them in sync is the later ingest bucket's job (a conformance check
-# against source_manifest is the natural guard, mirroring the contracts pattern).
+# probe. The manifest stays the single source of truth. The endpoints and probe
+# below are DERIVED from those manifests; keeping them in sync is the later
+# ingest bucket's job (a conformance check against source_manifest is the natural
+# guard, mirroring the contracts pattern).
 #
 # Field shape (one entry per furniture):
 #   name             stable inventory name (matches the kube Service name).
@@ -36,8 +35,12 @@
 #                    readiness directly (a later bucket); the probe here is the
 #                    manifest projection, not a script the poller runs.
 #   source_manifest  the kube manifest this entry was derived from, as
-#                    {repo, path} -- a cross-repo reference, never an absolute
-#                    host path.
+#                    {repo, path}, never an absolute host path. `repo: delightd`
+#                    is expected on furniture relocated into delightd ahead of a
+#                    source repo's sunset (kafka/zookeeper/schema-registry from
+#                    kafka-svc; the elk stack from obs-svc): the repo says where
+#                    the manifest lives NOW, not what the piece is -- a piece
+#                    named `kibana` with repo: delightd still furnishes Kibana.
 #
 # Every piece here lives in the `fleet` namespace. None of xpack/grafana/kibana
 # auth is on (the trust boundary is the edge, per each manifest's header), so the
@@ -61,8 +64,6 @@ meubilair:
       repo: delightd
       path: kube/surrealdb/deployment.yaml
 
-  # --- kafka-logging/kube: the bus and its coordination/contract services ---
-
   - name: kafka
     endpoints:
       # INTERNAL listener: the in-cluster path clients reconnect to.
@@ -79,8 +80,8 @@ meubilair:
           - -c
           - kafka-broker-api-versions --bootstrap-server localhost:9092
     source_manifest:
-      repo: kafka-logging
-      path: kube/kafka.yaml
+      repo: delightd
+      path: kube/kafka/kafka.yaml
 
   - name: zookeeper
     endpoints:
@@ -94,8 +95,8 @@ meubilair:
           - -c
           - echo ruok | nc -w 2 localhost 2181 | grep -q imok
     source_manifest:
-      repo: kafka-logging
-      path: kube/zookeeper.yaml
+      repo: delightd
+      path: kube/zookeeper/zookeeper.yaml
 
   - name: schema-registry
     endpoints:
@@ -108,10 +109,8 @@ meubilair:
         path: /subjects
         port: 8081
     source_manifest:
-      repo: kafka-logging
-      path: kube/schema-registry.yaml
-
-  # --- obs-svc/kube/elk: the log/event store and its dashboards ---
+      repo: delightd
+      path: kube/schema-registry/schema-registry.yaml
 
   - name: elasticsearch
     endpoints:
@@ -126,8 +125,8 @@ meubilair:
         path: /
         port: 9200
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/elasticsearch.yaml
+      repo: delightd
+      path: kube/elasticsearch/elasticsearch.yaml
 
   - name: grafana
     endpoints:
@@ -142,8 +141,8 @@ meubilair:
         path: /api/health
         port: 3000
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/grafana.yaml
+      repo: delightd
+      path: kube/grafana/grafana.yaml
 
   - name: kibana
     endpoints:
@@ -157,8 +156,8 @@ meubilair:
         path: /api/status
         port: 5601
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/kibana.yaml
+      repo: delightd
+      path: kube/kibana/kibana.yaml
 
   - name: logstash
     endpoints:
@@ -175,5 +174,5 @@ meubilair:
         path: /
         port: 9600
     source_manifest:
-      repo: obs-svc
-      path: kube/elk/logstash.yaml
+      repo: delightd
+      path: kube/logstash/logstash.yaml

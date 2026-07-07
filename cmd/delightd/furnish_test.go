@@ -123,4 +123,19 @@ func TestHealthLadder(t *testing.T) {
 	if err := execFurnish(t, &recorder{out: unready}, "--kube", dir, "health"); err == nil {
 		t.Error("health on an unready piece: want non-nil error (RED exits non-zero)")
 	}
+
+	// StatefulSets are gated the same as Deployments: the relocated bus/store
+	// pieces (kafka, zookeeper, elasticsearch) are StatefulSets, so a not-ready
+	// one must go RED, not GREEN-by-existence.
+	stsUnready := []byte(`{"items":[
+		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":0}}]}`)
+	if err := execFurnish(t, &recorder{out: stsUnready}, "--kube", dir, "health"); err == nil {
+		t.Error("health on an unready StatefulSet: want non-nil error (RED exits non-zero)")
+	}
+
+	stsReady := []byte(`{"items":[
+		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}`)
+	if err := execFurnish(t, &recorder{out: stsReady}, "--kube", dir, "health"); err != nil {
+		t.Errorf("health on a ready StatefulSet: %v", err)
+	}
 }

@@ -1,0 +1,139 @@
+# Elasticsearch -- the searchable log/event store for the ELK stack.
+#
+# Single-node StatefulSet. ES holds its index data on disk, so it gets a stable
+# pod identity (elasticsearch-0) and a PersistentVolume. Unlike kafka (which
+# binds an EXISTING host path to preserve cluster.id), this is a fresh store with
+# no prior data to keep, so it uses a dynamic local-path PVC (the cluster's
+# default StorageClass) via a volumeClaimTemplate. Nothing to orphan.
+#
+# Security note: xpack.security is OFF. This matches the rest of the fleet's
+# in-cluster trust model (kafka/schema-registry are PLAINTEXT) -- the edge is the
+# only trust boundary (cloudflared -> traefik). TLS/auth on the data plane is a
+# later, separate change, the same way it is deferred for kafka.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/part-of: fleet
+spec:
+  # ClusterIP: ES is an in-cluster dependency of Kibana and Logstash, not an
+  # edge surface. No IngressRoute -- you reach it only from inside the mesh as
+  # elasticsearch.fleet.svc.cluster.local:9200 (or just elasticsearch:9200).
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+    - name: transport
+      # Inter-node transport. Unused at one node, but exposed so a future
+      # multi-node topology needs no service change.
+      port: 9300
+      targetPort: 9300
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/part-of: fleet
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # The ES image runs as uid 1000. fsGroup makes the dynamically-provisioned
+      # data volume group-writable by that user so ES can create its data dir;
+      # without it the local-path volume is root-owned and ES fails to start.
+      securityContext:
+        fsGroup: 1000
+      # disable docker-link service-env injection (same reason as kafka): the
+      # cluster injects ELASTICSEARCH_PORT=tcp://... which the image misreads.
+      enableServiceLinks: false
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          imagePullPolicy: IfNotPresent
+          env:
+            # single-node discovery: skip the multi-node bootstrap/voting that
+            # would otherwise block a one-pod cluster from electing a master.
+            - name: discovery.type
+              value: single-node
+            # local trust model -- see header. Off keeps Kibana/Logstash wiring
+            # credential-free for the demo store; not a secret omission.
+            - name: xpack.security.enabled
+              value: "false"
+            # modest fixed heap (-Xms == -Xmx, ES best practice) so it cannot
+            # balloon and OOM the laptop VM alongside the running fleet.
+            - name: ES_JAVA_OPTS
+              value: "-Xms1g -Xmx1g"
+            # mlockall needs memlock ulimits we are not granting in k3d; leave it
+            # off and rely on the fixed heap above instead.
+            - name: bootstrap.memory_lock
+              value: "false"
+            - name: cluster.name
+              value: fleet-logs
+          ports:
+            - name: http
+              containerPort: 9200
+            - name: transport
+              containerPort: 9300
+          # readiness: the HTTP root returns 200 once the node has started and
+          # the REST layer is serving. That is the point Kibana/Logstash can
+          # connect, so it is the right gate. Generous initialDelay -- ES JVM
+          # boot + shard recovery is slow.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          # liveness: plain TCP on the http port with a long grace window, so a
+          # slow cold boot never trips a restart loop -- only a genuinely wedged
+          # process does.
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1536Mi
+            limits:
+              cpu: "2"
+              # headroom over the 1g heap for off-heap (Lucene mmap, etc.)
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: elasticsearch
+          app.kubernetes.io/part-of: fleet
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # default StorageClass (local-path). Fresh store, dynamic provisioning.
+        resources:
+          requests:
+            storage: 5Gi

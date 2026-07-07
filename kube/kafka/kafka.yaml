@@ -1,0 +1,181 @@
+# Kafka broker. Single-replica StatefulSet so the broker keeps a stable
+# identity (kafka-0) and is bound to the EXISTING log dir on the node. That dir
+# holds meta.properties (cluster.id dtZ1FJZvRuSNgEjNvqCHww) and every topic's
+# segments; mounting it preserves the broker's identity and data across the
+# compose -> k8s cut-over. Orphaning it would create a new empty cluster.
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kafka-logs
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: fleet
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  # Static binding to the existing host path. storageClassName "" keeps the
+  # default dynamic provisioner from substituting a fresh empty volume, which
+  # would lose the broker's cluster.id and logs.
+  storageClassName: ""
+  hostPath:
+    path: /Users/jane/var/kafka
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kafka-logs
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: fleet
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: kafka-logs
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: fleet
+spec:
+  # Headless so the service DNS name kafka.fleet.svc.cluster.local resolves
+  # straight to the broker pod IP. That name is exactly what the broker
+  # advertises on its INTERNAL listener, so in-cluster clients (and
+  # schema-registry) connect, get the advertised address back, and reconnect to
+  # the same name -- no rebound-address breakage.
+  clusterIP: None
+  # the broker advertises its own headless-service FQDN
+  # (kafka.fleet.svc.cluster.local) on the INTERNAL listener, and the readiness
+  # probe follows that advertised address to complete. a headless service only
+  # publishes endpoints for READY pods by default, so the name would not resolve
+  # until the pod is ready -- but the pod cannot become ready until it can reach
+  # its own advertised address. publishNotReadyAddresses breaks that deadlock by
+  # resolving the name as soon as the pod has an IP. (zookeeper does not need
+  # this: its readiness probe uses localhost, not its service DNS.)
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: internal
+      port: 9092
+      targetPort: 9092
+    - name: external
+      port: 9094
+      targetPort: 9094
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: fleet
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # disable kubernetes docker-link service-env injection: the confluent
+      # image reads KAFKA_* as its config convention, and an injected
+      # KAFKA_PORT=tcp://<clusterip>:9092 collides with the deprecated kafka
+      # "port" config. our explicit listener envs override it so the broker
+      # still comes up, but disabling the links keeps the config surface clean
+      # and matches schema-registry, which crashes outright on the same collision.
+      enableServiceLinks: false
+      containers:
+        - name: kafka
+          image: confluentinc/cp-kafka:7.5.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BROKER_ID
+              value: "1"
+            - name: KAFKA_NUM_NETWORK_THREADS
+              value: "4"
+            - name: KAFKA_NUM_IO_THREADS
+              value: "4"
+            - name: KAFKA_NUM_PARTITIONS
+              value: "1"
+            - name: KAFKA_LOG_DIRS
+              value: /kafka/logs
+            - name: KAFKA_ZOOKEEPER_CONNECT
+              value: zookeeper:2181
+            # Two named listeners. INTERNAL is the in-cluster path: it advertises
+            # the headless service DNS name so pods reconnect to the broker by a
+            # stable cluster address. EXTERNAL is a migration bridge for host
+            # clients still on docker/compose; it advertises kafka.localhost:9094
+            # which the host resolves via traefik TCP routing (see ingressroute
+            # note in the handoff). Both are PLAINTEXT -- unchanged trust model
+            # from compose; TLS/auth is a later, separate change.
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+            - name: KAFKA_LISTENERS
+              value: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: INTERNAL://kafka.fleet.svc.cluster.local:9092,EXTERNAL://kafka.localhost:9094
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: INTERNAL
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms512m -Xmx1024m"
+          ports:
+            - name: internal
+              containerPort: 9092
+            - name: external
+              containerPort: 9094
+          # readiness: the broker is ready only when it answers an API request on
+          # the listener port. kafka-broker-api-versions hits the broker the same
+          # way a real client does, so readiness flips true exactly when clients
+          # can connect -- which is the gate schema-registry waits on.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - kafka-broker-api-versions --bootstrap-server localhost:9092
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 8
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 1536Mi
+          volumeMounts:
+            - name: kafka-logs
+              mountPath: /kafka/logs
+      volumes:
+        - name: kafka-logs
+          persistentVolumeClaim:
+            claimName: kafka-logs
