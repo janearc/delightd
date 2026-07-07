@@ -70,6 +70,12 @@ func splitDocs(t *testing.T, data []byte) [][]byte {
 	return docs
 }
 
+// toleratedCRDGroups are the CRD API groups whose objects this test validates
+// for well-formedness only -- no Go type is registered for them. Every other
+// group that fails to register is treated as a typo and hard-fails. traefik.io
+// covers the grafana/kibana IngressRoutes carried by the relocated furniture.
+var toleratedCRDGroups = map[string]bool{"traefik.io": true}
+
 // decodeKube strictly decodes every document in data into typed Kubernetes
 // objects. A parse error, an unknown/misspelled field, a wrong type, or an
 // unregistered apiVersion/kind fails the test -- this is the "is it valid kube"
@@ -98,12 +104,13 @@ func decodeKube(t *testing.T, data []byte) []runtime.Object {
 			// so they are still validated, while every core/apps kind we register
 			// stays strictly typed.
 			if runtime.IsNotRegisteredError(err) {
-				// Only CRD groups we do not register are tolerated. A miss in the
-				// core ("") or apps group is a typo in a kind we DO register
-				// (e.g. "Deploymnet", or apiVersion "apps/v2") -- keep that a hard
-				// failure so the gate still catches misspelled core/apps manifests.
-				if gvk == nil || gvk.Group == "" || gvk.Group == "apps" {
-					t.Fatalf("unregistered core/apps kind (likely a typo) gvk=%v: %v\n---\n%s", gvk, err, doc)
+				// Tolerate only CRDs from groups we explicitly expect. Anything
+				// else that fails to register -- a typo'd kind ("Deploymnet"), a
+				// typo'd version ("apps/v2"), OR a typo'd group ("apss/v1") -- is a
+				// hard failure, so the gate still catches misspellings. Add a group
+				// to toleratedCRDGroups when a new CRD is furnished.
+				if gvk == nil || !toleratedCRDGroups[gvk.Group] {
+					t.Fatalf("unregistered kind gvk=%v (not an expected CRD group; likely a typo): %v\n---\n%s", gvk, err, doc)
 				}
 				var tm struct {
 					APIVersion string `json:"apiVersion"`

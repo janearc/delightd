@@ -9,9 +9,8 @@
 # byte + schema id prefix) on topics like delight.events. Stock Logstash cannot
 # decode that -- it needs the protobuf codec plugin plus compiled descriptors and
 # a schema-registry-aware deframer. That is a build, not stock config, so it is a
-# tracked follow-up (see kube/elk/README.md), NOT silently half-wired here.
-# Until then the kafka -> ES path belongs to obs-svc-agg, which already speaks
-# the protobuf contracts.
+# tracked follow-up, NOT silently half-wired here. Until then the kafka -> ES path
+# is handled upstream (obs-svc-agg today, pending its sunset), not by this piece.
 ---
 apiVersion: v1
 kind: ConfigMap

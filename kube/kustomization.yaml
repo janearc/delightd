@@ -11,9 +11,13 @@ kind: Kustomization
 # add <piece> to the resources list here. Every entry MUST be a piece DIRECTORY:
 # furnish reads this list (cmd/delightd/furnish.go pieces()) and runs
 # `kubectl -k kube/<entry>` per entry, so a bare file here would break
-# furnish health/up/down. The fleet Namespace is owned by the delightd piece
-# (kube/delightd/namespace.yaml), created on the way up, independent of the
-# sunsetting source repos.
+# furnish health/up/down.
+#
+# The fleet Namespace is deliberately NOT owned here. furnish is per-piece with no
+# ordering, so folding a shared namespace into any piece makes `furnish down` of
+# that piece cascade-delete the whole fleet, and out-of-order `furnish up` of
+# another piece fail for want of the namespace. Namespace provisioning is a
+# cold-bring-up concern (runbook / tier0 work), tracked separately.
 
 resources:
   - delightd
