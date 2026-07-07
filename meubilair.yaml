@@ -15,11 +15,10 @@
 # This descriptor is an INDEX, not a copy. Each entry references the real kube
 # manifest it was derived from (source_manifest) and carries only the minimal
 # projection a health poller needs -- the served endpoints and the one health
-# probe. The manifest stays the single source of truth; embedding the full
-# manifests here would fork them and rot. The endpoints and probe below are
-# DERIVED from those manifests;
-# keeping them in sync is the later ingest bucket's job (a conformance check
-# against source_manifest is the natural guard, mirroring the contracts pattern).
+# probe. The manifest stays the single source of truth. The endpoints and probe
+# below are DERIVED from those manifests; keeping them in sync is the later
+# ingest bucket's job (a conformance check against source_manifest is the natural
+# guard, mirroring the contracts pattern).
 #
 # Field shape (one entry per furniture):
 #   name             stable inventory name (matches the kube Service name).
@@ -60,8 +59,6 @@ meubilair:
     source_manifest:
       repo: delightd
       path: kube/surrealdb/deployment.yaml
-
-  # --- the bus and its coordination/contract services (moved in from kafka-svc) ---
 
   - name: kafka
     endpoints:
@@ -110,8 +107,6 @@ meubilair:
     source_manifest:
       repo: delightd
       path: kube/schema-registry/schema-registry.yaml
-
-  # --- the log/event store and its dashboards (moved in from obs-svc) ---
 
   - name: elasticsearch
     endpoints:
