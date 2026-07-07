@@ -9,6 +9,7 @@ labels:
       app.kubernetes.io/part-of: fleet
 
 resources:
+  - pvc.yaml
   - deployment.yaml
   - service.yaml
 

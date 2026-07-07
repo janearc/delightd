@@ -1,0 +1,29 @@
+# surrealdb's durable storage: a 5Gi claim on the k3s-bundled local-path
+# provisioner (the default class, confirmed in the sprint-14 T4 inventory).
+# Tier-1 ruling (2026-07-06): a pod restart losing everything is not tier-1
+# behavior, so the memory engine and this claim land as one change.
+#
+# DISK EXCEPTION (SRE review, 2026-07-07): local-path does NOT enforce this 5Gi.
+# It provisions a plain directory under /var/lib/rancher/k3s/storage on the node
+# with no quota, so surrealdb (rocksdb, writing /data/db) can grow past 5Gi. The
+# real ceiling is the colima VM disk (50Gi today), shared by every PVC + images
+# + etcd, and that VM disk is a sparse file on the single macOS partition -- so a
+# rowdy datastore can fill the VM (cluster-wide outage) and eat host headroom.
+# Mitigation is MONITORING (watch this dir + the colima disk, alert early), not a
+# quota local-path cannot give. Bounding surrealdb's on-disk growth is follow-up;
+# this claim ships with the growth risk named, not silent.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: surrealdb-data
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: surrealdb
+    app.kubernetes.io/part-of: fleet
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
