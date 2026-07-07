@@ -70,11 +70,12 @@ func splitDocs(t *testing.T, data []byte) [][]byte {
 	return docs
 }
 
-// toleratedCRDGroups are the CRD API groups whose objects this test validates
-// for well-formedness only -- no Go type is registered for them. Every other
-// group that fails to register is treated as a typo and hard-fails. traefik.io
-// covers the grafana/kibana IngressRoutes carried by the relocated furniture.
-var toleratedCRDGroups = map[string]bool{"traefik.io": true}
+// toleratedCRDKinds are the exact CRD group/Kind pairs this test validates for
+// well-formedness only -- no Go type is registered for them. Every other kind
+// that fails to register is treated as a typo and hard-fails.
+// traefik.io/IngressRoute is the grafana/kibana edge route carried by the
+// relocated furniture. Add a pair only when its CRD is actually furnished.
+var toleratedCRDKinds = map[string]bool{"traefik.io/IngressRoute": true}
 
 // isCommentOnly reports whether a YAML document carries no content -- every
 // non-empty line is a comment. Such a doc (a file's leading header before the
@@ -125,24 +126,13 @@ func decodeKube(t *testing.T, data []byte) []runtime.Object {
 			// so they are still validated, while every core/apps kind we register
 			// stays strictly typed.
 			if runtime.IsNotRegisteredError(err) {
-				// Tolerate only CRDs whose GROUP is allowlisted. Any kind whose
-				// group is NOT allowlisted -- a typo'd core/apps kind ("Deploymnet"),
-				// a typo'd version ("apps/v2"), or a typo'd group ("apss/v1") --
-				// hard-fails. Within an allowlisted CRD group we have no Go type, so
-				// only well-formedness is checked and a typo'd KIND there would pass;
-				// add a group only when its CRDs are actually furnished.
-				if gvk == nil || !toleratedCRDGroups[gvk.Group] {
-					t.Fatalf("unregistered kind gvk=%v (not an expected CRD group; likely a typo): %v\n---\n%s", gvk, err, doc)
-				}
-				var tm struct {
-					APIVersion string `json:"apiVersion"`
-					Kind       string `json:"kind"`
-				}
-				if ferr := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(doc), len(doc)).Decode(&tm); ferr != nil {
-					t.Fatalf("CRD %v; fallback decode failed: %v\n---\n%s", gvk, ferr, doc)
-				}
-				if tm.APIVersion == "" || tm.Kind == "" {
-					t.Fatalf("CRD object missing apiVersion/kind:\n---\n%s", doc)
+				// Tolerate only the exact CRD (group, kind) pairs we furnish. A
+				// non-nil gvk already proves apiVersion+kind parsed (well-formed);
+				// anything not allowlisted -- a typo'd core/apps kind ("Deploymnet"),
+				// a typo'd version ("apps/v2"), a typo'd group ("apss/v1"), or a
+				// typo'd CRD kind ("IngressRout") -- hard-fails.
+				if gvk == nil || !toleratedCRDKinds[gvk.Group+"/"+gvk.Kind] {
+					t.Fatalf("unregistered kind gvk=%v (not an allowlisted CRD; likely a typo): %v\n---\n%s", gvk, err, doc)
 				}
 				continue
 			}
@@ -322,24 +312,49 @@ func TestAggregatorEntriesArePieceDirs(t *testing.T) {
 	}
 }
 
-// TestRelocatedFurnitureManifestsDecode strict-decodes each relocated furniture
-// manifest FILE directly, so the ~1200 lines of relocated yaml are validated on
-// any runner -- kubectl present or not. TestAggregatorRendersValidKube skips
-// without kubectl, which would let a type/field error in these manifests land
-// green and only surface at `furnish up` / `kubectl apply`. This test does not
-// skip. decodeKube hard-fails on any bad core/apps object and checks CRDs
-// (traefik IngressRoute) for well-formedness.
-func TestRelocatedFurnitureManifestsDecode(t *testing.T) {
+// TestPieceManifestsDecode strict-decodes every manifest under every piece the
+// aggregator declares, directly and WITHOUT kubectl. It closes the gap where
+// TestAggregatorRendersValidKube skips on a kubectl-absent runner: a type/field
+// error or unregistered kind in any piece manifest would otherwise land green
+// and only surface at `furnish up` / `kubectl apply`. The manifest set is derived
+// from the aggregator (never hardcoded), so a new piece or a second manifest in
+// an existing piece is covered automatically. decodeKube hard-fails on any bad
+// object; the per-file non-comment-doc assertion catches a manifest whose only
+// resource was commented out (which decodeKube would otherwise skip to nothing).
+func TestPieceManifestsDecode(t *testing.T) {
 	root := repoRoot(t)
-	for _, rel := range []string{
-		"kube/kafka/kafka.yaml",
-		"kube/zookeeper/zookeeper.yaml",
-		"kube/schema-registry/schema-registry.yaml",
-		"kube/elasticsearch/elasticsearch.yaml",
-		"kube/kibana/kibana.yaml",
-		"kube/logstash/logstash.yaml",
-		"kube/grafana/grafana.yaml",
-	} {
-		decodeKube(t, readFile(t, filepath.Join(root, rel)))
+	var agg struct {
+		Resources []string `json:"resources"`
+	}
+	b := readFile(t, filepath.Join(root, "kube/kustomization.yaml"))
+	if err := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), len(b)).Decode(&agg); err != nil {
+		t.Fatalf("decode aggregator kustomization.yaml: %v", err)
+	}
+	if len(agg.Resources) == 0 {
+		t.Fatal("aggregator declares no resources")
+	}
+	for _, piece := range agg.Resources {
+		entries, err := os.ReadDir(filepath.Join(root, "kube", piece))
+		if err != nil {
+			t.Errorf("read piece %q: %v", piece, err)
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || e.Name() == "kustomization.yaml" || filepath.Ext(e.Name()) != ".yaml" {
+				continue
+			}
+			rel := filepath.Join("kube", piece, e.Name())
+			data := readFile(t, filepath.Join(root, rel))
+			decodeKube(t, data) // strict-decodes; fatals on any bad object
+			real := 0
+			for _, d := range splitDocs(t, data) {
+				if !isCommentOnly(d) {
+					real++
+				}
+			}
+			if real == 0 {
+				t.Errorf("%s declares no resource documents (all comment-only?)", rel)
+			}
+		}
 	}
 }
