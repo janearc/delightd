@@ -76,6 +76,20 @@ func splitDocs(t *testing.T, data []byte) [][]byte {
 // covers the grafana/kibana IngressRoutes carried by the relocated furniture.
 var toleratedCRDGroups = map[string]bool{"traefik.io": true}
 
+// isCommentOnly reports whether a YAML document carries no content -- every
+// non-empty line is a comment. Such a doc (a file's leading header before the
+// first `---`) has no kind and is skipped by the decoder; a doc with real
+// content is not comment-only and still gets strictly typed.
+func isCommentOnly(doc []byte) bool {
+	for line := range bytes.SplitSeq(doc, []byte("\n")) {
+		s := bytes.TrimSpace(line)
+		if len(s) > 0 && s[0] != '#' {
+			return false
+		}
+	}
+	return true
+}
+
 // decodeKube strictly decodes every document in data into typed Kubernetes
 // objects. A parse error, an unknown/misspelled field, a wrong type, or an
 // unregistered apiVersion/kind fails the test -- this is the "is it valid kube"
@@ -94,6 +108,13 @@ func decodeKube(t *testing.T, data []byte) []runtime.Object {
 
 	var out []runtime.Object
 	for _, doc := range splitDocs(t, data) {
+		// Raw manifest files can carry a leading comment-only YAML document (a
+		// header before the first `---`); kubectl ignores it and it has no kind
+		// to decode. Skip comment/whitespace-only docs -- a doc with real content
+		// but a missing/typo'd kind still fails strict decode below.
+		if isCommentOnly(doc) {
+			continue
+		}
 		obj, gvk, err := dec.Decode(doc, nil, nil)
 		if err != nil {
 			// CRDs (e.g. traefik IngressRoute, which grafana/kibana carry for edge
@@ -104,11 +125,12 @@ func decodeKube(t *testing.T, data []byte) []runtime.Object {
 			// so they are still validated, while every core/apps kind we register
 			// stays strictly typed.
 			if runtime.IsNotRegisteredError(err) {
-				// Tolerate only CRDs from groups we explicitly expect. Anything
-				// else that fails to register -- a typo'd kind ("Deploymnet"), a
-				// typo'd version ("apps/v2"), OR a typo'd group ("apss/v1") -- is a
-				// hard failure, so the gate still catches misspellings. Add a group
-				// to toleratedCRDGroups when a new CRD is furnished.
+				// Tolerate only CRDs whose GROUP is allowlisted. Any kind whose
+				// group is NOT allowlisted -- a typo'd core/apps kind ("Deploymnet"),
+				// a typo'd version ("apps/v2"), or a typo'd group ("apss/v1") --
+				// hard-fails. Within an allowlisted CRD group we have no Go type, so
+				// only well-formedness is checked and a typo'd KIND there would pass;
+				// add a group only when its CRDs are actually furnished.
 				if gvk == nil || !toleratedCRDGroups[gvk.Group] {
 					t.Fatalf("unregistered kind gvk=%v (not an expected CRD group; likely a typo): %v\n---\n%s", gvk, err, doc)
 				}
@@ -297,5 +319,27 @@ func TestAggregatorEntriesArePieceDirs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "kube", r, "kustomization.yaml")); err != nil {
 			t.Errorf("piece %q has no kustomization.yaml: %v", r, err)
 		}
+	}
+}
+
+// TestRelocatedFurnitureManifestsDecode strict-decodes each relocated furniture
+// manifest FILE directly, so the ~1200 lines of relocated yaml are validated on
+// any runner -- kubectl present or not. TestAggregatorRendersValidKube skips
+// without kubectl, which would let a type/field error in these manifests land
+// green and only surface at `furnish up` / `kubectl apply`. This test does not
+// skip. decodeKube hard-fails on any bad core/apps object and checks CRDs
+// (traefik IngressRoute) for well-formedness.
+func TestRelocatedFurnitureManifestsDecode(t *testing.T) {
+	root := repoRoot(t)
+	for _, rel := range []string{
+		"kube/kafka/kafka.yaml",
+		"kube/zookeeper/zookeeper.yaml",
+		"kube/schema-registry/schema-registry.yaml",
+		"kube/elasticsearch/elasticsearch.yaml",
+		"kube/kibana/kibana.yaml",
+		"kube/logstash/logstash.yaml",
+		"kube/grafana/grafana.yaml",
+	} {
+		decodeKube(t, readFile(t, filepath.Join(root, rel)))
 	}
 }
