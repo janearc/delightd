@@ -70,12 +70,27 @@ func splitDocs(t *testing.T, data []byte) [][]byte {
 	return docs
 }
 
-// toleratedCRDKinds are the exact CRD group/Kind pairs this test validates for
-// well-formedness only -- no Go type is registered for them. Every other kind
-// that fails to register is treated as a typo and hard-fails.
-// traefik.io/IngressRoute is the grafana/kibana edge route carried by the
-// relocated furniture. Add a pair only when its CRD is actually furnished.
-var toleratedCRDKinds = map[string]bool{"traefik.io/IngressRoute": true}
+// toleratedCRDGVKs are the exact CRD group/version/kind triples this test
+// validates for well-formedness only -- no Go type is registered for them.
+// Keying on the full GVK means a typo in the group, version, OR kind of an
+// otherwise-tolerated CRD hard-fails. traefik.io/v1alpha1/IngressRoute is the
+// grafana/kibana edge route carried by the relocated furniture. Add a triple
+// only when its CRD is actually furnished.
+var toleratedCRDGVKs = map[string]bool{"traefik.io/v1alpha1/IngressRoute": true}
+
+// kubeScheme registers the core + apps types once and is shared across
+// decodeKube calls (the registration is identical every time). A registration
+// failure is a programming error, so it panics at init rather than taking a *T.
+var kubeScheme = func() *runtime.Scheme {
+	s := runtime.NewScheme()
+	if err := appsv1.AddToScheme(s); err != nil {
+		panic("register apps/v1: " + err.Error())
+	}
+	if err := corev1.AddToScheme(s); err != nil {
+		panic("register core/v1: " + err.Error())
+	}
+	return s
+}()
 
 // isCommentOnly reports whether a YAML document carries no content -- every
 // non-empty line is a comment. Such a doc (a file's leading header before the
@@ -91,47 +106,42 @@ func isCommentOnly(doc []byte) bool {
 	return true
 }
 
-// decodeKube strictly decodes every document in data into typed Kubernetes
-// objects. A parse error, an unknown/misspelled field, a wrong type, or an
-// unregistered apiVersion/kind fails the test -- this is the "is it valid kube"
-// gate, not a "does it look like yaml" check.
-func decodeKube(t *testing.T, data []byte) []runtime.Object {
+// decodeKube strictly decodes every resource document in data into typed
+// Kubernetes objects (a parse error, misspelled field, wrong type, or an
+// unregistered non-allowlisted kind fails the test) and returns the decoded
+// core/apps objects plus the number of real (non-comment) documents it saw, so
+// callers need not re-split. This is the "is it valid kube" gate, not a "does it
+// look like yaml" check.
+func decodeKube(t *testing.T, data []byte) ([]runtime.Object, int) {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := appsv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("register apps/v1: %v", err)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("register core/v1: %v", err)
-	}
-	dec := kjson.NewSerializerWithOptions(kjson.DefaultMetaFactory, scheme, scheme,
+	dec := kjson.NewSerializerWithOptions(kjson.DefaultMetaFactory, kubeScheme, kubeScheme,
 		kjson.SerializerOptions{Yaml: true, Strict: true})
 
 	var out []runtime.Object
-	for _, doc := range splitDocs(t, data) {
-		// Raw manifest files can carry a leading comment-only YAML document (a
-		// header before the first `---`); kubectl ignores it and it has no kind
-		// to decode. Skip comment/whitespace-only docs -- a doc with real content
-		// but a missing/typo'd kind still fails strict decode below.
+	realDocs := 0
+	for i, doc := range splitDocs(t, data) {
 		if isCommentOnly(doc) {
-			continue
+			// A leading comment-only document is a file header (before the first
+			// `---`) -- skip it. A comment-only document ANYWHERE ELSE is a
+			// resource that got commented out; fail, as the pre-tolerance decoder
+			// did, so a half-commented multi-doc manifest cannot pass green.
+			if i == 0 {
+				continue
+			}
+			t.Fatalf("comment-only document at position %d (a commented-out resource?):\n---\n%s", i, doc)
 		}
+		realDocs++
 		obj, gvk, err := dec.Decode(doc, nil, nil)
 		if err != nil {
-			// CRDs (e.g. traefik IngressRoute, which grafana/kibana carry for edge
-			// exposure) have no Go type in this test's core+apps scheme. The API
-			// server accepts them because the CRD is installed; we cannot strictly
-			// type them here without vendoring each CRD's module. Fall back to a
-			// well-formedness check -- a valid document carrying apiVersion + kind --
-			// so they are still validated, while every core/apps kind we register
-			// stays strictly typed.
+			// CRDs (e.g. traefik IngressRoute) have no Go type in the core+apps
+			// scheme; we cannot strictly type them without vendoring each CRD's
+			// module. On a NotRegistered error the serializer has already parsed
+			// apiVersion+kind, so a non-nil gvk is proof of well-formedness. Allow
+			// only the exact GVKs we furnish; any other unregistered kind -- a
+			// typo'd core/apps kind, a typo'd version, group, or CRD kind --
+			// hard-fails.
 			if runtime.IsNotRegisteredError(err) {
-				// Tolerate only the exact CRD (group, kind) pairs we furnish. A
-				// non-nil gvk already proves apiVersion+kind parsed (well-formed);
-				// anything not allowlisted -- a typo'd core/apps kind ("Deploymnet"),
-				// a typo'd version ("apps/v2"), a typo'd group ("apss/v1"), or a
-				// typo'd CRD kind ("IngressRout") -- hard-fails.
-				if gvk == nil || !toleratedCRDKinds[gvk.Group+"/"+gvk.Kind] {
+				if gvk == nil || !toleratedCRDGVKs[gvk.Group+"/"+gvk.Version+"/"+gvk.Kind] {
 					t.Fatalf("unregistered kind gvk=%v (not an allowlisted CRD; likely a typo): %v\n---\n%s", gvk, err, doc)
 				}
 				continue
@@ -140,7 +150,7 @@ func decodeKube(t *testing.T, data []byte) []runtime.Object {
 		}
 		out = append(out, obj)
 	}
-	return out
+	return out, realDocs
 }
 
 func containerPort(c corev1.Container, name string) (int32, bool) {
@@ -191,7 +201,7 @@ func TestLayoutFilesPresent(t *testing.T) {
 func TestDelightdManifestsAreValidKube(t *testing.T) {
 	root := repoRoot(t)
 
-	objs := decodeKube(t, readFile(t, filepath.Join(root, "kube/delightd/deployment.yaml")))
+	objs, _ := decodeKube(t, readFile(t, filepath.Join(root, "kube/delightd/deployment.yaml")))
 	if len(objs) != 1 {
 		t.Fatalf("deployment.yaml decoded to %d objects, want 1", len(objs))
 	}
@@ -215,7 +225,7 @@ func TestDelightdManifestsAreValidKube(t *testing.T) {
 		t.Errorf("deployment control containerPort = %d, want DefaultControlPort %d", port, config.DefaultControlPort)
 	}
 
-	objs = decodeKube(t, readFile(t, filepath.Join(root, "kube/delightd/service.yaml")))
+	objs, _ = decodeKube(t, readFile(t, filepath.Join(root, "kube/delightd/service.yaml")))
 	if len(objs) != 1 {
 		t.Fatalf("service.yaml decoded to %d objects, want 1", len(objs))
 	}
@@ -255,7 +265,8 @@ func TestAggregatorRendersValidKube(t *testing.T) {
 		}
 
 		var haveDeploy, haveSvc bool
-		for _, obj := range decodeKube(t, out) {
+		objs, _ := decodeKube(t, out)
+		for _, obj := range objs {
 			switch o := obj.(type) {
 			case *appsv1.Deployment:
 				if o.Name == "delightd" && o.Namespace == "fleet" {
@@ -276,6 +287,30 @@ func TestAggregatorRendersValidKube(t *testing.T) {
 	}
 }
 
+// kustomizeResources decodes the resources list of one kustomization.yaml.
+func kustomizeResources(t *testing.T, path string) []string {
+	t.Helper()
+	b := readFile(t, path)
+	var k struct {
+		Resources []string `json:"resources"`
+	}
+	if err := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), len(b)).Decode(&k); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return k.Resources
+}
+
+// aggregatorResources returns the piece names the top-level
+// kube/kustomization.yaml lists, failing if it declares none.
+func aggregatorResources(t *testing.T, root string) []string {
+	t.Helper()
+	res := kustomizeResources(t, filepath.Join(root, "kube/kustomization.yaml"))
+	if len(res) == 0 {
+		t.Fatal("aggregator declares no resources")
+	}
+	return res
+}
+
 // TestAggregatorEntriesArePieceDirs asserts every entry in the top-level
 // aggregator resources list is a piece DIRECTORY carrying its own
 // kustomization.yaml -- never a bare manifest file. furnish
@@ -286,17 +321,7 @@ func TestAggregatorRendersValidKube(t *testing.T) {
 // gap (kubectl-kustomize alone does not catch it).
 func TestAggregatorEntriesArePieceDirs(t *testing.T) {
 	root := repoRoot(t)
-	var agg struct {
-		Resources []string `json:"resources"`
-	}
-	b := readFile(t, filepath.Join(root, "kube/kustomization.yaml"))
-	if err := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), len(b)).Decode(&agg); err != nil {
-		t.Fatalf("decode aggregator kustomization.yaml: %v", err)
-	}
-	if len(agg.Resources) == 0 {
-		t.Fatal("aggregator declares no resources")
-	}
-	for _, r := range agg.Resources {
+	for _, r := range aggregatorResources(t, root) {
 		info, err := os.Stat(filepath.Join(root, "kube", r))
 		if err != nil {
 			t.Errorf("aggregator entry %q: %v", r, err)
@@ -312,48 +337,23 @@ func TestAggregatorEntriesArePieceDirs(t *testing.T) {
 	}
 }
 
-// TestPieceManifestsDecode strict-decodes every manifest under every piece the
-// aggregator declares, directly and WITHOUT kubectl. It closes the gap where
-// TestAggregatorRendersValidKube skips on a kubectl-absent runner: a type/field
-// error or unregistered kind in any piece manifest would otherwise land green
-// and only surface at `furnish up` / `kubectl apply`. The manifest set is derived
-// from the aggregator (never hardcoded), so a new piece or a second manifest in
-// an existing piece is covered automatically. decodeKube hard-fails on any bad
-// object; the per-file non-comment-doc assertion catches a manifest whose only
-// resource was commented out (which decodeKube would otherwise skip to nothing).
+// TestPieceManifestsDecode strict-decodes every manifest that each piece's own
+// kustomization.yaml lists in its resources, directly and WITHOUT kubectl. It
+// closes the gap where TestAggregatorRendersValidKube skips on a kubectl-absent
+// runner. Driving off each piece's resources list (not a directory scan) means a
+// dangling or mistyped manifest reference is caught here -- readFile fails on the
+// missing file -- and a `.yml` reference is covered too, since we decode whatever
+// the kustomization actually loads. decodeKube hard-fails on any bad object;
+// realDocs == 0 catches a manifest that declares no resource documents.
 func TestPieceManifestsDecode(t *testing.T) {
 	root := repoRoot(t)
-	var agg struct {
-		Resources []string `json:"resources"`
-	}
-	b := readFile(t, filepath.Join(root, "kube/kustomization.yaml"))
-	if err := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), len(b)).Decode(&agg); err != nil {
-		t.Fatalf("decode aggregator kustomization.yaml: %v", err)
-	}
-	if len(agg.Resources) == 0 {
-		t.Fatal("aggregator declares no resources")
-	}
-	for _, piece := range agg.Resources {
-		entries, err := os.ReadDir(filepath.Join(root, "kube", piece))
-		if err != nil {
-			t.Errorf("read piece %q: %v", piece, err)
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() || e.Name() == "kustomization.yaml" || filepath.Ext(e.Name()) != ".yaml" {
-				continue
-			}
-			rel := filepath.Join("kube", piece, e.Name())
-			data := readFile(t, filepath.Join(root, rel))
-			decodeKube(t, data) // strict-decodes; fatals on any bad object
-			real := 0
-			for _, d := range splitDocs(t, data) {
-				if !isCommentOnly(d) {
-					real++
-				}
-			}
-			if real == 0 {
-				t.Errorf("%s declares no resource documents (all comment-only?)", rel)
+	for _, piece := range aggregatorResources(t, root) {
+		pieceKust := filepath.Join(root, "kube", piece, "kustomization.yaml")
+		for _, ref := range kustomizeResources(t, pieceKust) {
+			rel := filepath.Join("kube", piece, ref)
+			_, realDocs := decodeKube(t, readFile(t, filepath.Join(root, rel)))
+			if realDocs == 0 {
+				t.Errorf("%s declares no resource documents", rel)
 			}
 		}
 	}
