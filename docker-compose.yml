@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  # --------------------------------------------------------
+  # THE CORE DAEMON (Agnostic backend, pure static binary)
+  # --------------------------------------------------------
+  delightd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # FLEET STANDARD: Bind the container's execution user to the host engineer's ID.
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ~/work:/work:rw
+      - ~/etc/delightd:/etc/delightd:ro
+      - ~/var:/var:rw
+    ports:
+      - "127.0.0.1:8088:8088"
+    environment:
+      # The four roots, mapped onto this container's mounts (see volumes above):
+      #   MONITOR_ROOT /work  -- the read-only ~/work bind: the git-state source.
+      #   DAEMON_ROOT  /var   -- the ~/var:/var write mount: delightd's state tree.
+      #   BACKUPS_ROOT /var/backups -- backup destination on the /var write mount;
+      #     daemon writes archives here directly (no appended "/backups"). Set
+      #     explicitly rather than relying on the ${DAEMON_ROOT}/backups default so
+      #     it is visible in the deployment. Resolves to ~/var/backups on the host.
+      #   CONFIG_ROOT  /etc/delightd -- the read-only ~/etc/delightd config mount.
+      - DELIGHT_MONITOR_ROOT=/work
+      - DELIGHT_DAEMON_ROOT=/var
+      - DELIGHT_BACKUPS_ROOT=/var/backups
+      - DELIGHT_CONFIG_ROOT=/etc/delightd
+      - DELIGHT_EXPORTS_REGISTRY=/etc/delightd/delight-registry.yaml
+      - DELIGHT_EXPORTS_BIN=/var/bin
+      - DELIGHT_EXPORTS_STATE=/var/runtime/delightd/exports
+      - DELIGHT_EXPORTS_ARCHIVE=/var/archive/delightd/exports
+    command: ["--immediate"]
+    restart: unless-stopped
+    # Dynamic labeling for Traefik discovery
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.delightd.rule=Host(`delightd.local`)"
+      - "traefik.http.services.delightd.loadbalancer.server.port=8088"
+    networks:
+      - dev-fleet
+
+  # --------------------------------------------------------
+  # TRAEFIK PROFILE (Dynamic Reverse Proxy + Endpoint Registry)
+  # --------------------------------------------------------
+  traefik:
+    image: traefik:v2.10
+    profiles: ["traefik"]
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:8081:8080" # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+networks:
+  dev-fleet:
+    external: true
