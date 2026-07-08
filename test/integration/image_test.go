@@ -19,6 +19,8 @@ package integration
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,7 +67,11 @@ func TestContainerImageComesUp(t *testing.T) {
 	initFakeRepo(t, filepath.Join(monitorRoot, "fake-clean"), false)
 	initFakeRepo(t, filepath.Join(monitorRoot, "fake-dirty"), true)
 
-	cfg := `system:
+	// A mocked Ollama backend the containerized daemon must discover. Bound to 0.0.0.0
+	// so the container reaches it via host.docker.internal (mapped to host-gateway on
+	// the run below).
+	mockPort, mockModel := startMockOllama(t)
+	cfg := fmt.Sprintf(`system:
   monitor_root: /work
   daemon_root: /var
   backups_root: /var/backups
@@ -74,6 +80,11 @@ func TestContainerImageComesUp(t *testing.T) {
     control_port: 8088
   agent_skills:
     enabled: false
+  llm_discovery:
+    providers:
+      - name: "mock"
+        type: "ollama"
+        url: "http://host.docker.internal:%d"
 projects:
   - name: "fake-clean"
     path: /work/fake-clean
@@ -88,7 +99,7 @@ projects:
     essential: false
     backup:
       check_interval: "1s"
-`
+`, mockPort)
 	if err := os.WriteFile(filepath.Join(configRoot, "delight.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatalf("writing synthetic delight.yaml: %v", err)
 	}
@@ -100,6 +111,7 @@ projects:
 	_ = exec.Command("docker", "rm", "-f", name).Run()
 	port := freePort(t)
 	run := exec.Command("docker", "run", "-d", "--name", name,
+		"--add-host", "host.docker.internal:host-gateway", // so discovery can reach the mock backend
 		"-e", "DELIGHT_MONITOR_ROOT=/work",
 		"-e", "DELIGHT_DAEMON_ROOT=/var",
 		"-e", "DELIGHT_BACKUPS_ROOT=/var/backups",
@@ -121,7 +133,8 @@ projects:
 	verifyControlSurface(t, base, surfaceExpect{
 		cleanPath:        "/work/fake-clean",
 		dirtyPath:        "/work/fake-dirty",
-		kubectlReachable: false, // no kubectl in scratch until client-go lands
+		kubectlReachable: false,     // no kubectl in scratch until client-go lands
+		wantModel:        mockModel, // /discovery/llms must report the mocked backend
 	})
 	if t.Failed() {
 		t.Logf("container logs:\n%s", containerLogs(name))
@@ -179,6 +192,30 @@ func assertBakedConfig(t *testing.T, tag, sha string) {
 func containerLogs(name string) string {
 	out, _ := exec.Command("docker", "logs", name).CombinedOutput()
 	return string(out)
+}
+
+// startMockOllama stands up a minimal Ollama-compatible backend (just /api/tags) on
+// 0.0.0.0 so the container can reach it via host.docker.internal. Returns the port and
+// the single model it advertises. This is the "mock out the models" backend the
+// containerized daemon's LLM discovery must find.
+func startMockOllama(t *testing.T) (int, string) {
+	t.Helper()
+	const model = "mock-model:latest"
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen for mock ollama: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"models":[{"name":%q}]}`, model)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().(*net.TCPAddr).Port, model
 }
 
 // hostSharedTempDir makes a temp dir under $HOME, which colima shares with its VM;

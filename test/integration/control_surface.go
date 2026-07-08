@@ -29,6 +29,10 @@ type surfaceExpect struct {
 	// cluster is in reach (bare binary with a kubeconfig), false in the scratch
 	// container (no kubectl until client-go). roots_readable is asserted green always.
 	kubectlReachable bool
+	// wantModel, when set, is a model name a mocked LLM backend serves and delightd is
+	// configured to discover -- /discovery/llms must report it. Empty skips the model
+	// assertion (only status is checked).
+	wantModel string
 }
 
 // verifyControlSurface drives every route in docs/api.md against base and asserts each
@@ -86,12 +90,32 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 	})
 
 	t.Run("GET /discovery/llms", func(t *testing.T) {
+		// The handler probes the configured LLM providers live on each request, so with a
+		// mocked backend configured, discovery must report its model.
 		var r struct {
-			Status string `json:"status"`
+			Status  string `json:"status"`
+			Sources []struct {
+				Provider string   `json:"provider"`
+				Models   []string `json:"models"`
+				Healthy  bool     `json:"healthy"`
+			} `json:"sources"`
 		}
 		mustGetJSON(t, base+"/discovery/llms", http.StatusOK, &r)
 		if r.Status != "ok" {
 			t.Errorf("status = %q, want ok", r.Status)
+		}
+		if exp.wantModel != "" {
+			found := false
+			for _, s := range r.Sources {
+				for _, m := range s.Models {
+					if m == exp.wantModel {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Errorf("/discovery/llms did not report mocked model %q: %+v", exp.wantModel, r.Sources)
+			}
 		}
 	})
 
