@@ -129,6 +129,38 @@ func TestRootEnvOverrides(t *testing.T) {
 	}
 }
 
+// TestConfigFileFoundViaConfigRoot verifies the config file is located through
+// DELIGHT_CONFIG_ROOT, not only $HOME/etc/delightd or the cwd. This is the containerized
+// daemon's case: it runs under a numeric --user with no $HOME, so without a CONFIG_ROOT
+// search path it could never find its config file. Regression guard for that fix.
+func TestConfigFileFoundViaConfigRoot(t *testing.T) {
+	// $HOME points nowhere useful and the cwd is empty, so the file is findable ONLY via
+	// DELIGHT_CONFIG_ROOT.
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "no-such-home"))
+	empty := t.TempDir()
+	origWD, _ := os.Getwd()
+	if err := os.Chdir(empty); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWD)
+
+	cfgDir := t.TempDir()
+	body := "system:\n  daemon:\n    control_port: 8088\nprojects:\n  - name: \"p1\"\n    path: /work/p1\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "delight.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DELIGHT_CONFIG_ROOT", cfgDir)
+
+	viper.Reset()
+	cfg, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Projects) != 1 || cfg.Projects[0].Name != "p1" {
+		t.Fatalf("config not read from DELIGHT_CONFIG_ROOT: projects = %+v", cfg.Projects)
+	}
+}
+
 // TestDefaultConfigBackupsRoot verifies the shipped delight.yaml leaves
 // backups_root unset and that it derives to a "backups" directory under
 // daemon_root (~/var) with no doubled segment.
