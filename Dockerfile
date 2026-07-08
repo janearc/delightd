@@ -20,8 +20,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Generate the protobuf bindings (gen/ is gitignored) before compiling.
-RUN buf generate
+# Generate the Go protobuf bindings (gen/go is gitignored) before compiling. Use the
+# Go-only template: the full buf.gen.yaml also runs protoc-gen-rust-serde for the
+# committed gen/rust crate, whose plugin is not installed here and whose output the Go
+# binary never imports. The image regenerates only what it compiles.
+RUN buf generate --template buf.gen.go.yaml
 
 # Build a purely static binary
 # CGO_ENABLED=0 ensures no dynamic linking to C libraries (glibc/musl)
