@@ -32,11 +32,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o delightd ./cmd/de
 # running orchestrator does is a rebuild, never a stray local edit. The stamp is legible
 # from inside (readlink /etc/delightd/kube -> kube-<sha>), so drift against the on-disk
 # source is checkable. GIT_SHA is passed by the build wrapper (git rev-parse --short HEAD,
-# plus a -dirty suffix on an unclean tree) and defaults to "unknown" for a raw build. The
-# tree -- symlink included -- is assembled here because the scratch runtime stage has no
-# shell to run ln/mkdir; a relative symlink survives the COPY into scratch.
-ARG GIT_SHA=unknown
-RUN mkdir -p /out/etc/delightd/kube-${GIT_SHA} \
+# plus a -dirty suffix on an unclean tree). It is REQUIRED and has no default: a build that
+# forgets it fails here rather than baking a lying "kube-" stamp -- an unstamped orchestrator
+# image is worse than a failed build. The tree -- symlink included -- is assembled here
+# because the scratch runtime stage has no shell to run ln/mkdir; a relative symlink survives
+# the COPY into scratch.
+ARG GIT_SHA
+RUN test -n "$GIT_SHA" || { echo "ERROR: GIT_SHA build-arg is required (--build-arg GIT_SHA=\$(git rev-parse --short HEAD))" >&2; exit 1; } \
+ && mkdir -p /out/etc/delightd/kube-${GIT_SHA} \
  && cp meubilair.yaml /out/etc/delightd/kube-${GIT_SHA}/meubilair.yaml \
  && cp -r kube /out/etc/delightd/kube-${GIT_SHA}/kube \
  && ln -s kube-${GIT_SHA} /out/etc/delightd/kube \
