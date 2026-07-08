@@ -72,7 +72,7 @@ projects:
 | `projects[].backup.exclude` | `[]string` | extra paths/names kept out of the tar |
 
 > Port note. The committed `delight.yaml` and `main.go`'s fallback both resolve
-> to `8088` (`config.DefaultControlPort`); compose and kube agree. Configure
+> to `8088` (`config.DefaultControlPort`); the kube manifest agrees. Configure
 > `8088`.
 
 ## Environment variables
@@ -182,9 +182,10 @@ split roots remove both problems.)
   writes under `/var` stay host-owned, never root.
 - **RBAC.** None. delightd does not call the Kubernetes API (no client-go); do
   not grant it a ServiceAccount role.
-- **Image.** Locally built `delightd-delightd:latest`, imported into k3d by the
-  primary agent (`k3d image import`). It is not a pinned version tag yet — flag
-  for a real tag before any fleet rollout.
+- **Image.** `delightd-delightd:latest` — the name this manifest deploys. The image
+  build is not on main right now: delightd currently runs as the host daemon (see
+  Build below), and containerization is being brought up separately. Do not expect to
+  build this image from main today.
 
 ## Build
 
