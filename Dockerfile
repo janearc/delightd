@@ -1,5 +1,10 @@
 # Stage 1: Build the static binary
-FROM golang:1.26-alpine AS builder
+# Pinned to a Go patch >= 1.26.5: 1.26.4 and earlier carry GO-2026-5856 (an Encrypted
+# Client Hello privacy leak in crypto/tls), which govulncheck finds REACHABLE from the
+# daemon's TLS paths. Pinning the patch here fixes it for the shipped binary; the local
+# dev toolchain bump is tracked separately (sprints). Bump deliberately, like the other
+# pins in this stage.
+FROM golang:1.26.5-alpine AS builder
 
 # Ensure we have git to pull module dependencies if needed
 RUN apk add --no-cache git
