@@ -27,6 +27,21 @@ RUN buf generate
 # CGO_ENABLED=0 ensures no dynamic linking to C libraries (glibc/musl)
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o delightd ./cmd/delightd
 
+# Bake delightd's view of the kube universe into a commit-stamped tree so the running
+# container is pinned to the image, not to the mutable host filesystem: changing what a
+# running orchestrator does is a rebuild, never a stray local edit. The stamp is legible
+# from inside (readlink /etc/delightd/kube -> kube-<sha>), so drift against the on-disk
+# source is checkable. GIT_SHA is passed by the build wrapper (git rev-parse --short HEAD,
+# plus a -dirty suffix on an unclean tree) and defaults to "unknown" for a raw build. The
+# tree -- symlink included -- is assembled here because the scratch runtime stage has no
+# shell to run ln/mkdir; a relative symlink survives the COPY into scratch.
+ARG GIT_SHA=unknown
+RUN mkdir -p /out/etc/delightd/kube-${GIT_SHA} \
+ && cp meubilair.yaml /out/etc/delightd/kube-${GIT_SHA}/meubilair.yaml \
+ && cp -r kube /out/etc/delightd/kube-${GIT_SHA}/kube \
+ && ln -s kube-${GIT_SHA} /out/etc/delightd/kube \
+ && cp delight.yaml /out/etc/delightd/delight.yaml
+
 # Stage 2: The microscopic runtime container
 # 'scratch' is a literally empty filesystem. 0 bytes. Maximum security.
 FROM scratch
@@ -34,8 +49,13 @@ FROM scratch
 # Copy the statically linked binary from the builder stage
 COPY --from=builder /src/delightd /usr/local/bin/delightd
 
-# Expose the daemon's internal control port
-EXPOSE 8080
+# delightd's baked config: the commit-stamped kube universe (symlink included) plus the
+# roster. Read-only by virtue of the image; the host filesystem does not shadow it once
+# the runtime stops mounting ~/etc over /etc/delightd (compose change, follow-up diff).
+COPY --from=builder /out/etc/delightd /etc/delightd
+
+# Expose the daemon's control port (matches config.DefaultControlPort, compose, and kube).
+EXPOSE 8088
 
 # Execute the binary
 ENTRYPOINT ["/usr/local/bin/delightd"]
