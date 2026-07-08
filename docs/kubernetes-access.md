@@ -67,11 +67,10 @@ client-go") was descriptive of that state, not a constraint; this reverses it.
     lands, rather than more shelling. **#38** (model descriptor vs `model.v1`) rides in
     with #34.
 - **Forced / obsoleted:**
-  - **#52** -- vendor external protos by git submodule, not `cp -R ../sibling`. An
-    in-container build has no `../big-little-mesh` to copy from, so containerizing the
-    build makes the relative-fs-copy mechanism unworkable and forces the submodule (or
-    registry) sourcing #52 asks for. (Confirm the intended mechanism -- submodule vs
-    buf registry.)
+  - **#52** -- vendor external protos from a **buf registry**, not `cp -R ../sibling`.
+    An in-container build has no `../big-little-mesh` to copy from, so containerizing
+    the build makes the relative-fs-copy mechanism unworkable; the contracts come from
+    the buf registry instead (operator's call: buf registry, not a git submodule).
 - **Mentions / eases:**
   - **#87** -- workstation layout (`~/mesh`). Config-by-mount instead of `$HOME`-rooted
     paths eases the relayout; it does not resolve it (87 is the host move itself).

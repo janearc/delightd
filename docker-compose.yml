@@ -11,9 +11,14 @@ services:
     # FLEET STANDARD: Bind the container's execution user to the host engineer's ID.
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
-      - ~/work:/work:rw
-      - ~/etc/delightd:/etc/delightd:ro
-      - ~/var:/var:rw
+      # Host source paths are passed in, never hardcoded here. The four roots are
+      # separate host locations (~/etc is not under ~/work), so each is its own
+      # variable; when the workstation layout moves (#87) you set these (an .env or the
+      # wrapper), not this file. The in-container targets are fixed -- the container's
+      # own view of its roots. /work is read-only: delightd watches it, never writes it.
+      - ${DELIGHT_MONITOR_ROOT_HOST:?host path for /work}:/work:ro
+      - ${DELIGHT_CONFIG_ROOT_HOST:?host path for /etc/delightd}:/etc/delightd:ro
+      - ${DELIGHT_DAEMON_ROOT_HOST:?host path for /var}:/var:rw
     ports:
       - "127.0.0.1:8088:8088"
     environment:
