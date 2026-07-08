@@ -6,11 +6,15 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -67,6 +71,11 @@ type Server struct {
 	// discover is the local-LLM discovery source, injectable so handlers can be
 	// tested without probing the network.
 	discover func(context.Context, *config.DelightConfig) []discovery.ModelSource
+
+	// clusterReady probes whether kubectl can reach the cluster delightd operates,
+	// for the GET /readyz readiness check. Injectable so readiness can be tested
+	// without a live apiserver; New defaults it to a real kubectl probe.
+	clusterReady func(context.Context) error
 }
 
 // eventPublisher is the subset of Big Little Mesh's emit.Publisher that handleRegister uses
@@ -91,6 +100,7 @@ func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports 
 		subjects:             schemaregistry.New(cfg.System.Kafka.SchemaRegistryURL),
 		guaranteeHealthCheck: guaranteeHealthCheck,
 		discover:             discovery.DiscoverLocalLLMs,
+		clusterReady:         kubectlReady,
 	}
 }
 
@@ -223,6 +233,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)                      // liveness + active project count
+	mux.HandleFunc("GET /readyz", s.handleReadyz)                      // provable readiness: roots mounted + kubectl reachable
 	mux.HandleFunc("GET /metrics", metrics.Handler())                  // prometheus exposition
 	mux.HandleFunc("GET /discovery/llms", s.handleDiscovery)           // currently discoverable local LLM endpoints
 	mux.HandleFunc("GET /projects/{name}/state", s.handleProjectState) // backup state-machine diagnostics
@@ -281,6 +292,88 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Degraded:       s.cfg.Degraded,
 		Warnings:       s.cfg.LoadWarnings,
 	})
+}
+
+// readinessCheck is one named probe in the /readyz body: whether it passed and,
+// when it did not, why. delightd is ready only when every check is ok.
+type readinessCheck struct {
+	Name  string `json:"name"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// readinessResponse is the GET /readyz body. Ready is the AND of every check.
+type readinessResponse struct {
+	Ready  bool             `json:"ready"`
+	Checks []readinessCheck `json:"checks"`
+}
+
+// handleReadyz is the provable readiness probe: green only when delightd can
+// actually do its job -- its operating roots are mounted and readable, and kubectl
+// reaches the cluster it operates. This is distinct from GET /health (liveness: the
+// process is up and config loaded). A failing check returns 503 with the reason
+// named, never a bare "not ready", so one HTTP answer serves a human via the wrapper,
+// hm over the wire, and any service alike.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	checks := []readinessCheck{
+		s.checkRootsReadable(),
+		s.checkClusterReady(r.Context()),
+	}
+	ready := true
+	for _, c := range checks {
+		if !c.OK {
+			ready = false
+		}
+	}
+	code := http.StatusOK
+	if !ready {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, readinessResponse{Ready: ready, Checks: checks})
+}
+
+// checkRootsReadable verifies delightd's operating roots exist and are readable. In
+// a container these are the volume mounts, so a mount that failed to attach surfaces
+// here as a red check instead of as silent misbehaviour downstream.
+func (s *Server) checkRootsReadable() readinessCheck {
+	// deterministic order so the first reported failure is stable across requests.
+	roots := []struct{ name, path string }{
+		{"monitor_root", s.cfg.System.MonitorRoot},
+		{"daemon_root", s.cfg.System.DaemonRoot},
+		{"config_root", s.cfg.System.ConfigRoot},
+	}
+	for _, root := range roots {
+		if root.path == "" {
+			return readinessCheck{Name: "roots_readable", OK: false, Error: root.name + " is unset"}
+		}
+		if _, err := os.ReadDir(root.path); err != nil {
+			return readinessCheck{Name: "roots_readable", OK: false, Error: fmt.Sprintf("%s (%s): %v", root.name, root.path, err)}
+		}
+	}
+	return readinessCheck{Name: "roots_readable", OK: true}
+}
+
+// checkClusterReady probes kubectl reachability. delightd operates the cluster, so a
+// delightd that cannot reach kubectl is not ready even though its process is up.
+func (s *Server) checkClusterReady(ctx context.Context) readinessCheck {
+	if err := s.clusterReady(ctx); err != nil {
+		return readinessCheck{Name: "kubectl_reachable", OK: false, Error: err.Error()}
+	}
+	return readinessCheck{Name: "kubectl_reachable", OK: true}
+}
+
+// kubectlReady is the production cluster probe: it asks the apiserver's own readyz
+// endpoint through kubectl, bounded by a short timeout so a dead apiserver fails the
+// check fast instead of hanging the request. KUBECONFIG resolution is left to
+// kubectl, matching furnish's runner. CombinedOutput is used deliberately here --
+// the output is folded into the error for diagnostics, never parsed.
+func kubectlReady(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "kubectl", "get", "--raw=/readyz").CombinedOutput(); err != nil {
+		return fmt.Errorf("kubectl get --raw=/readyz: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {

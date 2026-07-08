@@ -7,6 +7,7 @@ surface registered in `Mux()`.
 | Method | Path | Handler purpose |
 |--------|------|-----------------|
 | GET | `/health` | liveness + active project count |
+| GET | `/readyz` | provable readiness: roots mounted + kubectl reachable |
 | GET | `/metrics` | prometheus exposition |
 | GET | `/discovery/llms` | currently discoverable local LLM endpoints |
 | GET | `/projects` | authoritative roster (name/path/essential/deploy/remote_url) for all managed projects |
@@ -70,7 +71,31 @@ Liveness probe and a count of managed projects.
 | `active_projects` | number of projects in the loaded config |
 | `dry_run` | whether the daemon was started with `--dry-run` |
 
-Status: always `200`. This is the readiness/liveness target in the kube probes.
+Status: always `200`. This is the **liveness** target in the kube probes -- it says
+the process is up and config loaded. For "can it actually do its job," see `/readyz`.
+
+## GET /readyz
+
+Readiness probe. Distinct from `/health`: liveness asks whether the process is up
+(restart it if not); readiness asks whether delightd can actually do its work right
+now (stop routing to it if not, but do not restart -- a failed mount or an
+unreachable apiserver is not fixed by a restart). Green only when every check passes.
+
+```json
+{ "ready": true, "checks": [
+  { "name": "roots_readable", "ok": true },
+  { "name": "kubectl_reachable", "ok": true }
+] }
+```
+
+| Check | Meaning |
+|-------|---------|
+| `roots_readable` | the operating roots (monitor / daemon / config) exist and are readable. In a container these are the volume mounts, so a mount that failed to attach shows up red here rather than as silent misbehaviour downstream. |
+| `kubectl_reachable` | kubectl reaches the apiserver (`get --raw=/readyz`, 3s timeout). delightd operates the cluster, so a delightd that cannot reach kubectl is not ready. |
+
+Status: `200` when ready; `503` when any check fails, with the failing check's `ok`
+set false and its `error` naming why -- never a bare "not ready". One HTTP answer
+serves a human (via the wrapper's `status`), hm over the wire, and any service.
 
 ## GET /metrics
 
