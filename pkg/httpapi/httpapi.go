@@ -76,6 +76,14 @@ type Server struct {
 	// operates, for the GET /readyz readiness check. Injectable so readiness can be
 	// tested without a live apiserver; New defaults it to a real client-go probe.
 	clusterReady func(context.Context) error
+
+	// furnishClient provides the client-go handle the /furnish routes use, built lazily
+	// from the mounted kubeconfig and memoized on success (never on failure) so the
+	// daemon starts without one and a late-mounted kubeconfig is picked up. nil until
+	// UseFurnish; the routes fail loud 503 when it is nil or returns an error.
+	// furnishKubeDir is the baked manifest root (a kube/ aggregator) the routes read.
+	furnishClient  func() (*kube.Client, error)
+	furnishKubeDir string
 }
 
 // eventPublisher is the subset of Big Little Mesh's emit.Publisher that handleRegister uses
@@ -111,6 +119,15 @@ func (s *Server) UseEvents(pub eventPublisher, topic, notRegisteredSchema string
 	s.events = pub
 	s.eventsTopic = topic
 	s.notRegisteredSchema = notRegisteredSchema
+}
+
+// UseFurnish wires the /furnish surface: the manifest root the routes read pieces from
+// (the baked kube/ aggregator), and a lazy provider of the client-go handle furnish
+// converges through. Called by main after config is loaded; without it the /furnish
+// routes fail loud 503.
+func (s *Server) UseFurnish(kubeDir string, client func() (*kube.Client, error)) {
+	s.furnishKubeDir = kubeDir
+	s.furnishClient = client
 }
 
 // DrainEvents blocks until the detached NotRegistered emit goroutines have finished. It is
@@ -262,6 +279,17 @@ func (s *Server) Mux() *http.ServeMux {
 	// exports engine's view of generated shims. Unknown services return 200
 	// with is_known_to_daemon=false rather than 404; logic lives in pkg/introspect.
 	mux.HandleFunc("GET /projects/{name}/introspect", introspect.Handler(s.machines, s.exports)) // is_known / backing_up / has_fragment
+
+	// The furnish surface: delightd is the operator, so converging the meubilair pieces is
+	// an operator API, not a host-run binary. Mutations are localhost-only (the control
+	// port binds 127.0.0.1); what they converge to is the baked, commit-stamped manifest
+	// tree, honoring the mutation-is-high-friction principle. health is provable over the
+	// wire like /readyz: 200 all-GREEN, 503 if any piece is RED or INDETERMINATE.
+	mux.HandleFunc("GET /furnish/pieces", s.handleFurnishPieces)         // declared pieces
+	mux.HandleFunc("GET /furnish/health", s.handleFurnishHealth)         // ladder for all pieces
+	mux.HandleFunc("GET /furnish/health/{piece}", s.handleFurnishHealth) // ladder for one piece
+	mux.HandleFunc("POST /furnish/{piece}/up", s.handleFurnishUp)        // server-side apply
+	mux.HandleFunc("POST /furnish/{piece}/down", s.handleFurnishDown)    // delete (absent is success)
 
 	if s.mcpEnabled() {
 		mux.HandleFunc("POST /mcp", s.skills.HandleMCP) // agent skill aggregator (MCP)

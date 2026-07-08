@@ -30,6 +30,7 @@ import (
 	"delightd/pkg/events"
 	"delightd/pkg/exports"
 	"delightd/pkg/httpapi"
+	"delightd/pkg/kube"
 	"delightd/pkg/metrics"
 	"delightd/pkg/registry"
 	"delightd/pkg/skills"
@@ -373,6 +374,12 @@ func runDaemon(dryRun, immediate bool) error {
 	if emitPub != nil {
 		api.UseEvents(emitPub, cfg.System.Kafka.Topic, delightproto.NotRegisteredSchema)
 	}
+	// The /furnish operator surface: delightd converges the meubilair pieces in-process
+	// through one lazily-built, shared client-go handle (no client per request, no host
+	// binary). The manifest root is the baked kube/ aggregator under ConfigRoot; the
+	// client resolves the mounted kubeconfig on first use, so a missing one fails the
+	// routes loud (503) rather than the daemon at startup.
+	api.UseFurnish(filepath.Join(cfg.System.ConfigRoot, "kube", "kube"), kube.LazyClient())
 	mux := api.Mux()
 
 	// Lease lifecycle (additive): a registration is held by a lease the frood's heartbeat

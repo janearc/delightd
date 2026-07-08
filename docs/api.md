@@ -523,6 +523,49 @@ A non-POST request to `/mcp` returns HTTP `405`. Tool discovery, namespacing,
 and the generated `delight` CLI are described in
 [agent-interface.md](agent-interface.md).
 
+## GET /furnish/pieces
+
+The declared meubilair pieces — the no-code kube deployments delightd converges,
+one directory per piece under the baked `kube/` aggregator. A directory is a piece
+only if the aggregator names it.
+
+```json
+{ "command": "furnish.list", "kube": "/etc/delightd/kube/kube", "pieces": ["delightd", "surrealdb"] }
+```
+
+## GET /furnish/health, GET /furnish/health/{piece}
+
+The health ladder for every piece, or one named piece. Each declared object is
+`GREEN` (observed ready, or present for non-workload kinds), `RED` (observed
+unhealthy, or declared-but-absent), or `INDETERMINATE` (could not be read at all —
+transport, RBAC, timeout). One unreadable object does not blind the rest of the
+piece. Provable over the wire like `/readyz`: **`200`** when every object is
+`GREEN`, **`503`** when any is `RED` or `INDETERMINATE` (unknown is never presented
+as healthy), so hm or a monitor can gate on the status code alone.
+
+```json
+{ "command": "furnish.health", "healthy": true,
+  "results": { "delightd": [ { "kind": "Deployment", "name": "delightd", "state": "GREEN", "detail": "1/1 ready" } ] } }
+```
+
+## POST /furnish/{piece}/up, POST /furnish/{piece}/down
+
+Converge one piece onto its manifests (server-side apply, idempotent) or remove its
+objects (an already-absent object is success). Mutations are localhost-only — the
+control port binds `127.0.0.1` — and what they converge to is the baked,
+commit-stamped manifest tree, not a mutable input: triggering convergence is
+low-friction, changing what gets converged is a rebuild. An undeclared piece is
+`404`; if delightd cannot reach a kubeconfig the route is `503` (it operates the
+cluster, so it fails loud rather than pretending).
+
+```json
+{ "command": "furnish.up", "piece": "surrealdb", "applied": true }
+```
+
+The furnish surface is delightd's operator action exposed as an API, so the host
+wrapper and any agent drive convergence the same way they read any other route —
+there is no separate on-disk furnish binary.
+
 ---
 
 See also: [availability.md](availability.md) (why `/git` is computed live and

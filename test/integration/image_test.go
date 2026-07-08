@@ -1,11 +1,12 @@
 //go:build integration
 
 // This is the image half of delightd's end-to-end suite: it builds the real container
-// image, runs it against a synthetic config, and drives the *full documented control
-// surface* (docs/api.md, via verifyControlSurface) against the containerized daemon --
-// the same drive daemon_test.go runs against the bare binary. Containerization
-// fundamentally changes how delightd is deployed, so the container earns 100% of the
-// API, not a /health smoke check.
+// image, runs it against a synthetic config, and drives the documented control and query
+// surface (docs/api.md, via verifyControlSurface) against the containerized daemon -- the
+// same drive daemon_test.go runs against the bare binary. Containerization fundamentally
+// changes how delightd is deployed, so the container earns the API surface, not a /health
+// smoke check. (The /furnish operator routes have their own handler tests and are driven
+// end-to-end against the real container by the host-wrapper integration test.)
 //
 // It also proves the config bake resolves inside the image (docker cp + readlink),
 // which the mounted synthetic config deliberately shadows for the API drive.

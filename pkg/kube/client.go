@@ -9,6 +9,7 @@ package kube
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
@@ -49,6 +50,31 @@ func FromKubeconfig(path string) (*Client, error) {
 		Dynamic: dyn,
 		Mapper:  restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc)),
 	}, nil
+}
+
+// LazyClient returns a provider that builds a *Client on first call from the standard
+// kubeconfig rules and memoizes the success -- never a failure. A daemon can therefore
+// start with no kubeconfig present and pick up a late-mounted one on a later call, while a
+// success is built once and shared (delightd holds a single cluster handle, not one per
+// request). Safe for concurrent use.
+func LazyClient() func() (*Client, error) {
+	var (
+		mu sync.Mutex
+		c  *Client
+	)
+	return func() (*Client, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if c != nil {
+			return c, nil
+		}
+		built, err := FromKubeconfig("")
+		if err != nil {
+			return nil, err // not memoized: a kubeconfig mounted later still resolves
+		}
+		c = built
+		return c, nil
+	}
 }
 
 // RESTConfig loads a *rest.Config from a kubeconfig using clientcmd's standard rules.

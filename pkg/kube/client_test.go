@@ -64,6 +64,29 @@ func TestFromKubeconfig_BuildsClientWithoutNetwork(t *testing.T) {
 	}
 }
 
+func TestLazyClient_MemoizesSuccessNotFailure(t *testing.T) {
+	// A missing kubeconfig errors and is NOT cached -- a kubeconfig mounted later resolves.
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
+	provide := LazyClient()
+	if _, err := provide(); err == nil {
+		t.Fatal("provider with a missing kubeconfig: want error, got nil")
+	}
+	// Once a valid kubeconfig is present, the provider resolves and memoizes: repeated
+	// calls return the same client.
+	t.Setenv("KUBECONFIG", writeKubeconfig(t))
+	c1, err := provide()
+	if err != nil {
+		t.Fatalf("provider after a good kubeconfig appears: %v", err)
+	}
+	c2, err := provide()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1 != c2 {
+		t.Error("provider should memoize the success (same *Client on repeat calls)")
+	}
+}
+
 func TestRESTConfig_MissingKubeconfig(t *testing.T) {
 	// An explicit path that does not exist is an error, not a silent empty config -- and
 	// the error names the path it tried, so the failure points at the fix.
