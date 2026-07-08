@@ -59,15 +59,29 @@ type kubeItem struct {
 	// client-go reader on a NotFound (never from kubectl JSON); pieceHealth reports it
 	// RED rather than GREEN-by-existence, so a declared-but-undeployed piece is honest.
 	absent bool
+	// indeterminate marks an object whose live state could not be read at all: a
+	// transport failure, an RBAC denial, a timeout, or a kind the RESTMapper cannot
+	// resolve. It is distinct from absent (which is an observation -- the object is
+	// genuinely not there) and from RED (an observation that it is unhealthy). We did
+	// not observe this object, so pieceHealth reports it INDETERMINATE: never GREEN (we
+	// do not present unknown as healthy) and never RED (we did not see it fail). One
+	// unreadable object no longer aborts the whole read -- the rest of the piece is
+	// still reported. reason carries the cause for the operator.
+	indeterminate bool
+	reason        string
 }
 
 // pieceHealth walks one piece's rendered objects and reports a ladder:
 // a Deployment or StatefulSet is GREEN when readyReplicas meets spec.replicas
 // (unset means 1, kube's own default), RED otherwise; any other kind that
-// exists is GREEN by existence. The piece is healthy only if nothing is RED.
-// StatefulSet matters here because the relocated bus/store pieces (kafka,
-// zookeeper, elasticsearch) are StatefulSets: without this a CrashLooping
-// kafka-0 would report GREEN by mere existence and furnish health would lie.
+// exists is GREEN by existence. An object we could not read is INDETERMINATE.
+// The piece is healthy only if every object is GREEN -- both RED (observed
+// unhealthy or absent) and INDETERMINATE (unobserved) make it unhealthy, so
+// furnish health exits non-zero, but the two are labelled distinctly so an
+// operator can tell a broken piece from an unreachable one. StatefulSet matters
+// here because the relocated bus/store pieces (kafka, zookeeper, elasticsearch)
+// are StatefulSets: without this a CrashLooping kafka-0 would report GREEN by
+// mere existence and furnish health would lie.
 func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 	healthy := true
 	// results is the per-object ladder rendered into the health JSON.
@@ -76,6 +90,11 @@ func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 		state := "GREEN"
 		detail := "present"
 		switch {
+		case it.indeterminate:
+			// Unread: not GREEN (unknown is not healthy), not RED (not observed to fail).
+			state = "INDETERMINATE"
+			detail = it.reason
+			healthy = false
 		case it.absent:
 			// Declared but not live: RED, never GREEN-by-existence.
 			state = "RED"

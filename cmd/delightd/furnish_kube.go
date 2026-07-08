@@ -140,10 +140,14 @@ func deletePiece(ctx context.Context, c *kube.Client, pieceDir string) error {
 	return nil
 }
 
-// readHealth reads each declared object's live state into a kubeItem. Typed errors carry
-// the taxonomy kubectl's text could not: a declared-but-absent object (NotFound) is a
-// distinct RED state, never GREEN-by-existence; a transport / RBAC / timeout failure is
-// returned as an error -- indeterminate, not "unhealthy".
+// readHealth reads each declared object's live state into a kubeItem. It carries the
+// taxonomy kubectl's text could not: a declared-but-absent object (NotFound) is a
+// distinct RED state, never GREEN-by-existence; an object that could not be read at all
+// (transport / RBAC / timeout / unresolvable kind) is INDETERMINATE, never conflated
+// with unhealthy. One unreadable object does not abort the read -- every declared object
+// gets a state, so a single flaky Get cannot blind the rest of the piece. Only a failure
+// to render the piece itself (buildPiece) is fatal: with no rendered set there is nothing
+// to report against.
 func readHealth(ctx context.Context, c *kube.Client, pieceDir string) ([]kubeItem, error) {
 	objs, err := buildPiece(pieceDir)
 	if err != nil {
@@ -151,31 +155,33 @@ func readHealth(ctx context.Context, c *kube.Client, pieceDir string) ([]kubeIte
 	}
 	items := make([]kubeItem, 0, len(objs))
 	for _, u := range objs {
-		it, err := liveItem(ctx, c, u)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, it)
+		items = append(items, liveItem(ctx, c, u))
 	}
 	return items, nil
 }
 
-// liveItem reads one declared object's live state.
-func liveItem(ctx context.Context, c *kube.Client, u *unstructured.Unstructured) (kubeItem, error) {
-	ri, err := resourceFor(c, u)
-	if err != nil {
-		return kubeItem{}, err
-	}
+// liveItem reads one declared object's live state. It never returns an error: a per-object
+// read failure becomes an INDETERMINATE item carrying the cause, so the caller can keep
+// reading the rest of the piece instead of losing every other object's state to one.
+func liveItem(ctx context.Context, c *kube.Client, u *unstructured.Unstructured) kubeItem {
 	it := kubeItem{Kind: u.GetKind()}
 	it.Metadata.Name = u.GetName()
 
+	ri, err := resourceFor(c, u)
+	if err != nil {
+		it.indeterminate = true
+		it.reason = err.Error()
+		return it
+	}
 	live, err := ri.Get(ctx, u.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		it.absent = true
-		return it, nil
+		return it
 	}
 	if err != nil {
-		return kubeItem{}, fmt.Errorf("furnish: get %s/%s: %w", u.GetKind(), u.GetName(), err)
+		it.indeterminate = true
+		it.reason = fmt.Sprintf("get %s/%s: %v", u.GetKind(), u.GetName(), err)
+		return it
 	}
 	if r, found, _ := unstructured.NestedInt64(live.Object, "spec", "replicas"); found {
 		v := int32(r)
@@ -184,5 +190,5 @@ func liveItem(ctx context.Context, c *kube.Client, u *unstructured.Unstructured)
 	if rr, found, _ := unstructured.NestedInt64(live.Object, "status", "readyReplicas"); found {
 		it.Status.ReadyReplicas = int32(rr)
 	}
-	return it, nil
+	return it
 }

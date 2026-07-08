@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -54,13 +56,37 @@ spec:
 }
 
 func liveDeployment(ready int32) *unstructured.Unstructured {
+	return liveNamedDeployment("delightd", ready)
+}
+
+func liveNamedDeployment(name string, ready int32) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(deploymentGVK)
-	u.SetName("delightd")
+	u.SetName(name)
 	u.SetNamespace("fleet")
 	_ = unstructured.SetNestedField(u.Object, int64(1), "spec", "replicas")
 	_ = unstructured.SetNestedField(u.Object, int64(ready), "status", "readyReplicas")
 	return u
+}
+
+// writeTwoPiece lays down a piece declaring two namespaced Deployments, so a test can
+// fail one object's read and assert the other is still reported.
+func writeTwoPiece(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	dep := func(name string) string {
+		return fmt.Sprintf("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\n  namespace: fleet\nspec:\n  replicas: 1\n", name)
+	}
+	for _, n := range []string{"alpha", "beta"} {
+		if err := os.WriteFile(filepath.Join(dir, n+".yaml"), []byte(dep(n)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"),
+		[]byte("resources:\n  - alpha.yaml\n  - beta.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func fakeClient(objs ...runtime.Object) *kube.Client {
@@ -112,6 +138,69 @@ func TestReadHealth_Absent(t *testing.T) {
 	}
 	if ok, _ := pieceHealth(items); ok {
 		t.Error("absent object should be RED")
+	}
+}
+
+// TestReadHealth_Indeterminate: an object we cannot read (a transport failure here) is
+// INDETERMINATE, not absent and not a hard error, and the piece is not reported healthy
+// -- unknown is never presented as truth. Distinct from RED so the operator sees "could
+// not reach it", not "it is broken".
+func TestReadHealth_Indeterminate(t *testing.T) {
+	dir := writePiece(t)
+	c := fakeClient() // nothing seeded; the reactor turns the Get into a transport error
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("connection refused")
+	})
+
+	items, err := readHealth(context.Background(), c, dir)
+	if err != nil {
+		t.Fatalf("a transport failure must not hard-error the read: %v", err)
+	}
+	if len(items) != 1 || !items[0].indeterminate || items[0].absent {
+		t.Fatalf("transport failure should mark the object indeterminate (not absent): %+v", items)
+	}
+	if !strings.Contains(items[0].reason, "connection refused") {
+		t.Errorf("indeterminate reason should carry the cause: %q", items[0].reason)
+	}
+	ok, ladder := pieceHealth(items)
+	if ok {
+		t.Error("a piece with an unread object must not report healthy (fail loud when degraded)")
+	}
+	if ladder[0]["state"] != "INDETERMINATE" {
+		t.Errorf("state = %v, want INDETERMINATE (distinct from RED)", ladder[0]["state"])
+	}
+}
+
+// TestReadHealth_OneBadObjectDoesNotBlindOthers: one object's read failure leaves the
+// other objects' states intact -- a single flaky Get cannot blind the whole piece.
+func TestReadHealth_OneBadObjectDoesNotBlindOthers(t *testing.T) {
+	dir := writeTwoPiece(t)
+	c := fakeClient(liveNamedDeployment("beta", 1)) // beta is live and ready
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("get", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() == "alpha" {
+			return true, nil, fmt.Errorf("timeout")
+		}
+		return false, nil, nil // beta falls through to the tracker
+	})
+
+	items, err := readHealth(context.Background(), c, dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2 (both objects reported despite one failing)", len(items))
+	}
+	byName := map[string]kubeItem{}
+	for _, it := range items {
+		byName[it.Metadata.Name] = it
+	}
+	if !byName["alpha"].indeterminate {
+		t.Errorf("alpha should be indeterminate: %+v", byName["alpha"])
+	}
+	if byName["beta"].indeterminate || byName["beta"].Status.ReadyReplicas != 1 {
+		t.Errorf("beta should have been read despite alpha failing: %+v", byName["beta"])
 	}
 }
 

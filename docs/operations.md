@@ -136,10 +136,13 @@ through the `furnish` command: `furnish list` names the declared pieces (the
 aggregator's resources list is the declaration — a directory not listed there
 does not exist to furnish), `furnish up <piece>` converges one piece onto its
 manifests, `furnish down <piece>` removes it (absent is success), and
-`furnish health [piece]` walks the ladder and exits non-zero on RED. Output is
-JSON. You drive delightd; you do not hand-run `kubectl` against the cluster —
-though furnish itself does: `kubectl` is a runtime requirement, checked
-fail-loud before any verb touches the cluster.
+`furnish health [piece]` walks the ladder and exits non-zero when any object is
+RED (observed unhealthy, or declared-but-absent) or INDETERMINATE (could not be
+read at all — transport, RBAC, or timeout). The two are labelled distinctly so
+you can tell a broken piece from an unreachable one, and one unreadable object
+does not blind the rest of the piece. Output is JSON. You drive delightd; you do
+not hand-run `kubectl` against the cluster — and neither does furnish: it speaks
+to the apiserver through client-go, so no `kubectl` binary is required.
 
 To check that the manifests build — no cluster, no API server contact — render
 them locally with kustomize:
