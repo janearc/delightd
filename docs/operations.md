@@ -180,8 +180,11 @@ split roots remove both problems.)
   port.
 - **User.** Runs as the host engineer's UID/GID (`1000`) so archives and shims it
   writes under `/var` stay host-owned, never root.
-- **RBAC.** None. delightd does not call the Kubernetes API (no client-go); do
-  not grant it a ServiceAccount role.
+- **API access.** delightd calls the Kubernetes API via client-go — `furnish`
+  converges the meubilair pieces with kustomize + server-side apply and reads their
+  health (see `docs/kubernetes-access.md`). It needs a kubeconfig whose identity can
+  read and apply the fleet's objects; as the host-level operator it uses the operator's
+  kubeconfig, not an in-cluster ServiceAccount.
 - **Image.** `delightd-delightd:latest` — the name this manifest deploys. The image
   build is not on main right now: delightd currently runs as the host daemon (see
   Build below), and containerization is being brought up separately. Do not expect to

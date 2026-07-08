@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
@@ -16,94 +16,172 @@ import (
 	"delightd/pkg/kube"
 )
 
-// healthReader returns the live objects of one piece as kubeItems, so the health verb
-// can judge readiness. Production builds the piece's kustomization and reads each
-// object's live status via client-go; tests inject a fake that returns canned items.
-// This replaces `kubectl get -k <piece> -o json`.
-type healthReader func(ctx context.Context, pieceDir string) ([]kubeItem, error)
+// fieldManager is the server-side-apply owner delightd's furnish stamps on the objects
+// it converges, so re-applies are a merge and drift is reconciled, not a blind replace.
+const fieldManager = "delightd-furnish"
 
-// objRef is one object a piece's kustomization declares: enough to look it up live.
-type objRef struct {
-	gvk       schema.GroupVersionKind
-	name      string
-	namespace string
+// cluster is furnish's handle on the live cluster: converge (apply), remove (delete), and
+// read (health) one piece. It replaces the kubectl subprocess seam. Injectable so the
+// verbs are tested against a fake dynamic client, no cluster required.
+type cluster interface {
+	apply(ctx context.Context, pieceDir string) error
+	remove(ctx context.Context, pieceDir string) error
+	health(ctx context.Context, pieceDir string) ([]kubeItem, error)
+}
+
+// kubeCluster is the production cluster over a client-go client, built lazily on first
+// use so the command tree constructs even with no kubeconfig present.
+type kubeCluster struct {
+	once sync.Once
+	c    *kube.Client
+	err  error
+}
+
+func (k *kubeCluster) client() (*kube.Client, error) {
+	k.once.Do(func() { k.c, k.err = kube.FromKubeconfig("") })
+	return k.c, k.err
+}
+
+func (k *kubeCluster) apply(ctx context.Context, pieceDir string) error {
+	c, err := k.client()
+	if err != nil {
+		return err
+	}
+	return applyPiece(ctx, c, pieceDir)
+}
+
+func (k *kubeCluster) remove(ctx context.Context, pieceDir string) error {
+	c, err := k.client()
+	if err != nil {
+		return err
+	}
+	return deletePiece(ctx, c, pieceDir)
+}
+
+func (k *kubeCluster) health(ctx context.Context, pieceDir string) ([]kubeItem, error) {
+	c, err := k.client()
+	if err != nil {
+		return nil, err
+	}
+	return readHealth(ctx, c, pieceDir)
 }
 
 // buildPiece renders a piece's kustomization in-process (no kubectl, no kustomize
-// binary) and returns the objects it declares. It reads the desired set; the live
-// status comes from the cluster.
-func buildPiece(dir string) ([]objRef, error) {
+// binary) into the objects it declares.
+func buildPiece(dir string) ([]*unstructured.Unstructured, error) {
 	m, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(filesys.MakeFsOnDisk(), dir)
 	if err != nil {
 		return nil, fmt.Errorf("furnish: build %s: %w", dir, err)
 	}
-	refs := make([]objRef, 0, len(m.Resources()))
+	objs := make([]*unstructured.Unstructured, 0, len(m.Resources()))
 	for _, res := range m.Resources() {
-		g := res.GetGvk()
-		refs = append(refs, objRef{
-			gvk:       schema.GroupVersionKind{Group: g.Group, Version: g.Version, Kind: g.Kind},
-			name:      res.GetName(),
-			namespace: res.GetNamespace(),
-		})
-	}
-	return refs, nil
-}
-
-// kubeHealthReader is the production healthReader over a client-go client. Typed errors
-// carry the taxonomy kubectl's text could not: a declared-but-absent object is a
-// distinct state (reported not-ready, never GREEN-by-existence), while a transport /
-// RBAC / timeout failure is returned as an error -- indeterminate, not "unhealthy".
-func kubeHealthReader(c *kube.Client) healthReader {
-	return func(ctx context.Context, pieceDir string) ([]kubeItem, error) {
-		refs, err := buildPiece(pieceDir)
+		obj, err := res.Map()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("furnish: read object in %s: %w", dir, err)
 		}
-		items := make([]kubeItem, 0, len(refs))
-		for _, ref := range refs {
-			it, err := liveItem(ctx, c, ref)
-			if err != nil {
-				return nil, err
-			}
-			items = append(items, it)
-		}
-		return items, nil
+		objs = append(objs, &unstructured.Unstructured{Object: obj})
 	}
+	return objs, nil
 }
 
-// liveItem reads one declared object's live state into a kubeItem.
-func liveItem(ctx context.Context, c *kube.Client, ref objRef) (kubeItem, error) {
-	mapping, err := c.Mapper.RESTMapping(ref.gvk.GroupKind(), ref.gvk.Version)
+// resourceFor resolves an object to its dynamic resource client, namespaced or not per
+// the RESTMapper (a Deployment is namespaced; a ClusterRole is not).
+func resourceFor(c *kube.Client, u *unstructured.Unstructured) (dynamic.ResourceInterface, error) {
+	gvk := u.GroupVersionKind()
+	mapping, err := c.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
-		return kubeItem{}, fmt.Errorf("furnish: resolve %s: %w", ref.gvk.Kind, err)
+		return nil, fmt.Errorf("furnish: resolve %s: %w", gvk.Kind, err)
 	}
-	var ri dynamic.ResourceInterface = c.Dynamic.Resource(mapping.Resource)
 	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-		ns := ref.namespace
+		ns := u.GetNamespace()
 		if ns == "" {
 			ns = metav1.NamespaceDefault
 		}
-		ri = c.Dynamic.Resource(mapping.Resource).Namespace(ns)
+		return c.Dynamic.Resource(mapping.Resource).Namespace(ns), nil
 	}
+	return c.Dynamic.Resource(mapping.Resource), nil
+}
 
-	it := kubeItem{Kind: ref.gvk.Kind}
-	it.Metadata.Name = ref.name
+// applyPiece converges every object a piece declares via server-side apply -- the
+// API-native equivalent of `kubectl apply -k`, idempotent and merge-based.
+func applyPiece(ctx context.Context, c *kube.Client, pieceDir string) error {
+	objs, err := buildPiece(pieceDir)
+	if err != nil {
+		return err
+	}
+	for _, u := range objs {
+		ri, err := resourceFor(c, u)
+		if err != nil {
+			return err
+		}
+		if _, err := ri.Apply(ctx, u.GetName(), u, metav1.ApplyOptions{FieldManager: fieldManager, Force: true}); err != nil {
+			return fmt.Errorf("furnish: apply %s/%s: %w", u.GetKind(), u.GetName(), err)
+		}
+	}
+	return nil
+}
 
-	u, err := ri.Get(ctx, ref.name, metav1.GetOptions{})
+// deletePiece removes every object a piece declares; an already-absent object is
+// success (idempotent, matching `kubectl delete -k --ignore-not-found`).
+func deletePiece(ctx context.Context, c *kube.Client, pieceDir string) error {
+	objs, err := buildPiece(pieceDir)
+	if err != nil {
+		return err
+	}
+	for _, u := range objs {
+		ri, err := resourceFor(c, u)
+		if err != nil {
+			return err
+		}
+		if err := ri.Delete(ctx, u.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("furnish: delete %s/%s: %w", u.GetKind(), u.GetName(), err)
+		}
+	}
+	return nil
+}
+
+// readHealth reads each declared object's live state into a kubeItem. Typed errors carry
+// the taxonomy kubectl's text could not: a declared-but-absent object (NotFound) is a
+// distinct RED state, never GREEN-by-existence; a transport / RBAC / timeout failure is
+// returned as an error -- indeterminate, not "unhealthy".
+func readHealth(ctx context.Context, c *kube.Client, pieceDir string) ([]kubeItem, error) {
+	objs, err := buildPiece(pieceDir)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]kubeItem, 0, len(objs))
+	for _, u := range objs {
+		it, err := liveItem(ctx, c, u)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	return items, nil
+}
+
+// liveItem reads one declared object's live state.
+func liveItem(ctx context.Context, c *kube.Client, u *unstructured.Unstructured) (kubeItem, error) {
+	ri, err := resourceFor(c, u)
+	if err != nil {
+		return kubeItem{}, err
+	}
+	it := kubeItem{Kind: u.GetKind()}
+	it.Metadata.Name = u.GetName()
+
+	live, err := ri.Get(ctx, u.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		// Declared but not deployed: absent, not a fault of the cluster or a false green.
 		it.absent = true
 		return it, nil
 	}
 	if err != nil {
-		// Indeterminate (unreachable / RBAC / timeout), not "unhealthy".
-		return kubeItem{}, fmt.Errorf("furnish: get %s/%s: %w", ref.gvk.Kind, ref.name, err)
+		return kubeItem{}, fmt.Errorf("furnish: get %s/%s: %w", u.GetKind(), u.GetName(), err)
 	}
-	if r, found, _ := unstructured.NestedInt64(u.Object, "spec", "replicas"); found {
+	if r, found, _ := unstructured.NestedInt64(live.Object, "spec", "replicas"); found {
 		v := int32(r)
 		it.Spec.Replicas = &v
 	}
-	if rr, found, _ := unstructured.NestedInt64(u.Object, "status", "readyReplicas"); found {
+	if rr, found, _ := unstructured.NestedInt64(live.Object, "status", "readyReplicas"); found {
 		it.Status.ReadyReplicas = int32(rr)
 	}
 	return it, nil

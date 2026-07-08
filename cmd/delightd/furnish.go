@@ -1,45 +1,21 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
-
-	"delightd/pkg/kube"
 )
 
-// kubectl-by-subprocess is a ruled decision, not a shortcut (sprint 11
-// Phase A, issue 77): the programmatic stack (client-go + the kustomize
-// library) drags k8s.io/* to v0.36 and google.golang.org/protobuf off its
-// v1.36.11 pin -- the dep the generated contract code shares. kubectl is a
-// runtime requirement instead, checked fail-loud before any verb touches the
-// cluster.
-
-// furnishRunner is the seam between the furnish verbs and kubectl: production
-// runs the real binary, tests substitute a recorder. Arguments arrive without
-// the program name ("apply", "-k", <dir>).
-type furnishRunner func(ctx context.Context, args ...string) ([]byte, error)
-
-// kubectlRunner is the production runner. KUBECONFIG is deliberately left
-// alone -- furnish converges whatever cluster the operator's environment
-// points at (locally, the k3d cluster).
-func kubectlRunner(ctx context.Context, args ...string) ([]byte, error) {
-	if _, err := exec.LookPath("kubectl"); err != nil {
-		return nil, fmt.Errorf("kubectl not found on PATH; furnish requires it at runtime: %w", err)
-	}
-	out, err := exec.CommandContext(ctx, "kubectl", args...).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("kubectl %s: %w\n%s", strings.Join(args, " "), err, out)
-	}
-	return out, nil
-}
+// furnish talks to the cluster through client-go + the kustomize library (the cluster
+// seam in furnish_kube.go), not the kubectl binary. The sprint-11 ruling that chose
+// kubectl-by-subprocess -- the programmatic stack then dragged k8s.io/* to v0.36 and
+// google.golang.org/protobuf off its v1.36.11 pin -- was reversed on receipts 2026-07-08:
+// client-go v0.35 + kustomize/api v0.21.1 hold the pin. A fake dynamic client stands in
+// for tests, so no verb needs a live cluster to be exercised.
 
 // aggregator is the part of kube/kustomization.yaml furnish reads: the
 // resources list. A directory under kube/ is a piece only if it is named
@@ -129,32 +105,13 @@ func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 // agent-first, CLI-is-the-contract shape as model: cobra, JSON by default,
 // idempotent verbs -- an agent drives it the same way.
 func furnishCmd() *cobra.Command {
-	return newFurnishCmd(kubectlRunner, defaultHealthReader())
+	return newFurnishCmd(&kubeCluster{})
 }
 
-// defaultHealthReader builds the client-go client lazily on first health call: `up` and
-// `down` (still kubectl) work even with no kubeconfig present, and the client is built
-// once and reused across pieces. Migrating up/down to server-side apply is the next
-// step; health -- the read path -- moves first.
-func defaultHealthReader() healthReader {
-	var (
-		c        *kube.Client
-		buildErr error
-		once     sync.Once
-	)
-	return func(ctx context.Context, pieceDir string) ([]kubeItem, error) {
-		once.Do(func() { c, buildErr = kube.FromKubeconfig("") })
-		if buildErr != nil {
-			return nil, fmt.Errorf("furnish health: %w", buildErr)
-		}
-		return kubeHealthReader(c)(ctx, pieceDir)
-	}
-}
-
-// newFurnishCmd builds the command tree over injectable seams: a runner for the
-// kubectl-backed verbs (up/down) and a healthReader for the read path. Tests pass a
-// recorder and a fake reader, the same pattern as the events publisher's produce seam.
-func newFurnishCmd(run furnishRunner, readHealth healthReader) *cobra.Command {
+// newFurnishCmd builds the command tree over the cluster seam: up, down, and health all
+// go through client-go + kustomize. Tests inject a fake cluster (or one backed by a fake
+// dynamic client), the same pattern as the events publisher's produce seam.
+func newFurnishCmd(cl cluster) *cobra.Command {
 	var kubeDir string
 	cmd := &cobra.Command{
 		Use:          "furnish",
@@ -194,36 +151,28 @@ func newFurnishCmd(run furnishRunner, readHealth healthReader) *cobra.Command {
 
 	up := &cobra.Command{
 		Use:   "up <piece>",
-		Short: "converge one piece onto its manifests (kubectl apply -k; idempotent)",
+		Short: "converge one piece onto its manifests (server-side apply; idempotent)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return withPiece(args[0], func(dir string) error {
-				out, err := run(c.Context(), "apply", "-k", dir)
-				if err != nil {
+				if err := cl.apply(c.Context(), dir); err != nil {
 					return err
 				}
-				return printJSON(map[string]any{
-					"command": "furnish.up", "piece": args[0],
-					"applied": strings.Split(strings.TrimSpace(string(out)), "\n"),
-				})
+				return printJSON(map[string]any{"command": "furnish.up", "piece": args[0], "applied": true})
 			})
 		},
 	}
 
 	down := &cobra.Command{
 		Use:   "down <piece>",
-		Short: "remove one piece's objects (kubectl delete -k; absent is success)",
+		Short: "remove one piece's objects (client-go delete; absent is success)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return withPiece(args[0], func(dir string) error {
-				out, err := run(c.Context(), "delete", "-k", dir, "--ignore-not-found=true")
-				if err != nil {
+				if err := cl.remove(c.Context(), dir); err != nil {
 					return err
 				}
-				return printJSON(map[string]any{
-					"command": "furnish.down", "piece": args[0],
-					"removed": strings.Split(strings.TrimSpace(string(out)), "\n"),
-				})
+				return printJSON(map[string]any{"command": "furnish.down", "piece": args[0], "removed": true})
 			})
 		},
 	}
@@ -247,7 +196,7 @@ func newFurnishCmd(run furnishRunner, readHealth healthReader) *cobra.Command {
 			// reports collects the per-piece ladders for the health JSON.
 			reports := map[string]any{}
 			for _, p := range ps {
-				items, err := readHealth(c.Context(), filepath.Join(kubeDir, p))
+				items, err := cl.health(c.Context(), filepath.Join(kubeDir, p))
 				if err != nil {
 					return err
 				}
