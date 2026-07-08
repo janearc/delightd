@@ -22,15 +22,23 @@ import (
 )
 
 var (
-	deploymentGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
-	deploymentGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	deploymentGVK  = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+	deploymentGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	clusterRoleGVK = schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"}
+	clusterRoleGVR = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}
 )
 
 // staticMapper maps the kinds the fixtures use to their resources, so the reader needs
-// no live discovery in the test.
+// no live discovery in the test. ClusterRole is mapped root-scoped so the cluster-scoped
+// branch of resourceFor is exercised; a ConfigMap is deliberately left unmapped so the
+// resolution-failure branch is exercised too.
 func staticMapper() meta.RESTMapper {
-	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "apps", Version: "v1"}})
+	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{
+		{Group: "apps", Version: "v1"},
+		{Group: "rbac.authorization.k8s.io", Version: "v1"},
+	})
 	m.Add(deploymentGVK, meta.RESTScopeNamespace)
+	m.Add(clusterRoleGVK, meta.RESTScopeRoot)
 	return m
 }
 
@@ -204,6 +212,85 @@ func TestReadHealth_OneBadObjectDoesNotBlindOthers(t *testing.T) {
 	}
 }
 
+// writeSinglePiece lays down a piece declaring one object from the given manifest.
+func writeSinglePiece(t *testing.T, manifest string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "obj.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"),
+		[]byte("resources:\n  - obj.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func liveClusterRole() *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(clusterRoleGVK)
+	u.SetName("delightd-operator")
+	return u
+}
+
+const configMapManifest = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: orphan\n  namespace: fleet\n"
+const clusterRoleManifest = "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: delightd-operator\n"
+
+// TestReadHealth_ClusterScoped exercises resourceFor's cluster-scoped branch: a
+// ClusterRole is not namespaced, and a present non-workload kind is GREEN by existence.
+func TestReadHealth_ClusterScoped(t *testing.T) {
+	dir := writeSinglePiece(t, clusterRoleManifest)
+	items, err := readHealth(context.Background(), fakeClient(liveClusterRole()), dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(items) != 1 || items[0].absent || items[0].indeterminate {
+		t.Fatalf("a present cluster-scoped object should read present: %+v", items)
+	}
+	if ok, _ := pieceHealth(items); !ok {
+		t.Error("a present ClusterRole is GREEN by existence")
+	}
+}
+
+// TestReadHealth_UnresolvableKindIsIndeterminate: a kind the RESTMapper cannot resolve
+// is INDETERMINATE per-object, not a fatal read -- we could not even address it.
+func TestReadHealth_UnresolvableKindIsIndeterminate(t *testing.T) {
+	items, err := readHealth(context.Background(), fakeClient(), writeSinglePiece(t, configMapManifest))
+	if err != nil {
+		t.Fatalf("an unresolvable kind should be per-object indeterminate, not fatal: %v", err)
+	}
+	if len(items) != 1 || !items[0].indeterminate {
+		t.Fatalf("unmapped kind should be indeterminate: %+v", items)
+	}
+}
+
+// TestApplyDelete_UnresolvableKindErrors: apply and delete surface an unresolvable kind
+// rather than silently skipping the object.
+func TestApplyDelete_UnresolvableKindErrors(t *testing.T) {
+	dir := writeSinglePiece(t, configMapManifest)
+	c := fakeClient()
+	if err := applyPiece(context.Background(), c, dir); err == nil {
+		t.Error("applyPiece should surface an unresolvable kind, not silently skip it")
+	}
+	if err := deletePiece(context.Background(), c, dir); err == nil {
+		t.Error("deletePiece should surface an unresolvable kind")
+	}
+}
+
+// TestReadHealth_UnrenderablePieceIsFatal: a kustomization that does not render has
+// nothing to report against, so readHealth errors (the one fatal path, distinct from a
+// per-object read failure).
+func TestReadHealth_UnrenderablePieceIsFatal(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"),
+		[]byte("resources:\n  - nope.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHealth(context.Background(), fakeClient(), dir); err == nil {
+		t.Error("an unrenderable piece must error, not report an empty-but-healthy piece")
+	}
+}
+
 // TestApplyPiece converges a piece via server-side apply. The fake dynamic client does
 // not implement SSA's create-on-apply, so we assert applyPiece resolves the declared
 // object and issues an apply (an ApplyPatchType patch) for it -- the apply logic. The
@@ -230,6 +317,32 @@ func TestApplyPiece(t *testing.T) {
 	}
 	if len(applied) != 1 || applied[0] != "delightd" {
 		t.Errorf("applied = %v, want [delightd]", applied)
+	}
+}
+
+// TestApplyPiece_APIErrorPropagates: an apiserver error on apply is surfaced with the
+// object named, not swallowed.
+func TestApplyPiece_APIErrorPropagates(t *testing.T) {
+	c := fakeClient()
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("patch", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("apiserver said no")
+	})
+	err := applyPiece(context.Background(), c, writePiece(t))
+	if err == nil || !strings.Contains(err.Error(), "delightd") {
+		t.Errorf("apply error should propagate and name the object: %v", err)
+	}
+}
+
+// TestDeletePiece_APIErrorPropagates: a delete error that is not NotFound is surfaced.
+func TestDeletePiece_APIErrorPropagates(t *testing.T) {
+	c := fakeClient(liveDeployment(1))
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("delete", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("apiserver said no")
+	})
+	if err := deletePiece(context.Background(), c, writePiece(t)); err == nil {
+		t.Error("a non-NotFound delete error should propagate")
 	}
 }
 
