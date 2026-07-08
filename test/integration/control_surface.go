@@ -8,7 +8,8 @@
 //
 // The daemon under test is assumed to run the synthetic config this package builds:
 // two managed projects, "fake-clean" (essential, kube deploy block, clean tree) and
-// "fake-dirty" (non-essential, one un-pushed commit, dirty tree), agent_skills off.
+// "fake-dirty" (non-essential, one un-pushed commit, dirty tree). Whether agent_skills
+// (the /mcp surface) is on is per-deployment (surfaceExpect.skillsEnabled).
 package integration
 
 import (
@@ -33,6 +34,9 @@ type surfaceExpect struct {
 	// configured to discover -- /discovery/llms must report it. Empty skips the model
 	// assertion (only status is checked).
 	wantModel string
+	// skillsEnabled is true when agent_skills + MCP are on: /mcp is registered and its
+	// tools/list must include delightd's own tools. False asserts /mcp is 404 (skills off).
+	skillsEnabled bool
 }
 
 // verifyControlSurface drives every route in docs/api.md against base and asserts each
@@ -258,10 +262,40 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 		}
 	})
 
-	t.Run("POST /mcp (404 when agent_skills disabled)", func(t *testing.T) {
-		// The synthetic config leaves agent_skills off, so /mcp is not registered.
-		if status := postBody(t, base+"/mcp", `{}`); status != http.StatusNotFound {
-			t.Errorf("POST /mcp = %d, want 404 (route unregistered when skills disabled)", status)
+	t.Run("POST /mcp (agent drives delightd's own tools)", func(t *testing.T) {
+		if !exp.skillsEnabled {
+			// skills off -> /mcp is not registered.
+			if status := postBody(t, base+"/mcp", `{}`); status != http.StatusNotFound {
+				t.Errorf("POST /mcp = %d, want 404 (route unregistered when skills disabled)", status)
+			}
+			return
+		}
+		// skills on: an agent enumerating a containerized delightd's tools must see
+		// delightd's own operator surface (its baked mcp.json, loaded as self-tools).
+		resp, err := http.Post(base+"/mcp", "application/json",
+			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		if err != nil {
+			t.Fatalf("POST /mcp: %v", err)
+		}
+		defer resp.Body.Close()
+		var body struct {
+			Result struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			} `json:"result"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode tools/list: %v", err)
+		}
+		names := map[string]bool{}
+		for _, tool := range body.Result.Tools {
+			names[tool.Name] = true
+		}
+		for _, want := range []string{"delightd_furnish_up", "delightd_furnish_health", "delightd_trigger_backup"} {
+			if !names[want] {
+				t.Errorf("tools/list missing %s -- an agent cannot drive delightd in the container: %v", want, names)
+			}
 		}
 	})
 

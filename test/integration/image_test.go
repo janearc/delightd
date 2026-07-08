@@ -80,7 +80,8 @@ func TestContainerImageComesUp(t *testing.T) {
   daemon:
     control_port: 8088
   agent_skills:
-    enabled: false
+    enabled: true
+    expose_via: ["mcp"]
   llm_discovery:
     providers:
       - name: "mock"
@@ -103,6 +104,16 @@ projects:
 `, mockPort)
 	if err := os.WriteFile(filepath.Join(configRoot, "delight.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatalf("writing synthetic delight.yaml: %v", err)
+	}
+	// The synthetic config mount shadows the baked config, so drop delightd's own skill
+	// manifest into the mounted config root too -- otherwise the daemon finds no
+	// self-manifest at <ConfigRoot>/mcp.json. This is the real shipped mcp.json.
+	skill, err := os.ReadFile(filepath.Join(repoRoot(), "mcp.json"))
+	if err != nil {
+		t.Fatalf("reading mcp.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configRoot, "mcp.json"), skill, 0o644); err != nil {
+		t.Fatalf("writing mcp.json into config root: %v", err)
 	}
 	// The container runs as root, so it reads the repos/config at their default perms;
 	// the roots were created 0777 so it can write /var. Deliberately no recursive chmod
@@ -136,6 +147,7 @@ projects:
 		dirtyPath:          "/work/fake-dirty",
 		apiserverReachable: false,     // no kubeconfig/route wired in this test setup yet
 		wantModel:          mockModel, // /discovery/llms must report the mocked backend
+		skillsEnabled:      true,      // agent enumerates delightd's own tools via /mcp
 	})
 	if t.Failed() {
 		t.Logf("container logs:\n%s", containerLogs(name))
