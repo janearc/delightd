@@ -8,9 +8,14 @@ WORKDIR /src
 
 # Codegen toolchain (cached layer): buf + the Go plugin. Protobuf bindings are
 # generated at build from the vendored proto and never committed, so this stage
-# is what produces gen/ inside the image.
+# is what produces gen/ inside the image. protoc-gen-go is pinned to the SAME
+# version as the google.golang.org/protobuf runtime the binary links (v1.36.11):
+# the generator and the runtime are the same module, so pinning them together keeps
+# generated code and runtime in lockstep -- @latest would let a silent generator bump
+# desync the two. Bumping one means bumping the other (and go.mod). test/gen asserts
+# buf.gen.go.yaml (this image's Go-only template) stays in sync with buf.gen.yaml.
 RUN go install github.com/bufbuild/buf/cmd/buf@v1.71.0 \
- && go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+ && go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 ENV PATH="/go/bin:${PATH}"
 
 # Cache dependencies to optimize build times across the fleet
