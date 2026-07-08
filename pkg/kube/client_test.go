@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,9 +65,15 @@ func TestFromKubeconfig_BuildsClientWithoutNetwork(t *testing.T) {
 }
 
 func TestRESTConfig_MissingKubeconfig(t *testing.T) {
-	// An explicit path that does not exist is an error, not a silent empty config.
-	if _, err := RESTConfig(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+	// An explicit path that does not exist is an error, not a silent empty config -- and
+	// the error names the path it tried, so the failure points at the fix.
+	path := filepath.Join(t.TempDir(), "does-not-exist")
+	_, err := RESTConfig(path)
+	if err == nil {
 		t.Fatal("RESTConfig with a missing kubeconfig: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error should name the kubeconfig path it tried: %q", err)
 	}
 }
 
@@ -122,6 +129,22 @@ func TestAPIServerReady_RedOn500(t *testing.T) {
 	defer srv.Close()
 	if err := APIServerReady(context.Background(), writeKubeconfigForServer(t, srv.URL)); err == nil {
 		t.Fatal("APIServerReady on a 500 apiserver: want error, got nil")
+	}
+}
+
+func TestAPIServerReady_RedWhenKubeconfigMissing(t *testing.T) {
+	// An explicit kubeconfig path that does not exist fails at config load, before any
+	// network -- surfaced as an error, never a silent pass.
+	if err := APIServerReady(context.Background(), filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("APIServerReady with a missing kubeconfig: want error, got nil")
+	}
+}
+
+func TestFromKubeconfig_MissingPathErrors(t *testing.T) {
+	// FromKubeconfig surfaces a bad explicit path rather than building a client against
+	// an empty config.
+	if _, err := FromKubeconfig(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("FromKubeconfig with a missing kubeconfig: want error, got nil")
 	}
 }
 

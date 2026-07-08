@@ -34,15 +34,15 @@ type Client struct {
 func FromKubeconfig(path string) (*Client, error) {
 	cfg, err := RESTConfig(path)
 	if err != nil {
-		return nil, err
+		return nil, err // RESTConfig already names the resolution it tried
 	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("kube: build dynamic client for %s: %w", cfg.Host, err)
 	}
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("kube: build discovery client for %s: %w", cfg.Host, err)
 	}
 	return &Client{
 		Config:  cfg,
@@ -53,13 +53,23 @@ func FromKubeconfig(path string) (*Client, error) {
 
 // RESTConfig loads a *rest.Config from a kubeconfig using clientcmd's standard rules.
 // Split out so it is testable against a fixture kubeconfig without a live cluster, and
-// reusable by callers that need only the config (e.g. an apiserver readiness ping).
+// reusable by callers that need only the config (e.g. an apiserver readiness ping). The
+// error names the resolution that was attempted so a failure points at the fix (a wrong
+// --kubeconfig path, an unset $KUBECONFIG, a missing ~/.kube/config).
 func RESTConfig(path string) (*rest.Config, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if path != "" {
 		rules.ExplicitPath = path
 	}
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		where := "$KUBECONFIG, then ~/.kube/config"
+		if path != "" {
+			where = fmt.Sprintf("path %q", path)
+		}
+		return nil, fmt.Errorf("kube: load kubeconfig (%s): %w", where, err)
+	}
+	return cfg, nil
 }
 
 // APIServerReady pings the apiserver's own /readyz endpoint via client-go, returning
@@ -72,11 +82,11 @@ func RESTConfig(path string) (*rest.Config, error) {
 func APIServerReady(ctx context.Context, path string) error {
 	cfg, err := RESTConfig(path)
 	if err != nil {
-		return fmt.Errorf("load kubeconfig: %w", err)
+		return err // RESTConfig already names the resolution it tried
 	}
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("build discovery client: %w", err)
+		return fmt.Errorf("kube: build discovery client for %s: %w", cfg.Host, err)
 	}
 	// AbsPath escapes the /api prefix to hit the apiserver's own /readyz -- the same
 	// endpoint kubectl's --raw fetched. Do().Error() is nil only on a 2xx status.
