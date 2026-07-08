@@ -4,8 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
+
+	"delightd/pkg/furnish"
 )
 
 // writeAggregator lays down a minimal kube/ fixture: an aggregator declaring the given
@@ -24,12 +25,12 @@ func writeAggregator(t *testing.T, pieces ...string) string {
 	return dir
 }
 
-// fakeCluster is the test-side cluster seam: it records the pieces up/down touch and
-// plays back canned health, so the verbs are exercised without a client-go client.
+// fakeCluster is the test-side cluster seam: it records the pieces up/down touch and plays
+// back canned health, so the command verbs are exercised without a client-go client.
 type fakeCluster struct {
 	applied   []string
 	removed   []string
-	items     []kubeItem
+	items     []furnish.Item
 	healthErr error
 }
 
@@ -41,19 +42,12 @@ func (f *fakeCluster) remove(_ context.Context, dir string) error {
 	f.removed = append(f.removed, dir)
 	return nil
 }
-func (f *fakeCluster) health(_ context.Context, _ string) ([]kubeItem, error) {
+func (f *fakeCluster) health(_ context.Context, _ string) ([]furnish.Item, error) {
 	return f.items, f.healthErr
 }
 
-// item builds a kubeItem for the health tests without repeating the nested-struct
-// boilerplate.
-func item(kind, name string, replicas *int32, ready int32) kubeItem {
-	var it kubeItem
-	it.Kind = kind
-	it.Metadata.Name = name
-	it.Spec.Replicas = replicas
-	it.Status.ReadyReplicas = ready
-	return it
+func item(kind, name string, replicas *int32, ready int32) furnish.Item {
+	return furnish.Item{Kind: kind, Name: name, Replicas: replicas, ReadyReplicas: ready}
 }
 
 // execFurnish runs the furnish command tree against a cluster seam, silencing the JSON
@@ -71,23 +65,6 @@ func execFurnish(t *testing.T, cl cluster, args ...string) error {
 	cmd := newFurnishCmd(cl)
 	cmd.SetArgs(args)
 	return cmd.Execute()
-}
-
-func TestPiecesReadsTheDeclaration(t *testing.T) {
-	dir := writeAggregator(t, "alpha", "beta")
-	got, err := pieces(dir)
-	if err != nil {
-		t.Fatalf("pieces: %v", err)
-	}
-	if want := []string{"alpha", "beta"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("pieces = %v, want %v", got, want)
-	}
-	if _, err := pieces(t.TempDir()); err == nil {
-		t.Error("pieces on a dir with no aggregator: want error, got nil")
-	}
-	if _, err := pieces(writeAggregator(t)); err == nil {
-		t.Error("pieces on an empty declaration: want error, got nil")
-	}
 }
 
 func TestUpAppliesTheDeclaredPiece(t *testing.T) {
@@ -125,33 +102,18 @@ func TestUnknownPieceIsRefusedBeforeCluster(t *testing.T) {
 	}
 }
 
-func TestHealthLadder(t *testing.T) {
+// TestHealthExitCode: the command exits zero for a GREEN piece and non-zero for a RED one.
+// The health taxonomy itself is tested directly against pkg/furnish; here we only assert
+// the command wires PieceHealth's verdict to the exit code.
+func TestHealthExitCode(t *testing.T) {
 	dir := writeAggregator(t, "delightd")
 	one, two := int32(1), int32(2)
-
-	health := func(items ...kubeItem) cluster { return &fakeCluster{items: items} }
-
-	// A 1/1 Deployment plus a Service present -> GREEN, exits 0.
-	if err := execFurnish(t, health(item("Deployment", "delightd", &one, 1), item("Service", "delightd", nil, 0)),
+	if err := execFurnish(t, &fakeCluster{items: []furnish.Item{item("Deployment", "delightd", &one, 1)}},
 		"--kube", dir, "health"); err != nil {
-		t.Errorf("health on a ready piece: %v", err)
+		t.Errorf("health on a ready piece should exit 0: %v", err)
 	}
-	// A Deployment short of its replicas -> RED, exits non-zero.
-	if err := execFurnish(t, health(item("Deployment", "delightd", &two, 0)), "--kube", dir, "health"); err == nil {
-		t.Error("health on an unready piece: want non-nil error (RED exits non-zero)")
-	}
-	// StatefulSets are gated the same as Deployments (the relocated bus/store pieces are
-	// StatefulSets), so a not-ready one must go RED.
-	if err := execFurnish(t, health(item("StatefulSet", "kafka", &one, 0)), "--kube", dir, "health"); err == nil {
-		t.Error("health on an unready StatefulSet: want non-nil error")
-	}
-	if err := execFurnish(t, health(item("StatefulSet", "kafka", &one, 1)), "--kube", dir, "health"); err != nil {
-		t.Errorf("health on a ready StatefulSet: %v", err)
-	}
-	// A declared-but-absent object is RED, never GREEN-by-existence.
-	absent := item("Service", "delightd", nil, 0)
-	absent.absent = true
-	if err := execFurnish(t, health(absent), "--kube", dir, "health"); err == nil {
-		t.Error("health on an absent object: want non-nil error (RED)")
+	if err := execFurnish(t, &fakeCluster{items: []furnish.Item{item("Deployment", "delightd", &two, 0)}},
+		"--kube", dir, "health"); err == nil {
+		t.Error("health on an unready piece should exit non-zero (RED)")
 	}
 }

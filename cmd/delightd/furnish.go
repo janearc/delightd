@@ -2,134 +2,30 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
+
+	"delightd/pkg/furnish"
 )
 
-// furnish talks to the cluster through client-go + the kustomize library (the cluster
-// seam in furnish_kube.go), not the kubectl binary. The sprint-11 ruling that chose
-// kubectl-by-subprocess -- the programmatic stack then dragged k8s.io/* to v0.36 and
-// google.golang.org/protobuf off its v1.36.11 pin -- was reversed on receipts 2026-07-08:
-// client-go v0.35 + kustomize/api v0.21.1 hold the pin. A fake dynamic client stands in
-// for tests, so no verb needs a live cluster to be exercised.
+// furnish talks to the cluster through pkg/furnish (client-go + the kustomize library),
+// not the kubectl binary. The sprint-11 ruling that chose kubectl-by-subprocess was
+// reversed on receipts 2026-07-08: client-go v0.35 + kustomize/api v0.21.1 hold the
+// protobuf v1.36.11 pin. A fake cluster stands in for tests, so no verb needs a live
+// cluster to be exercised.
 
-// aggregator is the part of kube/kustomization.yaml furnish reads: the
-// resources list. A directory under kube/ is a piece only if it is named
-// there -- the declaration, not the filesystem, says what exists.
-type aggregator struct {
-	Resources []string `yaml:"resources"`
-}
-
-// pieces returns the declared pieces under kubeDir, in declaration order.
-func pieces(kubeDir string) ([]string, error) {
-	path := filepath.Join(kubeDir, "kustomization.yaml")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("furnish: no aggregator at %s (run from a checkout, or point --kube at one): %w", path, err)
-	}
-	var agg aggregator
-	if err := yaml.Unmarshal(b, &agg); err != nil {
-		return nil, fmt.Errorf("furnish: %s does not parse: %w", path, err)
-	}
-	if len(agg.Resources) == 0 {
-		return nil, fmt.Errorf("furnish: %s declares no resources", path)
-	}
-	return agg.Resources, nil
-}
-
-// kubeItem is the minimal slice of `kubectl get -o json` that health reads:
-// enough to judge a Deployment's or StatefulSet's readiness and to name
-// everything else (both expose spec.replicas + status.readyReplicas).
-type kubeItem struct {
-	Kind     string `json:"kind"`
-	Metadata struct {
-		Name string `json:"name"`
-	} `json:"metadata"`
-	Spec struct {
-		Replicas *int32 `json:"replicas"`
-	} `json:"spec"`
-	Status struct {
-		ReadyReplicas int32 `json:"readyReplicas"`
-	} `json:"status"`
-	// absent marks an object the piece declares but that is not live. It is set by the
-	// client-go reader on a NotFound (never from kubectl JSON); pieceHealth reports it
-	// RED rather than GREEN-by-existence, so a declared-but-undeployed piece is honest.
-	absent bool
-	// indeterminate marks an object whose live state could not be read at all: a
-	// transport failure, an RBAC denial, a timeout, or a kind the RESTMapper cannot
-	// resolve. It is distinct from absent (which is an observation -- the object is
-	// genuinely not there) and from RED (an observation that it is unhealthy). We did
-	// not observe this object, so pieceHealth reports it INDETERMINATE: never GREEN (we
-	// do not present unknown as healthy) and never RED (we did not see it fail). One
-	// unreadable object no longer aborts the whole read -- the rest of the piece is
-	// still reported. reason carries the cause for the operator.
-	indeterminate bool
-	reason        string
-}
-
-// pieceHealth walks one piece's rendered objects and reports a ladder:
-// a Deployment or StatefulSet is GREEN when readyReplicas meets spec.replicas
-// (unset means 1, kube's own default), RED otherwise; any other kind that
-// exists is GREEN by existence. An object we could not read is INDETERMINATE.
-// The piece is healthy only if every object is GREEN -- both RED (observed
-// unhealthy or absent) and INDETERMINATE (unobserved) make it unhealthy, so
-// furnish health exits non-zero, but the two are labelled distinctly so an
-// operator can tell a broken piece from an unreachable one. StatefulSet matters
-// here because the relocated bus/store pieces (kafka, zookeeper, elasticsearch)
-// are StatefulSets: without this a CrashLooping kafka-0 would report GREEN by
-// mere existence and furnish health would lie.
-func pieceHealth(items []kubeItem) (bool, []map[string]any) {
-	healthy := true
-	// results is the per-object ladder rendered into the health JSON.
-	var results []map[string]any
-	for _, it := range items {
-		state := "GREEN"
-		detail := "present"
-		switch {
-		case it.indeterminate:
-			// Unread: not GREEN (unknown is not healthy), not RED (not observed to fail).
-			state = "INDETERMINATE"
-			detail = it.reason
-			healthy = false
-		case it.absent:
-			// Declared but not live: RED, never GREEN-by-existence.
-			state = "RED"
-			detail = "declared but absent"
-			healthy = false
-		case it.Kind == "Deployment" || it.Kind == "StatefulSet":
-			want := int32(1)
-			if it.Spec.Replicas != nil {
-				want = *it.Spec.Replicas
-			}
-			if it.Status.ReadyReplicas < want {
-				state = "RED"
-				healthy = false
-			}
-			detail = fmt.Sprintf("%d/%d ready", it.Status.ReadyReplicas, want)
-		}
-		results = append(results, map[string]any{
-			"kind": it.Kind, "name": it.Metadata.Name, "state": state, "detail": detail,
-		})
-	}
-	return healthy, results
-}
-
-// furnishCmd is delightd's interface to the meubilair set: the no-code kube
-// deployments that live one directory per piece under kube/ (delightd itself
-// today; kafka, searxng, chromadb, redis, surrealdb as they move in). Same
-// agent-first, CLI-is-the-contract shape as model: cobra, JSON by default,
-// idempotent verbs -- an agent drives it the same way.
+// furnishCmd is delightd's interface to the meubilair set: the no-code kube deployments
+// that live one directory per piece under kube/. Same agent-first, CLI-is-the-contract
+// shape as model: cobra, JSON by default, idempotent verbs.
 func furnishCmd() *cobra.Command {
 	return newFurnishCmd(&kubeCluster{})
 }
 
-// newFurnishCmd builds the command tree over the cluster seam: up, down, and health all
-// go through client-go + kustomize. Tests inject a fake cluster (or one backed by a fake
-// dynamic client), the same pattern as the events publisher's produce seam.
+// newFurnishCmd builds the command tree over the cluster seam: up, down, and health all go
+// through pkg/furnish. Tests inject a fake cluster, the same pattern as the events
+// publisher's produce seam.
 func newFurnishCmd(cl cluster) *cobra.Command {
 	var kubeDir string
 	cmd := &cobra.Command{
@@ -140,11 +36,10 @@ func newFurnishCmd(cl cluster) *cobra.Command {
 	cmd.PersistentFlags().StringVar(&kubeDir, "kube", "kube",
 		"per-piece manifest root (a checkout's kube/ directory)")
 
-	// withPiece is the shared load-and-resolve: the name must be declared in
-	// the aggregator, and fn gets the piece's directory. New per-piece verbs
-	// reuse it instead of repeating the lookup + unknown-name error.
+	// withPiece is the shared load-and-resolve: the name must be declared in the
+	// aggregator, and fn gets the piece's directory.
 	withPiece := func(name string, fn func(dir string) error) error {
-		ps, err := pieces(kubeDir)
+		ps, err := furnish.Pieces(kubeDir)
 		if err != nil {
 			return err
 		}
@@ -160,7 +55,7 @@ func newFurnishCmd(cl cluster) *cobra.Command {
 		Use:   "list",
 		Short: "list the declared pieces (JSON)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			ps, err := pieces(kubeDir)
+			ps, err := furnish.Pieces(kubeDir)
 			if err != nil {
 				return err
 			}
@@ -201,7 +96,7 @@ func newFurnishCmd(cl cluster) *cobra.Command {
 		Short: "report the health ladder for piece(s); non-zero exit if any is RED",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			ps, err := pieces(kubeDir)
+			ps, err := furnish.Pieces(kubeDir)
 			if err != nil {
 				return err
 			}
@@ -219,7 +114,7 @@ func newFurnishCmd(cl cluster) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				ok, ladder := pieceHealth(items)
+				ok, ladder := furnish.PieceHealth(items)
 				if !ok {
 					healthy = false
 				}
