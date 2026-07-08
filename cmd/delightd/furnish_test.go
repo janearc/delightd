@@ -38,9 +38,10 @@ func (r *recorder) run(_ context.Context, args ...string) ([]byte, error) {
 	return r.out, r.err
 }
 
-// execFurnish runs the furnish command tree against a recorder, silencing
-// the JSON that printJSON writes to stdout so test output stays readable.
-func execFurnish(t *testing.T, rec *recorder, args ...string) error {
+// execFurnish runs the furnish command tree against a recorder (the kubectl seam for
+// up/down) and a healthReader (the read seam), silencing the JSON printJSON writes to
+// stdout so test output stays readable. Pass a nil health for verbs that do not read.
+func execFurnish(t *testing.T, rec *recorder, health healthReader, args ...string) error {
 	t.Helper()
 	old := os.Stdout
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -50,9 +51,25 @@ func execFurnish(t *testing.T, rec *recorder, args ...string) error {
 	os.Stdout = devnull
 	defer func() { os.Stdout = old; devnull.Close() }()
 
-	cmd := newFurnishCmd(rec.run)
+	cmd := newFurnishCmd(rec.run, health)
 	cmd.SetArgs(args)
 	return cmd.Execute()
+}
+
+// item builds a kubeItem for the health tests without repeating the nested-struct
+// boilerplate.
+func item(kind, name string, replicas *int32, ready int32) kubeItem {
+	var it kubeItem
+	it.Kind = kind
+	it.Metadata.Name = name
+	it.Spec.Replicas = replicas
+	it.Status.ReadyReplicas = ready
+	return it
+}
+
+// fixedHealth is a healthReader that returns the same items for any piece.
+func fixedHealth(items ...kubeItem) healthReader {
+	return func(context.Context, string) ([]kubeItem, error) { return items, nil }
 }
 
 func TestPiecesReadsTheDeclaration(t *testing.T) {
@@ -76,7 +93,7 @@ func TestPiecesReadsTheDeclaration(t *testing.T) {
 func TestUpAppliesTheDeclaredPiece(t *testing.T) {
 	dir := writeAggregator(t, "surrealdb")
 	rec := &recorder{out: []byte("deployment.apps/surrealdb configured\n")}
-	if err := execFurnish(t, rec, "--kube", dir, "up", "surrealdb"); err != nil {
+	if err := execFurnish(t, rec, nil, "--kube", dir, "up", "surrealdb"); err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	want := []string{"apply", "-k", filepath.Join(dir, "surrealdb")}
@@ -88,7 +105,7 @@ func TestUpAppliesTheDeclaredPiece(t *testing.T) {
 func TestDownDeletesIgnoringAbsent(t *testing.T) {
 	dir := writeAggregator(t, "surrealdb")
 	rec := &recorder{out: []byte("")}
-	if err := execFurnish(t, rec, "--kube", dir, "down", "surrealdb"); err != nil {
+	if err := execFurnish(t, rec, nil, "--kube", dir, "down", "surrealdb"); err != nil {
 		t.Fatalf("down: %v", err)
 	}
 	want := []string{"delete", "-k", filepath.Join(dir, "surrealdb"), "--ignore-not-found=true"}
@@ -100,7 +117,7 @@ func TestDownDeletesIgnoringAbsent(t *testing.T) {
 func TestUnknownPieceIsRefusedBeforeKubectl(t *testing.T) {
 	dir := writeAggregator(t, "delightd")
 	rec := &recorder{}
-	if err := execFurnish(t, rec, "--kube", dir, "up", "ghost"); err == nil {
+	if err := execFurnish(t, rec, nil, "--kube", dir, "up", "ghost"); err == nil {
 		t.Fatal("up ghost: want error, got nil")
 	}
 	if len(rec.calls) != 0 {
@@ -110,32 +127,40 @@ func TestUnknownPieceIsRefusedBeforeKubectl(t *testing.T) {
 
 func TestHealthLadder(t *testing.T) {
 	dir := writeAggregator(t, "delightd")
+	one, two := int32(1), int32(2)
 
-	ready := []byte(`{"items":[
-		{"kind":"Deployment","metadata":{"name":"delightd"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
-		{"kind":"Service","metadata":{"name":"delightd"}}]}`)
-	if err := execFurnish(t, &recorder{out: ready}, "--kube", dir, "health"); err != nil {
+	// A 1/1 Deployment plus a Service present -> GREEN, exits 0.
+	if err := execFurnish(t, &recorder{},
+		fixedHealth(item("Deployment", "delightd", &one, 1), item("Service", "delightd", nil, 0)),
+		"--kube", dir, "health"); err != nil {
 		t.Errorf("health on a ready piece: %v", err)
 	}
 
-	unready := []byte(`{"items":[
-		{"kind":"Deployment","metadata":{"name":"delightd"},"spec":{"replicas":2},"status":{"readyReplicas":0}}]}`)
-	if err := execFurnish(t, &recorder{out: unready}, "--kube", dir, "health"); err == nil {
+	// A Deployment short of its replicas -> RED, exits non-zero.
+	if err := execFurnish(t, &recorder{},
+		fixedHealth(item("Deployment", "delightd", &two, 0)),
+		"--kube", dir, "health"); err == nil {
 		t.Error("health on an unready piece: want non-nil error (RED exits non-zero)")
 	}
 
-	// StatefulSets are gated the same as Deployments: the relocated bus/store
-	// pieces (kafka, zookeeper, elasticsearch) are StatefulSets, so a not-ready
-	// one must go RED, not GREEN-by-existence.
-	stsUnready := []byte(`{"items":[
-		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":0}}]}`)
-	if err := execFurnish(t, &recorder{out: stsUnready}, "--kube", dir, "health"); err == nil {
-		t.Error("health on an unready StatefulSet: want non-nil error (RED exits non-zero)")
+	// StatefulSets are gated the same as Deployments: the relocated bus/store pieces
+	// (kafka, zookeeper, elasticsearch) are StatefulSets, so a not-ready one must go RED.
+	if err := execFurnish(t, &recorder{},
+		fixedHealth(item("StatefulSet", "kafka", &one, 0)),
+		"--kube", dir, "health"); err == nil {
+		t.Error("health on an unready StatefulSet: want non-nil error")
+	}
+	if err := execFurnish(t, &recorder{},
+		fixedHealth(item("StatefulSet", "kafka", &one, 1)),
+		"--kube", dir, "health"); err != nil {
+		t.Errorf("health on a ready StatefulSet: %v", err)
 	}
 
-	stsReady := []byte(`{"items":[
-		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}`)
-	if err := execFurnish(t, &recorder{out: stsReady}, "--kube", dir, "health"); err != nil {
-		t.Errorf("health on a ready StatefulSet: %v", err)
+	// A declared-but-absent object is RED, never GREEN-by-existence (the client-go
+	// reader sets this on a NotFound).
+	absent := item("Service", "delightd", nil, 0)
+	absent.absent = true
+	if err := execFurnish(t, &recorder{}, fixedHealth(absent), "--kube", dir, "health"); err == nil {
+		t.Error("health on an absent object: want non-nil error (RED)")
 	}
 }

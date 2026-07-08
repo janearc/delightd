@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"delightd/pkg/kube"
 )
 
 // kubectl-by-subprocess is a ruled decision, not a shortcut (sprint 11
@@ -77,6 +79,10 @@ type kubeItem struct {
 	Status struct {
 		ReadyReplicas int32 `json:"readyReplicas"`
 	} `json:"status"`
+	// absent marks an object the piece declares but that is not live. It is set by the
+	// client-go reader on a NotFound (never from kubectl JSON); pieceHealth reports it
+	// RED rather than GREEN-by-existence, so a declared-but-undeployed piece is honest.
+	absent bool
 }
 
 // pieceHealth walks one piece's rendered objects and reports a ladder:
@@ -93,7 +99,13 @@ func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 	for _, it := range items {
 		state := "GREEN"
 		detail := "present"
-		if it.Kind == "Deployment" || it.Kind == "StatefulSet" {
+		switch {
+		case it.absent:
+			// Declared but not live: RED, never GREEN-by-existence.
+			state = "RED"
+			detail = "declared but absent"
+			healthy = false
+		case it.Kind == "Deployment" || it.Kind == "StatefulSet":
 			want := int32(1)
 			if it.Spec.Replicas != nil {
 				want = *it.Spec.Replicas
@@ -117,12 +129,32 @@ func pieceHealth(items []kubeItem) (bool, []map[string]any) {
 // agent-first, CLI-is-the-contract shape as model: cobra, JSON by default,
 // idempotent verbs -- an agent drives it the same way.
 func furnishCmd() *cobra.Command {
-	return newFurnishCmd(kubectlRunner)
+	return newFurnishCmd(kubectlRunner, defaultHealthReader())
 }
 
-// newFurnishCmd builds the command tree over an injectable runner; tests pass
-// a recorder here, the same pattern as the events publisher's produce seam.
-func newFurnishCmd(run furnishRunner) *cobra.Command {
+// defaultHealthReader builds the client-go client lazily on first health call: `up` and
+// `down` (still kubectl) work even with no kubeconfig present, and the client is built
+// once and reused across pieces. Migrating up/down to server-side apply is the next
+// step; health -- the read path -- moves first.
+func defaultHealthReader() healthReader {
+	var (
+		c        *kube.Client
+		buildErr error
+		once     sync.Once
+	)
+	return func(ctx context.Context, pieceDir string) ([]kubeItem, error) {
+		once.Do(func() { c, buildErr = kube.FromKubeconfig("") })
+		if buildErr != nil {
+			return nil, fmt.Errorf("furnish health: %w", buildErr)
+		}
+		return kubeHealthReader(c)(ctx, pieceDir)
+	}
+}
+
+// newFurnishCmd builds the command tree over injectable seams: a runner for the
+// kubectl-backed verbs (up/down) and a healthReader for the read path. Tests pass a
+// recorder and a fake reader, the same pattern as the events publisher's produce seam.
+func newFurnishCmd(run furnishRunner, readHealth healthReader) *cobra.Command {
 	var kubeDir string
 	cmd := &cobra.Command{
 		Use:          "furnish",
@@ -215,17 +247,11 @@ func newFurnishCmd(run furnishRunner) *cobra.Command {
 			// reports collects the per-piece ladders for the health JSON.
 			reports := map[string]any{}
 			for _, p := range ps {
-				out, err := run(c.Context(), "get", "-k", filepath.Join(kubeDir, p), "-o", "json")
+				items, err := readHealth(c.Context(), filepath.Join(kubeDir, p))
 				if err != nil {
 					return err
 				}
-				var got struct {
-					Items []kubeItem `json:"items"`
-				}
-				if err := json.Unmarshal(out, &got); err != nil {
-					return fmt.Errorf("furnish health %s: kubectl output does not parse: %w", p, err)
-				}
-				ok, ladder := pieceHealth(got.Items)
+				ok, ladder := pieceHealth(items)
 				if !ok {
 					healthy = false
 				}
