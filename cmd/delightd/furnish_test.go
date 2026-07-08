@@ -1,58 +1,17 @@
 package main
 
 import (
-	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
-	"path/filepath"
+	"strings"
 	"testing"
-
-	"delightd/pkg/furnish"
 )
 
-// writeAggregator lays down a minimal kube/ fixture: an aggregator declaring the given
-// pieces. The piece directories themselves are not created -- furnish trusts the
-// declaration, which is exactly the production contract.
-func writeAggregator(t *testing.T, pieces ...string) string {
-	t.Helper()
-	dir := t.TempDir()
-	body := "resources:\n"
-	for _, p := range pieces {
-		body += "  - " + p + "\n"
-	}
-	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(body), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	return dir
-}
-
-// fakeCluster is the test-side cluster seam: it records the pieces up/down touch and plays
-// back canned health, so the command verbs are exercised without a client-go client.
-type fakeCluster struct {
-	applied   []string
-	removed   []string
-	items     []furnish.Item
-	healthErr error
-}
-
-func (f *fakeCluster) apply(_ context.Context, dir string) error {
-	f.applied = append(f.applied, dir)
-	return nil
-}
-func (f *fakeCluster) remove(_ context.Context, dir string) error {
-	f.removed = append(f.removed, dir)
-	return nil
-}
-func (f *fakeCluster) health(_ context.Context, _ string) ([]furnish.Item, error) {
-	return f.items, f.healthErr
-}
-
-func item(kind, name string, replicas *int32, ready int32) furnish.Item {
-	return furnish.Item{Kind: kind, Name: name, Replicas: replicas, ReadyReplicas: ready}
-}
-
-// execFurnish runs the furnish command tree against a cluster seam, silencing the JSON
-// printJSON writes to stdout so test output stays readable.
-func execFurnish(t *testing.T, cl cluster, args ...string) error {
+// execFurnish runs the furnish command tree with stdout silenced (the relayed JSON would
+// clutter test output) and returns the command error, which carries the exit semantics.
+func execFurnish(t *testing.T, args ...string) error {
 	t.Helper()
 	old := os.Stdout
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -62,58 +21,77 @@ func execFurnish(t *testing.T, cl cluster, args ...string) error {
 	os.Stdout = devnull
 	defer func() { os.Stdout = old; devnull.Close() }()
 
-	cmd := newFurnishCmd(cl)
+	cmd := furnishCmd()
 	cmd.SetArgs(args)
 	return cmd.Execute()
 }
 
-func TestUpAppliesTheDeclaredPiece(t *testing.T) {
-	dir := writeAggregator(t, "surrealdb")
-	cl := &fakeCluster{}
-	if err := execFurnish(t, cl, "--kube", dir, "up", "surrealdb"); err != nil {
+// daemonStub stands in for the control port, recording the method+path it was hit with and
+// answering with a fixed status/body.
+func daemonStub(t *testing.T, status int, body string) (addr string, seen *struct{ method, path string }) {
+	t.Helper()
+	seen = &struct{ method, path string }{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.method, seen.path = r.Method, r.URL.Path
+		w.WriteHeader(status)
+		fmt.Fprintln(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://"), seen
+}
+
+func TestFurnishCLI_ListHitsPieces(t *testing.T) {
+	addr, seen := daemonStub(t, http.StatusOK, `{"pieces":["delightd"]}`)
+	if err := execFurnish(t, "--control", addr, "list"); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if seen.method != http.MethodGet || seen.path != "/furnish/pieces" {
+		t.Errorf("list hit %s %s, want GET /furnish/pieces", seen.method, seen.path)
+	}
+}
+
+func TestFurnishCLI_UpAndDownPost(t *testing.T) {
+	addr, seen := daemonStub(t, http.StatusOK, `{"applied":true}`)
+	if err := execFurnish(t, "--control", addr, "up", "surrealdb"); err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	want := filepath.Join(dir, "surrealdb")
-	if len(cl.applied) != 1 || cl.applied[0] != want {
-		t.Errorf("applied = %v, want [%v]", cl.applied, want)
+	if seen.method != http.MethodPost || seen.path != "/furnish/surrealdb/up" {
+		t.Errorf("up hit %s %s, want POST /furnish/surrealdb/up", seen.method, seen.path)
 	}
-}
-
-func TestDownRemovesTheDeclaredPiece(t *testing.T) {
-	dir := writeAggregator(t, "surrealdb")
-	cl := &fakeCluster{}
-	if err := execFurnish(t, cl, "--kube", dir, "down", "surrealdb"); err != nil {
+	if err := execFurnish(t, "--control", addr, "down", "surrealdb"); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	want := filepath.Join(dir, "surrealdb")
-	if len(cl.removed) != 1 || cl.removed[0] != want {
-		t.Errorf("removed = %v, want [%v]", cl.removed, want)
+	if seen.path != "/furnish/surrealdb/down" {
+		t.Errorf("down hit %s, want /furnish/surrealdb/down", seen.path)
 	}
 }
 
-func TestUnknownPieceIsRefusedBeforeCluster(t *testing.T) {
-	dir := writeAggregator(t, "delightd")
-	cl := &fakeCluster{}
-	if err := execFurnish(t, cl, "--kube", dir, "up", "ghost"); err == nil {
-		t.Fatal("up ghost: want error, got nil")
+func TestFurnishCLI_HealthPiecePath(t *testing.T) {
+	addr, seen := daemonStub(t, http.StatusOK, `{"healthy":true}`)
+	if err := execFurnish(t, "--control", addr, "health", "kafka"); err != nil {
+		t.Fatalf("health: %v", err)
 	}
-	if len(cl.applied) != 0 {
-		t.Errorf("cluster was touched for an undeclared piece: %v", cl.applied)
+	if seen.path != "/furnish/health/kafka" {
+		t.Errorf("health kafka hit %s, want /furnish/health/kafka", seen.path)
 	}
 }
 
-// TestHealthExitCode: the command exits zero for a GREEN piece and non-zero for a RED one.
-// The health taxonomy itself is tested directly against pkg/furnish; here we only assert
-// the command wires PieceHealth's verdict to the exit code.
-func TestHealthExitCode(t *testing.T) {
-	dir := writeAggregator(t, "delightd")
-	one, two := int32(1), int32(2)
-	if err := execFurnish(t, &fakeCluster{items: []furnish.Item{item("Deployment", "delightd", &one, 1)}},
-		"--kube", dir, "health"); err != nil {
-		t.Errorf("health on a ready piece should exit 0: %v", err)
+func TestFurnishCLI_UnhealthyExitsNonZero(t *testing.T) {
+	// A 503 (a RED or INDETERMINATE piece) must surface as a non-zero exit, so the
+	// wrapper or an agent gates on it -- the body is still relayed for the operator.
+	addr, _ := daemonStub(t, http.StatusServiceUnavailable, `{"healthy":false}`)
+	if err := execFurnish(t, "--control", addr, "health"); err == nil {
+		t.Error("health against a 503 daemon: want non-nil error (non-zero exit)")
 	}
-	if err := execFurnish(t, &fakeCluster{items: []furnish.Item{item("Deployment", "delightd", &two, 0)}},
-		"--kube", dir, "health"); err == nil {
-		t.Error("health on an unready piece should exit non-zero (RED)")
+}
+
+func TestFurnishCLI_DaemonDownIsNamed(t *testing.T) {
+	// Nothing listening: the error names the likely cause rather than a bare dial error.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	err := execFurnish(t, "--control", addr, "list")
+	if err == nil || !strings.Contains(err.Error(), "delightd") {
+		t.Errorf("daemon-down error should name delightd: %v", err)
 	}
 }
