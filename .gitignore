@@ -37,3 +37,6 @@ traefik.json
 
 # ignore claude dir obv
 .claude/*
+
+# macOS Finder droppings; never tracked
+.DS_Store

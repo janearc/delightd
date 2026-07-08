@@ -77,10 +77,12 @@ client-go") was descriptive of that state, not a constraint; this reverses it.
 
 ## Plan on the branch
 
-1. Config loading (`clientcmd` + kubeconfig) and a shared client + dynamic client.
-2. Rewrite `furnish`'s kubectl calls: SSA for apply, typed reads for health, typed
+1. (done) Config loading (`clientcmd` + kubeconfig) and a shared client + dynamic client.
+2. (done) Rewrite `furnish`'s kubectl calls: SSA for apply, typed reads for health, typed
    errors for the taxonomy (closes #96).
-3. Point `/readyz`'s `kubectl_reachable` check at a client-go apiserver ping.
+3. (done) `/readyz`'s cluster check (renamed `apiserver_reachable`) now pings the
+   apiserver's `/readyz` via client-go, not `kubectl --raw`. This retired the last
+   kubectl shell-out in the codebase.
 4. Drop the kubectl-in-image question (#107) entirely; the image needs a kubeconfig
    mount + apiserver reachability, not a binary.
 5. Integration-test the whole: clone -> build -> run comes up `/readyz`-green and

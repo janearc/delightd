@@ -25,10 +25,10 @@ import (
 type surfaceExpect struct {
 	cleanPath string // absolute path to fake-clean as the daemon sees it
 	dirtyPath string // absolute path to fake-dirty
-	// kubectlReachable is the expected /readyz kubectl_reachable result: true when a
+	// apiserverReachable is the expected /readyz apiserver_reachable result: true when a
 	// cluster is in reach (bare binary with a kubeconfig), false in the scratch
-	// container (no kubectl until client-go). roots_readable is asserted green always.
-	kubectlReachable bool
+	// container (no kubeconfig/route wired yet). roots_readable is asserted green always.
+	apiserverReachable bool
 	// wantModel, when set, is a model name a mocked LLM backend serves and delightd is
 	// configured to discover -- /discovery/llms must report it. Empty skips the model
 	// assertion (only status is checked).
@@ -70,8 +70,8 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 		if ok, present := got["roots_readable"]; !present || !ok {
 			t.Errorf("roots_readable = %v (present=%v), want true", ok, present)
 		}
-		if ok, present := got["kubectl_reachable"]; !present || ok != exp.kubectlReachable {
-			t.Errorf("kubectl_reachable = %v, want %v", ok, exp.kubectlReachable)
+		if ok, present := got["apiserver_reachable"]; !present || ok != exp.apiserverReachable {
+			t.Errorf("apiserver_reachable = %v, want %v", ok, exp.apiserverReachable)
 		}
 	})
 

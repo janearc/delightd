@@ -7,6 +7,9 @@
 package kube
 
 import (
+	"context"
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	memory "k8s.io/client-go/discovery/cached/memory"
@@ -57,4 +60,28 @@ func RESTConfig(path string) (*rest.Config, error) {
 		rules.ExplicitPath = path
 	}
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+}
+
+// APIServerReady pings the apiserver's own /readyz endpoint via client-go, returning
+// nil only when the server answers 2xx. It is the readiness probe's cluster check: the
+// programmatic equivalent of kubectl's `get --raw=/readyz`, with no kubectl binary. The
+// kubeconfig is resolved by the standard rules when path is empty, at call time, so
+// startup never depends on a kubeconfig being present and one mounted later is picked
+// up. The caller's context bounds the call, so a dead apiserver fails fast rather than
+// hanging the probe.
+func APIServerReady(ctx context.Context, path string) error {
+	cfg, err := RESTConfig(path)
+	if err != nil {
+		return fmt.Errorf("load kubeconfig: %w", err)
+	}
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("build discovery client: %w", err)
+	}
+	// AbsPath escapes the /api prefix to hit the apiserver's own /readyz -- the same
+	// endpoint kubectl's --raw fetched. Do().Error() is nil only on a 2xx status.
+	if err := dc.RESTClient().Get().AbsPath("/readyz").Do(ctx).Error(); err != nil {
+		return fmt.Errorf("apiserver /readyz: %w", err)
+	}
+	return nil
 }

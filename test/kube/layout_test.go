@@ -8,8 +8,9 @@
 // well-formed objects carrying apiVersion + kind, not strictly typed.
 //
 // This is test-only, types-only: k8s.io/api gives the object types for
-// validation; nothing under cmd/ or pkg/ imports it, and the daemon still makes
-// no Kubernetes API calls (no client-go).
+// validation, and nothing under cmd/ or pkg/ imports this test package. The
+// render below uses kustomize's library in-process (as furnish does), so the
+// validation needs no kubectl or kustomize binary.
 package kube
 
 import (
@@ -17,7 +18,6 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -28,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
+	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/kyaml/filesys"
 )
 
 // repoRoot walks up from this test's dir (test/kube) to the repository root.
@@ -247,21 +249,20 @@ func TestDelightdManifestsAreValidKube(t *testing.T) {
 // environment and for the delightd piece alone, and strictly decodes the
 // rendered output. It proves the top-level kustomization actually aggregates
 // delightd (the rendered set contains it) and that both builds produce valid
-// kube -- not just that the files parse. Skips only where kubectl is absent.
+// kube -- not just that the files parse. The render is in-process via kustomize's
+// own library, the same path furnish's buildPiece uses, so it needs no kubectl or
+// kustomize binary on PATH.
 func TestAggregatorRendersValidKube(t *testing.T) {
 	root := repoRoot(t)
-	kubectl, err := exec.LookPath("kubectl")
-	if err != nil {
-		t.Skip("kubectl not on PATH; skipping kustomize render validation")
-	}
 
 	for _, target := range []string{"kube/", "kube/delightd/"} {
-		cmd := exec.Command(kubectl, "kustomize", target)
-		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "KUBECONFIG=/dev/null") // never contact a cluster
-		out, err := cmd.CombinedOutput()
+		m, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(filesys.MakeFsOnDisk(), filepath.Join(root, target))
 		if err != nil {
-			t.Fatalf("kubectl kustomize %s failed: %v\n%s", target, err, out)
+			t.Fatalf("kustomize build %s failed: %v", target, err)
+		}
+		out, err := m.AsYaml()
+		if err != nil {
+			t.Fatalf("render %s to yaml: %v", target, err)
 		}
 
 		var haveDeploy, haveSvc bool

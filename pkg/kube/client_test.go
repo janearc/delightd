@@ -1,6 +1,10 @@
 package kube
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,5 +67,70 @@ func TestRESTConfig_MissingKubeconfig(t *testing.T) {
 	// An explicit path that does not exist is an error, not a silent empty config.
 	if _, err := RESTConfig(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
 		t.Fatal("RESTConfig with a missing kubeconfig: want error, got nil")
+	}
+}
+
+// writeKubeconfigForServer writes a kubeconfig whose cluster server is the given URL, so
+// a probe can be pointed at an httptest apiserver stand-in.
+func writeKubeconfigForServer(t *testing.T, server string) string {
+	t.Helper()
+	cfg := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- name: test
+  cluster:
+    server: %s
+contexts:
+- name: test
+  context:
+    cluster: test
+    user: test
+current-context: test
+users:
+- name: test
+  user:
+    token: abc123
+`, server)
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAPIServerReady_GreenOn200(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprintln(w, "ok")
+	}))
+	defer srv.Close()
+	if err := APIServerReady(context.Background(), writeKubeconfigForServer(t, srv.URL)); err != nil {
+		t.Fatalf("APIServerReady on a healthy apiserver: %v", err)
+	}
+	// It must hit the apiserver's own /readyz, the endpoint kubectl --raw fetched.
+	if gotPath != "/readyz" {
+		t.Errorf("probed path = %q, want /readyz", gotPath)
+	}
+}
+
+func TestAPIServerReady_RedOn500(t *testing.T) {
+	// A 500 (apiserver up but not ready) is a red check, not a pass.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if err := APIServerReady(context.Background(), writeKubeconfigForServer(t, srv.URL)); err == nil {
+		t.Fatal("APIServerReady on a 500 apiserver: want error, got nil")
+	}
+}
+
+func TestAPIServerReady_RedWhenUnreachable(t *testing.T) {
+	// Nothing listening -> the probe fails (fast, connection refused), never hangs green.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	if err := APIServerReady(context.Background(), writeKubeconfigForServer(t, url)); err == nil {
+		t.Fatal("APIServerReady against a closed server: want error, got nil")
 	}
 }

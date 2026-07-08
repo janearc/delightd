@@ -10,9 +10,9 @@
 // It also proves the config bake resolves inside the image (docker cp + readlink),
 // which the mounted synthetic config deliberately shadows for the API drive.
 //
-// The one surface not green here is /readyz's kubectl_reachable: the scratch image has
-// no kubectl until delightd moves to client-go (docs/kubernetes-access.md), so the
-// drive expects it red and flips to green when that lands.
+// The one surface not green here is /readyz's apiserver_reachable: the client-go probe
+// has no kubeconfig or apiserver route in this test setup (docs/kubernetes-access.md),
+// so the drive expects it red and flips to green when a kubeconfig + route are wired.
 //
 // Gated behind the integration build tag and skipped when docker is unavailable.
 package integration
@@ -131,10 +131,10 @@ projects:
 
 	// The full documented control surface, against the containerized daemon.
 	verifyControlSurface(t, base, surfaceExpect{
-		cleanPath:        "/work/fake-clean",
-		dirtyPath:        "/work/fake-dirty",
-		kubectlReachable: false,     // no kubectl in scratch until client-go lands
-		wantModel:        mockModel, // /discovery/llms must report the mocked backend
+		cleanPath:          "/work/fake-clean",
+		dirtyPath:          "/work/fake-dirty",
+		apiserverReachable: false,     // no kubeconfig/route wired in this test setup yet
+		wantModel:          mockModel, // /discovery/llms must report the mocked backend
 	})
 	if t.Failed() {
 		t.Logf("container logs:\n%s", containerLogs(name))

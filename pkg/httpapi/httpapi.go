@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -26,6 +25,7 @@ import (
 	"delightd/pkg/discovery"
 	"delightd/pkg/gitstate"
 	"delightd/pkg/introspect"
+	"delightd/pkg/kube"
 	"delightd/pkg/metrics"
 	"delightd/pkg/registry"
 	"delightd/pkg/schemaregistry"
@@ -72,9 +72,9 @@ type Server struct {
 	// tested without probing the network.
 	discover func(context.Context, *config.DelightConfig) []discovery.ModelSource
 
-	// clusterReady probes whether kubectl can reach the cluster delightd operates,
-	// for the GET /readyz readiness check. Injectable so readiness can be tested
-	// without a live apiserver; New defaults it to a real kubectl probe.
+	// clusterReady probes whether delightd can reach the apiserver of the cluster it
+	// operates, for the GET /readyz readiness check. Injectable so readiness can be
+	// tested without a live apiserver; New defaults it to a real client-go probe.
 	clusterReady func(context.Context) error
 }
 
@@ -100,7 +100,7 @@ func New(cfg *config.DelightConfig, machines map[string]*state.Machine, exports 
 		subjects:             schemaregistry.New(cfg.System.Kafka.SchemaRegistryURL),
 		guaranteeHealthCheck: guaranteeHealthCheck,
 		discover:             discovery.DiscoverLocalLLMs,
-		clusterReady:         kubectlReady,
+		clusterReady:         clusterReadyProbe,
 	}
 }
 
@@ -233,7 +233,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)                      // liveness + active project count
-	mux.HandleFunc("GET /readyz", s.handleReadyz)                      // provable readiness: roots mounted + kubectl reachable
+	mux.HandleFunc("GET /readyz", s.handleReadyz)                      // provable readiness: roots mounted + apiserver reachable
 	mux.HandleFunc("GET /metrics", metrics.Handler())                  // prometheus exposition
 	mux.HandleFunc("GET /discovery/llms", s.handleDiscovery)           // currently discoverable local LLM endpoints
 	mux.HandleFunc("GET /projects/{name}/state", s.handleProjectState) // backup state-machine diagnostics
@@ -309,8 +309,8 @@ type readinessResponse struct {
 }
 
 // handleReadyz is the provable readiness probe: green only when delightd can
-// actually do its job -- its operating roots are mounted and readable, and kubectl
-// reaches the cluster it operates. This is distinct from GET /health (liveness: the
+// actually do its job -- its operating roots are mounted and readable, and it reaches
+// the apiserver of the cluster it operates. This is distinct from GET /health (liveness: the
 // process is up and config loaded). A failing check returns 503 with the reason
 // named, never a bare "not ready", so one HTTP answer serves a human via the wrapper,
 // hm over the wire, and any service alike.
@@ -353,27 +353,24 @@ func (s *Server) checkRootsReadable() readinessCheck {
 	return readinessCheck{Name: "roots_readable", OK: true}
 }
 
-// checkClusterReady probes kubectl reachability. delightd operates the cluster, so a
-// delightd that cannot reach kubectl is not ready even though its process is up.
+// checkClusterReady probes apiserver reachability. delightd operates the cluster, so a
+// delightd that cannot reach the apiserver is not ready even though its process is up.
 func (s *Server) checkClusterReady(ctx context.Context) readinessCheck {
 	if err := s.clusterReady(ctx); err != nil {
-		return readinessCheck{Name: "kubectl_reachable", OK: false, Error: err.Error()}
+		return readinessCheck{Name: "apiserver_reachable", OK: false, Error: err.Error()}
 	}
-	return readinessCheck{Name: "kubectl_reachable", OK: true}
+	return readinessCheck{Name: "apiserver_reachable", OK: true}
 }
 
-// kubectlReady is the production cluster probe: it asks the apiserver's own readyz
-// endpoint through kubectl, bounded by a short timeout so a dead apiserver fails the
-// check fast instead of hanging the request. KUBECONFIG resolution is left to
-// kubectl, matching furnish's runner. CombinedOutput is used deliberately here --
-// the output is folded into the error for diagnostics, never parsed.
-func kubectlReady(ctx context.Context) error {
+// clusterReadyProbe is the production cluster probe: it pings the apiserver's own
+// /readyz endpoint via client-go (no kubectl binary), bounded by a short timeout so a
+// dead apiserver fails the check fast instead of hanging the request. The kubeconfig is
+// resolved by the standard rules at call time, matching furnish, so startup never
+// depends on one being present.
+func clusterReadyProbe(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, "kubectl", "get", "--raw=/readyz").CombinedOutput(); err != nil {
-		return fmt.Errorf("kubectl get --raw=/readyz: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return kube.APIServerReady(ctx, "")
 }
 
 func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {

@@ -84,14 +84,14 @@ unreachable apiserver is not fixed by a restart). Green only when every check pa
 ```json
 { "ready": true, "checks": [
   { "name": "roots_readable", "ok": true },
-  { "name": "kubectl_reachable", "ok": true }
+  { "name": "apiserver_reachable", "ok": true }
 ] }
 ```
 
 | Check | Meaning |
 |-------|---------|
 | `roots_readable` | the operating roots (monitor / daemon / config) exist and are readable. In a container these are the volume mounts, so a mount that failed to attach shows up red here rather than as silent misbehaviour downstream. |
-| `kubectl_reachable` | kubectl reaches the apiserver (`get --raw=/readyz`, 3s timeout). delightd operates the cluster, so a delightd that cannot reach kubectl is not ready. |
+| `apiserver_reachable` | delightd reaches the apiserver via client-go, pinging its `/readyz` (3s timeout). delightd operates the cluster, so a delightd that cannot reach the apiserver is not ready. |
 
 Status: `200` when ready; `503` when any check fails, with the failing check's `ok`
 set false and its `error` naming why -- never a bare "not ready". One HTTP answer
