@@ -34,7 +34,12 @@ func TestAggregatorScan(t *testing.T) {
 	os.MkdirAll(proj2Dir, 0755)
 	os.WriteFile(filepath.Join(proj2Dir, "mcp.json"), []byte(`{ broken json }`), 0644)
 
+	// delightd's own tools come from a self-manifest, dogfooding the same contract.
+	selfManifest := filepath.Join(tmpDir, "delightd-mcp.json")
+	os.WriteFile(selfManifest, []byte(`{"tools":[{"name":"trigger_backup","description":"back up a project","inputSchema":{},"handler":{"type":"http","method":"POST","url":"http://127.0.0.1:8088/projects/{project}/backup"}}]}`), 0644)
+
 	agg := NewAggregator(tmpDir)
+	agg.SetSelfManifest(selfManifest)
 
 	err := agg.ScanProjects([]string{"odysseus", "broken", "nonexistent"})
 	if err != nil {
@@ -42,7 +47,7 @@ func TestAggregatorScan(t *testing.T) {
 	}
 
 	tools := agg.GetTools()
-	// Should have odysseus_check_health and delightd_trigger_backup
+	// Should have odysseus_check_health and delightd_trigger_backup (from the self-manifest)
 	if len(tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(tools))
 	}

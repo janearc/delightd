@@ -181,6 +181,7 @@ func assertBakedConfig(t *testing.T, tag, sha string) {
 	}
 	for _, f := range []string{
 		"delight.yaml",
+		"mcp.json", // delightd's own agent skill, baked so the daemon loads its self-tools
 		filepath.Join("kube", "meubilair.yaml"),
 		filepath.Join("kube", "kube", "kustomization.yaml"),
 	} {

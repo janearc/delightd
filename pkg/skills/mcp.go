@@ -2,7 +2,6 @@ package skills
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os/exec"
 )
@@ -61,10 +60,10 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Execute the tool based on handler type
-		// For a real production MCP server, we'd capture output streams properly.
+		// Execute the tool based on handler type.
 		var output string
-		if tool.Handler.Type == "command" {
+		switch tool.Handler.Type {
+		case "command":
 			cmd := exec.Command(tool.Handler.Command, tool.Handler.Args...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -72,11 +71,18 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				output = string(out)
 			}
-		} else if tool.Handler.Type == "internal" && tool.Handler.Method == "backup" {
-			// Dogfooding triggers backup. In a real scenario we'd call the control port or internal func
-			output = "Backup triggered for " + fmt.Sprintf("%v", params.Arguments["project"])
-		} else {
-			output = "Unsupported handler type"
+		case "http":
+			// Render {name} path params from the call arguments, then hit the control
+			// port (or any URL the tool names). This is how delightd's own tools -- and
+			// any fleet tool with a parameterized route -- actually dispatch.
+			rendered, err := renderURL(tool.Handler.URL, params.Arguments)
+			if err != nil {
+				output = err.Error()
+			} else {
+				output = doHTTP(tool.Handler.Method, rendered)
+			}
+		default:
+			output = "unsupported handler type: " + tool.Handler.Type
 		}
 
 		sendResponse(map[string]interface{}{

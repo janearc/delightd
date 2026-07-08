@@ -56,7 +56,8 @@ RUN test -n "$GIT_SHA" || { echo "ERROR: GIT_SHA build-arg is required (--build-
  && cp meubilair.yaml /out/etc/delightd/kube-${GIT_SHA}/meubilair.yaml \
  && cp -r kube /out/etc/delightd/kube-${GIT_SHA}/kube \
  && ln -s kube-${GIT_SHA} /out/etc/delightd/kube \
- && cp delight.yaml /out/etc/delightd/delight.yaml
+ && cp delight.yaml /out/etc/delightd/delight.yaml \
+ && cp mcp.json /out/etc/delightd/mcp.json
 
 # Stage 2: The microscopic runtime container
 # 'scratch' is a literally empty filesystem. 0 bytes. Maximum security.

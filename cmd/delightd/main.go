@@ -131,6 +131,11 @@ func runDaemon(dryRun, immediate bool) error {
 	}
 
 	skillAggregator := skills.NewAggregator(monitorRoot)
+	// delightd dogfoods the skill contract: its own agent tools (furnish, backup, reset)
+	// are declared in the baked mcp.json under ConfigRoot, registered under the "delightd"
+	// namespace like any fleet project -- an agent drives delightd through the same MCP
+	// surface whether delightd runs on disk or in a container.
+	skillAggregator.SetSelfManifest(filepath.Join(cfg.System.ConfigRoot, "mcp.json"))
 
 	syncSkills := func() {
 		if !cfg.System.AgentSkills.Enabled {

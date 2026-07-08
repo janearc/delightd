@@ -32,7 +32,14 @@ func GenerateCLIWrapper(varBinDir string, tools []Tool) error {
 			argsStr := strings.Join(t.Handler.Args, " ")
 			sb.WriteString(fmt.Sprintf("    exec %s %s \"$@\"\n", t.Handler.Command, argsStr))
 		case "http":
-			sb.WriteString(fmt.Sprintf("    curl -s -X %s \"%s\" -d \"$*\"\n", t.Handler.Method, t.Handler.URL))
+			// Map each {name} path param onto a positional arg ($1, $2, ...) in
+			// first-seen order, so `delight delightd furnish_up <piece>` lands the piece
+			// in the route path. Non-parameterized URLs render unchanged.
+			rendered := t.Handler.URL
+			for i, p := range urlParams(t.Handler.URL) {
+				rendered = strings.ReplaceAll(rendered, "{"+p+"}", fmt.Sprintf("$%d", i+1))
+			}
+			sb.WriteString(fmt.Sprintf("    curl -s -X %s \"%s\" -d \"$*\"\n", t.Handler.Method, rendered))
 		case "internal":
 			if t.Handler.Method == "backup" {
 				sb.WriteString("    curl -s -X POST \"http://localhost:8088/projects/$1/backup\"\n")
