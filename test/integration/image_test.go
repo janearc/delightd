@@ -5,8 +5,16 @@
 // surface (docs/api.md, via verifyControlSurface) against the containerized daemon -- the
 // same drive daemon_test.go runs against the bare binary. Containerization fundamentally
 // changes how delightd is deployed, so the container earns the API surface, not a /health
-// smoke check. (The /furnish operator routes have their own handler tests and are driven
-// end-to-end against the real container by the host-wrapper integration test.)
+// smoke check. This includes a real POST /projects/{name}/backup and a check that the
+// checkpoint .tgz lands on the host-shared disk the container wrote it to, not just a 200.
+//
+// What this does NOT prove: the /furnish operator routes are never driven against a live
+// Kubernetes apiserver anywhere in this suite. pkg/furnish's own tests exercise the
+// handler logic against a fake dynamic client (an in-memory object tracker, not a real
+// apiserver), and wrapper_test.go drives the wrapper's furnish verbs against an httptest
+// stub daemon -- not the containerized one. Read furnish coverage as "handler and wrapper
+// logic verified against fakes/stubs," not "furnish proven against a real cluster"; there
+// is no k3s, or any live apiserver, driven anywhere in this repo yet.
 //
 // It also proves the config bake resolves inside the image (docker cp + readlink),
 // which the mounted synthetic config deliberately shadows for the API drive.
@@ -158,6 +166,10 @@ projects:
 		wantModel:          mockModel, // /discovery/llms must report the mocked backend
 		skillsEnabled:      true,      // agent enumerates delightd's own tools via /mcp
 		controlToken:       controlToken,
+		// backups_root in the synthetic config is /var/backups, and /var is bind-mounted
+		// read-write to daemonRoot, so a checkpoint the container writes lands here on
+		// the host -- letting the backup subtest check the artifact, not just the 200.
+		backupsDir: filepath.Join(daemonRoot, "backups"),
 	})
 	if t.Failed() {
 		t.Logf("container logs:\n%s", containerLogs(name))

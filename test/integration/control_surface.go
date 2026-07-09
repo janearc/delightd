@@ -15,8 +15,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // surfaceExpect carries the few facts that differ by deployment (the project paths as
@@ -40,6 +43,12 @@ type surfaceExpect struct {
 	// subtests (backup/reset/register, PUT /state, POST /mcp) send it. Empty means the
 	// deployment wired no token -- the gated routes would then 503.
 	controlToken string
+	// backupsDir is the deployment's backups_root, as a path this test process can read
+	// directly (the container e2e bind-mounts it read-write to a host temp dir). The
+	// backup subtest waits for a checkpoint .tgz to appear under
+	// filepath.Join(backupsDir, "fake-dirty") after the 200, so it proves the archive
+	// landed on disk rather than only that the handler accepted the trigger.
+	backupsDir string
 }
 
 // verifyControlSurface drives every route in docs/api.md against base and asserts each
@@ -312,7 +321,37 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 		if status := postBody(t, base+"/projects/fake-dirty/backup", ``, exp.controlToken); status != http.StatusOK {
 			t.Fatalf("POST /projects/fake-dirty/backup = %d, want 200", status)
 		}
+		// A 200 only proves the control handler accepted the trigger and moved the state
+		// machine to backing_up; the checkpoint itself is written asynchronously by the
+		// daemon's eval loop. Wait for the .tgz to actually land, the same assertion
+		// daemon_test.go makes against the bare binary, so this proves the archive and
+		// not just the accept.
+		waitForBackupArchive(t, filepath.Join(exp.backupsDir, "fake-dirty"), 30*time.Second)
 	})
+}
+
+// waitForBackupArchive blocks until a non-empty .tgz appears in dir or the deadline
+// passes. The checkpoint is written by the daemon's eval loop after the trigger, so it is
+// necessarily asynchronous to the POST that accepted it.
+func waitForBackupArchive(t *testing.T, dir string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".tgz") {
+					continue
+				}
+				if fi, statErr := e.Info(); statErr == nil && fi.Size() > 0 {
+					t.Logf("checkpoint written: %s (%d bytes)", filepath.Join(dir, e.Name()), fi.Size())
+					return
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("no checkpoint .tgz appeared under %s within %s", dir, within)
 }
 
 // --- small HTTP helpers, tolerant of non-200 where the API documents one ---
