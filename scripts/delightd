@@ -41,6 +41,12 @@ CA_SOURCE="${DELIGHT_CA_SOURCE:-$HOME/.kube/k3d-fleet-ca.crt}"
 # /Users with its VM, not /tmp, so a mount of /tmp lands empty in the container.
 CREDS_DIR="${DELIGHT_CREDS_DIR:-$HOME/.delightd/creds}"
 
+# compose interpolates DELIGHT_CREDS_DIR and GIT_SHA (a build arg) for EVERY subcommand, not
+# just `up`, so export them here -- otherwise status/logs/stop error on the required-var
+# guards and misreport. start recomputes the stamped GIT_SHA for the actual build.
+export DELIGHT_CREDS_DIR="$CREDS_DIR"
+export GIT_SHA="${GIT_SHA:-$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unset)}"
+
 log() { printf 'delightd: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
 
@@ -110,7 +116,7 @@ cmd_start() {
   resolve_creds
   local sha
   sha="$(git_sha)"
-  DELIGHT_CREDS_DIR="$CREDS_DIR" GIT_SHA="$sha" compose up -d --build delightd
+  GIT_SHA="$sha" compose up -d --build delightd
   log "started (image stamp $sha); check: delightd status"
 }
 
