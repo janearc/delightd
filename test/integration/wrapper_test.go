@@ -66,7 +66,11 @@ func TestWrapperForwarding(t *testing.T) {
 	mux.HandleFunc("/furnish/", func(w http.ResponseWriter, r *http.Request) { record(r); w.Write([]byte(`{"ok":true}`)) })
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	env := []string{"DELIGHT_CONTROL_ADDR=" + strings.TrimPrefix(srv.URL, "http://")}
+	// DELIGHTD_SRC to a throwaway so the wrapper does not source the real checkout's .env.
+	env := []string{
+		"DELIGHT_CONTROL_ADDR=" + strings.TrimPrefix(srv.URL, "http://"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+	}
 
 	// status: readyz 503 -> non-zero exit, and it reports the status.
 	if out, code := runWrapper(t, env, "status"); code == 0 || !strings.Contains(out, "HTTP 503") {
@@ -108,6 +112,7 @@ func TestWrapperCreds(t *testing.T) {
 
 	env := []string{
 		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + t.TempDir(), // no real .env sourced
 		"DELIGHT_CREDS_DIR=" + credsDir,
 		"DELIGHT_CA_SOURCE=" + caFile,
 		"DELIGHT_APISERVER=https://k3d-fleet-serverlb:6443",
@@ -124,6 +129,34 @@ func TestWrapperCreds(t *testing.T) {
 	}
 	if kc, _ := os.ReadFile(filepath.Join(credsDir, "kubeconfig")); !strings.Contains(string(kc), "tokenFile: /run/delightd/token") {
 		t.Errorf("kubeconfig not assembled: %s", kc)
+	}
+}
+
+// TestWrapperSourcesEnv: the wrapper reads per-workstation config from a .env in the
+// checkout, so values (here the 1Password reference) need not be exported on every call.
+func TestWrapperSourcesEnv(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, ".env"),
+		[]byte("DELIGHT_TOKEN_ITEM=op://envtest/delightd/token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+	writeStub(t, filepath.Join(binDir, "op"), "#!/usr/bin/env bash\necho fake-token\n")
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + src,
+		"DELIGHT_CREDS_DIR=" + t.TempDir(),
+		"DELIGHT_CA_SOURCE=" + caFile,
+	}
+	out, code := runWrapper(t, env, "creds")
+	if code != 0 {
+		t.Fatalf("creds: code=%d out=%q", code, out)
+	}
+	if !strings.Contains(out, "op://envtest/delightd/token") {
+		t.Errorf("wrapper did not source .env's DELIGHT_TOKEN_ITEM: %q", out)
 	}
 }
 

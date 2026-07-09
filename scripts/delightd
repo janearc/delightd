@@ -14,8 +14,20 @@
 # docker-compose.yml; default $HOME/work/delightd).
 set -euo pipefail
 
-CTRL="http://${DELIGHT_CONTROL_ADDR:-127.0.0.1:8088}"
 SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+
+# Per-workstation config lives in a gitignored .env in the checkout (the 1Password
+# credential reference, the apiserver URL, the CA path, the mount roots), so you set it
+# once instead of exporting on every call. Committed defaults stay neutral conventions; your
+# .env is where the real vault name and cluster address go. See .env.example.
+if [ -f "$SRC/.env" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$SRC/.env"
+  set +a
+fi
+
+CTRL="http://${DELIGHT_CONTROL_ADDR:-127.0.0.1:8088}"
 NETWORK="dev-fleet"
 
 # Credential resolution (the light fake-EKS model -- see docs/kubernetes-access.md). These
