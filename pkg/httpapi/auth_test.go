@@ -110,12 +110,25 @@ func TestRequireBearer_NotProvisioned(t *testing.T) {
 // Mux actually registered, and asserts EVERY write verb is gated (401 without a bearer) and
 // EVERY read is open (never 401). A route added later is covered automatically -- it is gated
 // by its method, and this table sees it because it reads s.routePatterns, not a hand-kept list.
+// The ONLY mutations allowed through ungated are the recorded citizen routes (s.openMutations),
+// and the exemption list itself is pinned below so it cannot silently grow.
 func TestGateCoversEveryMutatingRoute(t *testing.T) {
 	s := gatedServer(t)
 	mux := s.Mux()
 
 	if len(s.routePatterns) == 0 {
 		t.Fatal("no routes registered; the table below would vacuously pass")
+	}
+
+	// The exemption is exactly the ruled set: frood announce (2026-07-09). Anything else
+	// appearing here is a leak, not a convenience.
+	wantOpen := []string{"POST /register"}
+	if len(s.openMutations) != len(wantOpen) || s.openMutations[0] != wantOpen[0] {
+		t.Fatalf("openMutations = %v, want exactly %v -- a new ungated mutation needs a ruling", s.openMutations, wantOpen)
+	}
+	openSet := map[string]bool{}
+	for _, p := range s.openMutations {
+		openSet[p] = true
 	}
 
 	var sawMutating, sawRead bool
@@ -126,7 +139,7 @@ func TestGateCoversEveryMutatingRoute(t *testing.T) {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader("{}")))
 
-		if isMutatingPattern(pattern) {
+		if isMutatingPattern(pattern) && !openSet[pattern] {
 			sawMutating = true
 			if rr.Code != http.StatusUnauthorized {
 				t.Errorf("%s: mutating route not gated (code = %d without a bearer, want 401)", pattern, rr.Code)
@@ -144,10 +157,24 @@ func TestGateCoversEveryMutatingRoute(t *testing.T) {
 
 		sawRead = true
 		if rr.Code == http.StatusUnauthorized {
-			t.Errorf("%s: read route must never be gated, got 401", pattern)
+			t.Errorf("%s: read/citizen route must never be gated, got 401", pattern)
 		}
 	}
 	if !sawMutating || !sawRead {
 		t.Fatalf("table did not exercise both classes (mutating=%v, read=%v)", sawMutating, sawRead)
+	}
+}
+
+// TestRegisterIsOpenToCitizens pins the ruling directly: a frood announcing itself carries no
+// operator bearer and must not be turned away by the gate (401/503) -- rejecting a bogus
+// registrant is the heartbeat/lease layer's job, after announce.
+func TestRegisterIsOpenToCitizens(t *testing.T) {
+	s := gatedServer(t)
+	mux := s.Mux()
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/register", strings.NewReader("{}")))
+	if rr.Code == http.StatusUnauthorized || rr.Code == http.StatusServiceUnavailable {
+		t.Fatalf("citizen announce was gated (code = %d); registration is a citizen right, not an operator mutation", rr.Code)
 	}
 }

@@ -94,6 +94,11 @@ type Server struct {
 	// routePatterns records every pattern Mux registers, in registration order, so a test can
 	// assert the bearer gate covers exactly the mutating verbs and no later route can slip it.
 	routePatterns []string
+
+	// openMutations records the mutating patterns deliberately registered WITHOUT the bearer
+	// gate (citizen rights, e.g. frood announce -- see registerCitizenRoute). A test pins this
+	// list to exactly the ruled exemptions so it cannot silently grow.
+	openMutations []string
 }
 
 // eventPublisher is the subset of Big Little Mesh's emit.Publisher that handleRegister uses
@@ -279,7 +284,7 @@ func (s *Server) Mux() *http.ServeMux {
 
 	s.register(mux, "GET /projects", s.handleProjectsAll)        // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
 	s.register(mux, "GET /registrations", s.handleRegistrations) // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
-	s.register(mux, "POST /register", s.handleRegister)          // a frood joins the live registry (additive, optional; not yet required)
+	s.registerCitizenRoute(mux, "POST /register", s.handleRegister) // frood announce: open by ruling (see registerCitizenRoute)
 	s.register(mux, "GET /state", s.handleStateAll)              // enablement home: every project's effective state (absent reads disabled)
 	s.register(mux, "GET /state/{name}", s.handleStateGet)       // one project's enablement (NOT the backup diagnostics at /projects/{name}/state)
 	s.register(mux, "PUT /state/{name}", s.handleStatePut)       // idempotent enable/disable; roster-bound, reason required on disable

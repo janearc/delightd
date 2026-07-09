@@ -22,6 +22,20 @@ func (s *Server) register(mux *http.ServeMux, pattern string, h http.HandlerFunc
 	mux.HandleFunc(pattern, h)
 }
 
+// registerCitizenRoute adds a mutating route that is DELIBERATELY not bearer-gated: a citizen
+// right, not an operator mutation (ruled 2026-07-09). Registration is how a frood announces
+// itself; citizens do not hold the operator's control token (the creds mount belongs to the
+// operator), so gating announce would lock every citizen out of the mesh it is joining.
+// Rejecting a bogus or dead registrant is the heartbeat/lease layer's job, which verifies
+// liveness AFTER announce -- announce itself stays open. The pattern is recorded in
+// openMutations so the gate-coverage test can pin this exemption to exactly the routes ruled
+// open, never a silent leak.
+func (s *Server) registerCitizenRoute(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
+	s.routePatterns = append(s.routePatterns, pattern)
+	s.openMutations = append(s.openMutations, pattern)
+	mux.HandleFunc(pattern, h)
+}
+
 // isMutatingPattern reports whether a "METHOD /path" mux pattern names a state-changing verb.
 // Reads (GET, and HEAD/OPTIONS were there any) are not mutations and stay open.
 func isMutatingPattern(pattern string) bool {
