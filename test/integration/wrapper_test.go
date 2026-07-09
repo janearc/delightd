@@ -96,6 +96,37 @@ func TestWrapperForwarding(t *testing.T) {
 	}
 }
 
+// TestWrapperCreds drives `delightd creds`: it resolves credentials (op -> token,
+// credential-less kubeconfig) and reports, without touching docker/colima. This is the
+// isolation point for exercising the op path.
+func TestWrapperCreds(t *testing.T) {
+	binDir := t.TempDir()
+	credsDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+	writeStub(t, filepath.Join(binDir, "op"), "#!/usr/bin/env bash\necho fake-token\n")
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+		"DELIGHT_CA_SOURCE=" + caFile,
+		"DELIGHT_APISERVER=https://k3d-fleet-serverlb:6443",
+	}
+	out, code := runWrapper(t, env, "creds")
+	if code != 0 {
+		t.Fatalf("creds: code=%d out=%q", code, out)
+	}
+	if !strings.Contains(out, "ok: credentials resolve") || !strings.Contains(out, "k3d-fleet-serverlb") {
+		t.Errorf("creds summary missing expected lines: %q", out)
+	}
+	if strings.Contains(out, "fake-token") {
+		t.Error("creds printed the token; it must only summarize, never emit the secret")
+	}
+	if kc, _ := os.ReadFile(filepath.Join(credsDir, "kubeconfig")); !strings.Contains(string(kc), "tokenFile: /run/delightd/token") {
+		t.Errorf("kubeconfig not assembled: %s", kc)
+	}
+}
+
 // TestWrapperStartDispatch stubs colima, docker, git, and op on PATH and asserts `start`
 // resolves credentials (reads the token from 1Password, assembles a credential-less
 // kubeconfig) and brings the container up through docker compose.

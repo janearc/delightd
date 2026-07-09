@@ -58,6 +58,11 @@ ensure_colima() {
 # 1Password host-side (never in the container), and writes a credential-less kubeconfig
 # (server + CA + tokenFile -- no secret in the file) plus the token into CREDS_DIR, which
 # mounts read-only at /run/delightd. See docs/kubernetes-access.md.
+#
+# `op read` goes through the 1Password desktop-app integration, so it prompts for Touch ID:
+# a human authorizes each credential fetch, and delightd cannot get cluster access without a
+# live biometric. Do NOT set OP_SERVICE_ACCOUNT_TOKEN here -- that path is silent and would
+# bypass the biometric gate (and it is the container-egress model we rejected).
 resolve_creds() {
   mkdir -p "$CREDS_DIR"
   chmod 700 "$CREDS_DIR"
@@ -101,6 +106,20 @@ cmd_stop() {
   compose stop delightd
   # The token is only needed while the container runs; take it off disk once it is down.
   rm -f "$CREDS_DIR/token" 2>/dev/null || true
+}
+
+# creds resolves the credentials without starting anything -- so the op path (and its Touch
+# ID prompt) can be exercised in isolation before a full bring-up, and so the 03:20 runbook
+# can confirm the credential chain before `start`. Prints a summary, never the token itself.
+cmd_creds() {
+  resolve_creds
+  local bytes
+  bytes=$(wc -c <"$CREDS_DIR/token" | tr -d ' ')
+  echo "token:      ${bytes} bytes from ${TOKEN_ITEM}"
+  echo "ca:         ${CREDS_DIR}/ca.crt (from ${CA_SOURCE})"
+  echo "kubeconfig: ${CREDS_DIR}/kubeconfig -> ${APISERVER}"
+  echo "mount:      ${CREDS_DIR} -> /run/delightd (read-only)"
+  echo "ok: credentials resolve; 'delightd start' will use them"
 }
 
 cmd_restart() {
@@ -157,6 +176,7 @@ delightd -- operator container control (SRE front door)
   delightd restart        stop then start
   delightd logs [args]    stream the container's logs (args pass through to compose logs)
   delightd status         runtime + container + readyz; non-zero exit unless fully ready
+  delightd creds          resolve credentials from 1Password (Touch ID) without starting; verify the chain
   delightd furnish ...    converge the meubilair (list | health [piece] | up <piece> | down <piece>)
   delightd <path>         forward a GET to the control port (e.g. delightd git, delightd health)
 EOF
@@ -171,6 +191,7 @@ main() {
     restart) cmd_restart ;;
     logs) cmd_logs "$@" ;;
     status) cmd_status ;;
+    creds) cmd_creds ;;
     furnish) cmd_furnish "$@" ;;
     "" | -h | --help | help) usage ;;
     *)

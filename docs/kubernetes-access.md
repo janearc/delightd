@@ -78,6 +78,16 @@ it (`op read`, authenticated host-side by your own 1Password, never in the conta
 writes it to the transient token mount. The wrapper is delightd's local "IMDS": the
 trusted identity bridge, the role instance metadata plays on EKS.
 
+**A live biometric gates each fetch.** `op read` goes through the 1Password desktop-app
+integration, so it prompts for Touch ID -- a human authorizes every credential fetch, and
+delightd cannot obtain cluster access without a live biometric (do not set a 1Password
+service-account token, which is silent and would bypass the gate). `delightd creds`
+resolves the credential chain on its own -- no container start -- so this path, Touch ID
+and all, can be exercised before a full `start` and confirmed in the runbook. The
+trade-off: `delightd start` is a human-in-the-loop action, which suits the operator-driven
+recovery it exists for; fully-unattended boot survival (a launchd auto-start with no one to
+tap Touch ID) would need a silent credential and is a separate decision, not wired here.
+
 **Why the token is static-scoped, not short-lived-minted.** Minting bound tokens requires
 apiserver access, and the apiserver lives on ring0 where delightd is the sole ingress --
 the host cannot reach it to mint. So the token is a scoped, long-lived SA token,
