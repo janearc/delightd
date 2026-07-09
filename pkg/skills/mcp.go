@@ -77,7 +77,7 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			// any fleet tool with a parameterized route -- dispatch. The daemon's body is
 			// the tool output; a non-2xx that carries a body (e.g. a 503 health ladder) is
 			// still returned, and a bodiless failure surfaces its error.
-			rendered, err := parseURLTemplate(tool.Handler.URL).renderArgs(params.Arguments)
+			rendered, err := renderURL(tool.Handler.URL, params.Arguments)
 			if err != nil {
 				output = err.Error()
 				break

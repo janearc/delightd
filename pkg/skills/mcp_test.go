@@ -92,8 +92,8 @@ func TestHandleMCPCallTool_MissingArg(t *testing.T) {
 		Handler: HandlerDef{Type: "http", Method: "POST", URL: "http://127.0.0.1:8088/furnish/{piece}/up"},
 	}
 	text := mcpCallText(t, agg, "delightd_furnish_up", `{}`)
-	if !strings.Contains(text, "missing required argument") {
-		t.Errorf("missing piece should report the missing arg, got: %s", text)
+	if !strings.Contains(text, "unfilled path parameter") {
+		t.Errorf("missing piece should report the unfilled parameter, got: %s", text)
 	}
 }
 

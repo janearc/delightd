@@ -6,31 +6,31 @@ import (
 	"testing"
 )
 
-// TestURLTemplateParams checks the distinct, first-seen parameter order the CLI relies on.
-func TestURLTemplateParams(t *testing.T) {
-	if got := parseURLTemplate("http://h/furnish/{piece}/up").params(); len(got) != 1 || got[0] != "piece" {
-		t.Errorf("params = %v, want [piece]", got)
+// TestRenderURL checks named substitution, escaping, and the unfilled-placeholder error.
+func TestRenderURL(t *testing.T) {
+	out, err := renderURL("http://h/furnish/{piece}/up", map[string]any{"piece": "surrealdb"})
+	if err != nil || out != "http://h/furnish/surrealdb/up" {
+		t.Errorf("renderURL = %q, %v", out, err)
 	}
-	if p := parseURLTemplate("http://h/x/{a}/{b}/{a}").params(); len(p) != 2 || p[0] != "a" || p[1] != "b" {
-		t.Errorf("params distinct/order = %v, want [a b]", p)
+	out, _ = renderURL("http://h/p/{name}", map[string]any{"name": "a b/c"})
+	if out != "http://h/p/a%20b%2Fc" {
+		t.Errorf("renderURL escaping = %q", out)
 	}
-	if p := parseURLTemplate("http://h/health").params(); len(p) != 0 {
-		t.Errorf("params on a plain URL = %v, want none", p)
+	if _, err := renderURL("http://h/{x}", map[string]any{}); err == nil {
+		t.Error("renderURL with a missing param: want error")
 	}
 }
 
-// TestURLTemplateRenderArgs checks named substitution, escaping, and the missing-arg error.
-func TestURLTemplateRenderArgs(t *testing.T) {
-	out, err := parseURLTemplate("http://h/furnish/{piece}/up").renderArgs(map[string]any{"piece": "surrealdb"})
-	if err != nil || out != "http://h/furnish/surrealdb/up" {
-		t.Errorf("renderArgs = %q, %v", out, err)
+// TestPositionalURL checks the CLI's {name} -> $N rewrite in order of appearance.
+func TestPositionalURL(t *testing.T) {
+	if got := positionalURL("http://h/furnish/{piece}/up"); got != "http://h/furnish/$1/up" {
+		t.Errorf("positionalURL = %q, want .../$1/up", got)
 	}
-	out, _ = parseURLTemplate("http://h/p/{name}").renderArgs(map[string]any{"name": "a b/c"})
-	if out != "http://h/p/a%20b%2Fc" {
-		t.Errorf("renderArgs escaping = %q", out)
+	if got := positionalURL("http://h/x/{a}/{b}"); got != "http://h/x/$1/$2" {
+		t.Errorf("positionalURL two params = %q, want $1/$2", got)
 	}
-	if _, err := parseURLTemplate("http://h/{x}").renderArgs(map[string]any{}); err == nil {
-		t.Error("renderArgs with a missing param: want error")
+	if got := positionalURL("http://h/health"); got != "http://h/health" {
+		t.Errorf("positionalURL plain = %q, want unchanged", got)
 	}
 }
 

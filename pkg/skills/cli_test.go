@@ -21,6 +21,14 @@ func TestGenerateCLIWrapper(t *testing.T) {
 			},
 		},
 		{
+			Name: "example_furnish_up",
+			Handler: HandlerDef{
+				Type:   "http",
+				Method: "POST",
+				URL:    "http://localhost:8088/furnish/{piece}/up",
+			},
+		},
+		{
 			Name: "transparent_dump",
 			Handler: HandlerDef{
 				Type:    "command",
@@ -51,6 +59,10 @@ func TestGenerateCLIWrapper(t *testing.T) {
 
 	if !strings.Contains(content, "curl -s -X GET \"http://test\"") {
 		t.Errorf("missing http handler")
+	}
+	// A {name} path param becomes a positional shell arg.
+	if !strings.Contains(content, "curl -s -X POST \"http://localhost:8088/furnish/$1/up\"") {
+		t.Errorf("http path param not mapped to a positional arg")
 	}
 	if !strings.Contains(content, "exec /bin/dump -v") {
 		t.Errorf("missing command handler")

@@ -32,16 +32,10 @@ func GenerateCLIWrapper(varBinDir string, tools []Tool) error {
 			argsStr := strings.Join(t.Handler.Args, " ")
 			sb.WriteString(fmt.Sprintf("    exec %s %s \"$@\"\n", t.Handler.Command, argsStr))
 		case "http":
-			// Map each {name} path param onto a positional arg ($1, $2, ...) in
-			// first-seen order, so `delight delightd furnish_up <piece>` lands the piece
-			// in the route path. Non-parameterized URLs render unchanged.
-			tmpl := parseURLTemplate(t.Handler.URL)
-			pos := map[string]string{}
-			for i, p := range tmpl.params() {
-				pos[p] = fmt.Sprintf("$%d", i+1)
-			}
-			rendered, _ := tmpl.render(func(name string) (string, error) { return pos[name], nil })
-			fmt.Fprintf(&sb, "    curl -s -X %s \"%s\" -d \"$*\"\n", t.Handler.Method, rendered)
+			// Map each {name} path param onto a positional arg ($1, $2, ...), so
+			// `delight delightd furnish_up <piece>` lands the piece in the route path.
+			// Non-parameterized URLs render unchanged.
+			fmt.Fprintf(&sb, "    curl -s -X %s \"%s\" -d \"$*\"\n", t.Handler.Method, positionalURL(t.Handler.URL))
 		case "internal":
 			if t.Handler.Method == "backup" {
 				sb.WriteString("    curl -s -X POST \"http://localhost:8088/projects/$1/backup\"\n")
