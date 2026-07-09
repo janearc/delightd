@@ -95,8 +95,11 @@ the runbook uses `delightd furnish` and the control port for everything.
 **Bring-up sequence (and the one-time bootstrap):**
 
 1. `k3d cluster create ... --network ring0` -- the apiserver comes up on ring0.
-2. *One time:* using k3d's admin kubeconfig (host-side, at creation), create delightd's
-   scoped ServiceAccount + RBAC and store its token in 1Password.
+2. *One time:* with k3d's admin kubeconfig (host-side, at creation), apply
+   `deploy/delightd-operator-rbac.yaml` (the scoped ServiceAccount + ClusterRole + a
+   long-lived token Secret), read the token out of that Secret, and store it in 1Password.
+   The ClusterRole is delightd's deliberate blast radius -- manage the meubilair's workload
+   and config kinds, no Secret reads, no exec, no RBAC-bind (no escalation).
 3. `delightd start`: the wrapper reads k3d's CA and server, reads the token from 1Password,
    assembles the credential-less kubeconfig + token as read-only mounts, and brings the
    container up on ring0.

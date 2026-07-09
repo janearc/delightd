@@ -1,0 +1,85 @@
+# delightd operator identity -- the scoped ServiceAccount furnish converges the mesh as.
+#
+# Applied ONCE, with admin, at cluster bootstrap -- this is NOT a furnish piece. delightd
+# cannot furnish its own credential (it needs the credential to reach the apiserver in the
+# first place), so this is the one manifest a human applies out-of-band. See
+# docs/kubernetes-access.md, "the light fake-EKS model".
+#
+# Bootstrap:
+#   kubectl apply -f deploy/delightd-operator-rbac.yaml
+#   # read the long-lived token out of the Secret and store it in 1Password:
+#   kubectl -n delightd get secret delightd-operator-token -o jsonpath='{.data.token}' | base64 -d
+#   # -> op item referenced by DELIGHT_TOKEN_ITEM
+#
+# The authority below is delightd's deliberate blast radius: manage the workload and config
+# kinds the meubilair declares, and nothing more. It CANNOT read Secrets (those are injected
+# out-of-band, never furnished), exec into pods, touch nodes, or bind RBAC (no privilege
+# escalation). Adding a kind to a piece that is not listed here is a reviewed change to this
+# file -- the friction is the point.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: delightd
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: delightd-operator
+  namespace: delightd
+---
+# A long-lived token for the SA (k8s 1.24+ does not auto-create these). The wrapper reads
+# it from 1Password, not from here; this Secret is only how the token is minted once.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: delightd-operator-token
+  namespace: delightd
+  annotations:
+    kubernetes.io/service-account.name: delightd-operator
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: delightd-operator
+rules:
+  # The readiness probe pings the apiserver's own /readyz.
+  - nonResourceURLs: ["/readyz", "/healthz", "/livez"]
+    verbs: ["get"]
+  # Namespaces the meubilair declares (fleet, etc.).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  # Core workload-support objects the pieces declare. NOT secrets: those are injected
+  # out-of-band (Kube Secrets, values via stdin), never furnished, so furnish has no read
+  # on them.
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "serviceaccounts", "persistentvolumeclaims", "endpoints"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  # Workloads.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  # Batch pieces (jobs / cronjobs), if declared.
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  # traefik IngressRoute instances (the CRD itself is a separate cluster bootstrap, not
+  # furnish's to install).
+  - apiGroups: ["traefik.io", "traefik.containo.us"]
+    resources: ["ingressroutes", "ingressroutetcps", "middlewares"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: delightd-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: delightd-operator
+subjects:
+  - kind: ServiceAccount
+    name: delightd-operator
+    namespace: delightd
