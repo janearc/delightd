@@ -176,8 +176,11 @@ cmd_furnish() {
     down) [ $# -ge 1 ] || die "usage: delightd furnish down <piece>"; curl -fsS -X POST "$CTRL/furnish/$1/down" && echo ;;
     health)
       local out status
-      out=$(curl -s -w $'\n%{http_code}' "$CTRL/furnish/health${1:+/$1}")
+      out=$(curl -s -w $'\n%{http_code}' "$CTRL/furnish/health${1:+/$1}") || out=$'\n000'
       status="${out##*$'\n'}"
+      if [ "$status" = "000" ]; then
+        die "daemon not reachable at $CTRL (is delightd running? try: delightd status)"
+      fi
       printf '%s\n' "${out%$'\n'*}"
       [ "$status" = "200" ]
       ;;

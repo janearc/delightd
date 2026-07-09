@@ -213,6 +213,24 @@ exit 0
 	}
 }
 
+// TestWrapperFurnishHealthDaemonDown: `furnish health` against an unreachable daemon
+// must report a clear message and a non-zero exit, not abort silently under set -e
+// (the bug in M12 -- cmd_status handles the identical curl failure with `|| echo 000`,
+// furnish health didn't).
+func TestWrapperFurnishHealthDaemonDown(t *testing.T) {
+	env := []string{
+		"DELIGHT_CONTROL_ADDR=127.0.0.1:1", // nothing listens here; curl fails fast
+		"DELIGHTD_SRC=" + t.TempDir(),
+	}
+	out, code := runWrapper(t, env, "furnish", "health")
+	if code == 0 {
+		t.Errorf("furnish health against a down daemon: want non-zero exit, got 0 (%q)", out)
+	}
+	if !strings.Contains(out, "not reachable") {
+		t.Errorf("furnish health against a down daemon: want a clear message, got %q", out)
+	}
+}
+
 func writeStub(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
