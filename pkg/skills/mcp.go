@@ -60,14 +60,19 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Execute the tool based on handler type.
+		// Execute the tool based on handler type. isErr tracks a failed backing execution so
+		// the tool result carries isError=true: an agent must not read a failure (a 503 health
+		// ladder, a command that exited non-zero) as a successful tool call. The body is
+		// preserved as the error content either way.
 		var output string
+		var isErr bool
 		switch tool.Handler.Type {
 		case "command":
 			cmd := exec.Command(tool.Handler.Command, tool.Handler.Args...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				output = err.Error() + ": " + string(out)
+				isErr = true
 			} else {
 				output = string(out)
 			}
@@ -76,10 +81,11 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			// port (or any URL the tool names). This is how delightd's own tools -- and
 			// any fleet tool with a parameterized route -- dispatch. The daemon's body is
 			// the tool output; a non-2xx that carries a body (e.g. a 503 health ladder) is
-			// still returned, and a bodiless failure surfaces its error.
+			// still returned as the error content, with isError set.
 			rendered, err := renderURL(tool.Handler.URL, params.Arguments)
 			if err != nil {
 				output = err.Error()
+				isErr = true
 				break
 			}
 			// Attach the control-port bearer only for a mutation aimed at the loopback control
@@ -93,18 +99,28 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			}
 			resp, err := doHTTP(tool.Handler.Method, rendered, bearer)
 			output = resp
-			if err != nil && resp == "" {
-				output = err.Error()
+			if err != nil {
+				// A non-2xx (or transport failure) is a tool error; keep the daemon's body when
+				// it carried one, otherwise surface the transport error.
+				isErr = true
+				if resp == "" {
+					output = err.Error()
+				}
 			}
 		default:
 			output = "unsupported handler type: " + tool.Handler.Type
+			isErr = true
 		}
 
-		sendResponse(map[string]interface{}{
+		result := map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": output},
 			},
-		}, nil)
+		}
+		if isErr {
+			result["isError"] = true
+		}
+		sendResponse(result, nil)
 
 	default:
 		sendResponse(nil, map[string]interface{}{"code": -32601, "message": "Method not found"})

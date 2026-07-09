@@ -28,6 +28,82 @@ func mcpCallText(t *testing.T, agg *Aggregator, name string, args string) string
 	return result["content"].([]any)[0].(map[string]any)["text"].(string)
 }
 
+// mcpCallResult is mcpCallText plus the isError flag -- the M4 contract (sprints#58) is
+// that a failed backing execution reaches the agent as isError=true, never as a success.
+func mcpCallResult(t *testing.T, agg *Aggregator, name string, args string) (string, bool) {
+	t.Helper()
+	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	agg.HandleMCP(w, req)
+	var resp map[string]any
+	json.NewDecoder(w.Result().Body).Decode(&resp)
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("no result object: %v", resp)
+	}
+	isErr, _ := result["isError"].(bool)
+	return result["content"].([]any)[0].(map[string]any)["text"].(string), isErr
+}
+
+// TestHandleMCPCallTool_HTTPFailureIsError: a 503-with-body from the daemon must surface
+// as isError=true with the body preserved -- an agent calling furnish_health on a RED
+// piece must not receive a successful tool result.
+func TestHandleMCPCallTool_HTTPFailureIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"healthy":false,"pieces":{"kafka":"red"}}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.tools["delightd_furnish_health"] = Tool{
+		Name:    "delightd_furnish_health",
+		Handler: HandlerDef{Type: "http", Method: "GET", URL: srv.URL + "/furnish/health"},
+	}
+	text, isErr := mcpCallResult(t, agg, "delightd_furnish_health", `{}`)
+	if !isErr {
+		t.Error("503 from the daemon must set isError=true")
+	}
+	if text != `{"healthy":false,"pieces":{"kafka":"red"}}` {
+		t.Errorf("failure body not preserved as error content: %q", text)
+	}
+}
+
+// TestHandleMCPCallTool_SuccessNoIsError: a 2xx dispatch stays a plain success.
+func TestHandleMCPCallTool_SuccessNoIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"healthy":true}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.tools["delightd_furnish_health"] = Tool{
+		Name:    "delightd_furnish_health",
+		Handler: HandlerDef{Type: "http", Method: "GET", URL: srv.URL + "/furnish/health"},
+	}
+	if _, isErr := mcpCallResult(t, agg, "delightd_furnish_health", `{}`); isErr {
+		t.Error("2xx must not set isError")
+	}
+}
+
+// TestHandleMCPCallTool_CommandFailureIsError: a command tool whose process exits nonzero
+// is a tool error, not a success with sad text.
+func TestHandleMCPCallTool_CommandFailureIsError(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["example_fail"] = Tool{
+		Name:    "example_fail",
+		Handler: HandlerDef{Type: "command", Command: "sh", Args: []string{"-c", "echo doomed; exit 3"}},
+	}
+	text, isErr := mcpCallResult(t, agg, "example_fail", `{}`)
+	if !isErr {
+		t.Error("nonzero command exit must set isError=true")
+	}
+	if !strings.Contains(text, "doomed") {
+		t.Errorf("command output not preserved in error content: %q", text)
+	}
+}
+
 func TestHandleMCPListTools(t *testing.T) {
 	agg := NewAggregator("/tmp")
 	agg.tools["test_tool"] = Tool{Name: "test_tool"}

@@ -30,6 +30,18 @@ func GenerateCLIWrapper(varBinDir string, tools []Tool) error {
 	sb.WriteString("  printf 'header = \"Authorization: Bearer %s\"\\n' \"$(cat \"$CONTROL_TOKEN_FILE\")\" >\"$cfg\"\n")
 	sb.WriteString("  printf '%s' \"$cfg\"\n")
 	sb.WriteString("}\n\n")
+	// _call issues one request, prints the response body, and exits nonzero unless the status
+	// is 2xx -- so an agent (or a script) gates on the exit code while still seeing the JSON
+	// body on a failure. The portable -w '%{http_code}' pattern is used (not curl -f, which
+	// discards the body, nor --fail-with-body, which is not present on every host).
+	sb.WriteString("_call() {\n")
+	sb.WriteString("  local method=\"$1\" url=\"$2\"; shift 2\n")
+	sb.WriteString("  local out code\n")
+	sb.WriteString("  out=$(curl -s -w $'\\n%{http_code}' -X \"$method\" \"$url\" \"$@\")\n")
+	sb.WriteString("  code=\"${out##*$'\\n'}\"\n")
+	sb.WriteString("  printf '%s\\n' \"${out%$'\\n'*}\"\n")
+	sb.WriteString("  case \"$code\" in 2[0-9][0-9]) return 0 ;; *) return 1 ;; esac\n")
+	sb.WriteString("}\n\n")
 	sb.WriteString("SERVICE=$1\n")
 	sb.WriteString("ACTION=$2\n")
 	sb.WriteString("shift 2\n\n")
@@ -47,16 +59,17 @@ func GenerateCLIWrapper(varBinDir string, tools []Tool) error {
 			// Map each {name} path param onto a positional arg ($1, $2, ...), so
 			// `delight delightd furnish_up <piece>` lands the piece in the route path.
 			// Non-parameterized URLs render unchanged. A mutating verb carries the
-			// control-port bearer (via a one-shot curl config); a read carries none.
+			// control-port bearer (via a one-shot curl config); a read carries none. Both go
+			// through _call, so an HTTP failure is a nonzero exit with the body preserved.
 			if isMutatingMethod(t.Handler.Method) {
-				fmt.Fprintf(&sb, "    cfg=$(_authcfg); curl -s -K \"$cfg\" -X %s \"%s\" -d \"$*\"; rm -f \"$cfg\"\n", t.Handler.Method, positionalURL(t.Handler.URL))
+				fmt.Fprintf(&sb, "    cfg=$(_authcfg); _call %s \"%s\" -K \"$cfg\" -d \"$*\"; rc=$?; rm -f \"$cfg\"; exit $rc\n", t.Handler.Method, positionalURL(t.Handler.URL))
 			} else {
-				fmt.Fprintf(&sb, "    curl -s -X %s \"%s\" -d \"$*\"\n", t.Handler.Method, positionalURL(t.Handler.URL))
+				fmt.Fprintf(&sb, "    _call %s \"%s\" -d \"$*\"\n", t.Handler.Method, positionalURL(t.Handler.URL))
 			}
 		case "internal":
 			if t.Handler.Method == "backup" {
-				// backup is a mutation: carry the bearer.
-				sb.WriteString("    cfg=$(_authcfg); curl -s -K \"$cfg\" -X POST \"http://localhost:8088/projects/$1/backup\"; rm -f \"$cfg\"\n")
+				// backup is a mutation: carry the bearer, and exit nonzero on HTTP failure.
+				sb.WriteString("    cfg=$(_authcfg); _call POST \"http://localhost:8088/projects/$1/backup\" -K \"$cfg\"; rc=$?; rm -f \"$cfg\"; exit $rc\n")
 			}
 		default:
 			sb.WriteString("    echo 'unsupported handler type'\n")
