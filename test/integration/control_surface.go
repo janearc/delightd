@@ -36,6 +36,10 @@ type surfaceExpect struct {
 	// skillsEnabled is true when agent_skills + MCP are on: /mcp is registered and its
 	// tools/list must include delightd's own tools. False asserts /mcp is 404 (skills off).
 	skillsEnabled bool
+	// controlToken is the control-port bearer the deployment provisioned; the mutating
+	// subtests (backup/reset/register, PUT /state, POST /mcp) send it. Empty means the
+	// deployment wired no token -- the gated routes would then 503.
+	controlToken string
 }
 
 // verifyControlSurface drives every route in docs/api.md against base and asserts each
@@ -200,7 +204,7 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 		// Idempotent write: the full desired state in the body -- state + reason
 		// (required on disable) + actor (required). The response is the stored record.
 		body := `{"state":"disabled","reason":"integration test","actor":"itest"}`
-		resp, status := putBody(t, base+"/state/fake-clean", body)
+		resp, status := putBody(t, base+"/state/fake-clean", body, exp.controlToken)
 		if status != http.StatusOK {
 			t.Fatalf("PUT /state/fake-clean = %d, want 200; body %.200q", status, resp)
 		}
@@ -249,14 +253,14 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 	t.Run("POST /register (fail-closed without schema registry)", func(t *testing.T) {
 		// No schema registry in the harness, so registration fail-closes -- the
 		// documented behaviour (#88). Assert it does not falsely succeed.
-		status := postBody(t, base+"/register", `{}`)
+		status := postBody(t, base+"/register", `{}`, exp.controlToken)
 		if status == http.StatusOK {
 			t.Errorf("POST /register = 200 with no schema registry; want a fail-closed error status")
 		}
 	})
 
 	t.Run("POST /projects/{name}/reset", func(t *testing.T) {
-		if status := postBody(t, base+"/projects/fake-dirty/reset", ``); status != http.StatusOK {
+		if status := postBody(t, base+"/projects/fake-dirty/reset", ``, exp.controlToken); status != http.StatusOK {
 			t.Errorf("POST /projects/fake-dirty/reset = %d, want 200", status)
 		}
 	})
@@ -264,15 +268,19 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 	t.Run("POST /mcp (agent drives delightd's own tools)", func(t *testing.T) {
 		if !exp.skillsEnabled {
 			// skills off -> /mcp is not registered.
-			if status := postBody(t, base+"/mcp", `{}`); status != http.StatusNotFound {
+			if status := postBody(t, base+"/mcp", `{}`, exp.controlToken); status != http.StatusNotFound {
 				t.Errorf("POST /mcp = %d, want 404 (route unregistered when skills disabled)", status)
 			}
 			return
 		}
 		// skills on: an agent enumerating a containerized delightd's tools must see
-		// delightd's own operator surface (its baked mcp.json, loaded as self-tools).
-		resp, err := http.Post(base+"/mcp", "application/json",
+		// delightd's own operator surface (its baked mcp.json, loaded as self-tools). POST /mcp
+		// is bearer-gated, so the request carries the provisioned control token.
+		req, _ := http.NewRequest(http.MethodPost, base+"/mcp",
 			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		req.Header.Set("Content-Type", "application/json")
+		setBearer(req, exp.controlToken)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST /mcp: %v", err)
 		}
@@ -301,7 +309,7 @@ func verifyControlSurface(t *testing.T, base string, exp surfaceExpect) {
 	// POST /projects/{name}/backup last: it mutates state (writes a checkpoint) and the
 	// caller waits on the .tgz, so keep the read assertions above it clean.
 	t.Run("POST /projects/{name}/backup", func(t *testing.T) {
-		if status := postBody(t, base+"/projects/fake-dirty/backup", ``); status != http.StatusOK {
+		if status := postBody(t, base+"/projects/fake-dirty/backup", ``, exp.controlToken); status != http.StatusOK {
 			t.Fatalf("POST /projects/fake-dirty/backup = %d, want 200", status)
 		}
 	})
@@ -392,10 +400,11 @@ func getRaw(t *testing.T, url string) (string, int) {
 	return string(body), res.StatusCode
 }
 
-func putBody(t *testing.T, url, body string) (string, int) {
+func putBody(t *testing.T, url, body, bearer string) (string, int) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPut, url, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	setBearer(req, bearer)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PUT %s: %v", url, err)
@@ -405,12 +414,23 @@ func putBody(t *testing.T, url, body string) (string, int) {
 	return string(b), res.StatusCode
 }
 
-func postBody(t *testing.T, url, body string) int {
+func postBody(t *testing.T, url, body, bearer string) int {
 	t.Helper()
-	res, err := http.Post(url, "application/json", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	setBearer(req, bearer)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
 	defer res.Body.Close()
 	return res.StatusCode
+}
+
+// setBearer attaches the control-port bearer for a gated mutation; an empty token is a no-op
+// (the deployment provisioned none, and the route will 503).
+func setBearer(req *http.Request, bearer string) {
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 }

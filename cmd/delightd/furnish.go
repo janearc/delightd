@@ -15,7 +15,8 @@ import (
 // furnishCmd drives delightd's operator surface -- converging the meubilair pieces -- over
 // the control port. delightd holds the single cluster connection (client-go + the baked
 // manifests); the CLI is a thin client, so there is one path to the cluster: the daemon.
-// It talks to 127.0.0.1:8088 by default (the localhost-bound control port). Same
+// It dials 127.0.0.1:8088 by default (the loopback address of the control port; the port
+// itself binds all interfaces and its mutations require the control-port bearer). Same
 // agent-first, CLI-is-the-contract shape as model: cobra, JSON relayed verbatim, the
 // daemon's status mapped to the exit code so an agent or the wrapper can gate on it.
 func furnishCmd() *cobra.Command {

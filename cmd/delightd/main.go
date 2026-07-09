@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -64,6 +65,36 @@ func main() {
 	if err := rootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// controlTokenPath resolves where the control-port bearer is mounted: beside the kubeconfig
+// the wrapper delivers into the creds mount. KUBECONFIG points at that mount
+// (/run/delightd/kubeconfig in the container), so the token sits at its sibling
+// control-token. With KUBECONFIG unset it falls back to the mount's canonical path.
+func controlTokenPath() string {
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		return filepath.Join(filepath.Dir(kc), "control-token")
+	}
+	return "/run/delightd/control-token"
+}
+
+// loadControlToken reads and trims the control-port bearer from path. A missing or empty file
+// is not fatal: it returns nil (the gated routes then serve 503) and logs one loud structured
+// error so a boot without the token is visible, never silent. The token value is never logged.
+func loadControlToken(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("control token not provisioned: bearer-gated routes (mutations, /mcp) will serve 503 until it is mounted; reads and readiness stay open",
+			"path", path, "error", err)
+		return nil
+	}
+	tok := bytes.TrimSpace(raw)
+	if len(tok) == 0 {
+		slog.Error("control token file is present but empty: bearer-gated routes (mutations, /mcp) will serve 503; reads and readiness stay open",
+			"path", path)
+		return nil
+	}
+	return tok
 }
 
 // rootCmd is the delightd command tree. The daemon is the default action; cobra
@@ -385,6 +416,14 @@ func runDaemon(dryRun, immediate bool) error {
 	// client resolves the mounted kubeconfig on first use, so a missing one fails the
 	// routes loud (503) rather than the daemon at startup.
 	api.UseFurnish(filepath.Join(cfg.System.ConfigRoot, "kube", "kube"), kube.LazyClient())
+	// The control-port bearer: read once from the creds mount, beside the kubeconfig the
+	// wrapper delivers (KUBECONFIG points there; default /run/delightd/control-token). A
+	// missing or empty token does NOT stop startup -- the daemon comes up (availability
+	// mandate) and the bearer-gated routes serve 503 until it is provisioned. The value is
+	// never logged, only its path.
+	tokenPath := controlTokenPath()
+	controlToken := loadControlToken(tokenPath)
+	api.UseControlToken(controlToken)
 	mux := api.Mux()
 
 	// Lease lifecycle (additive): a registration is held by a lease the frood's heartbeat

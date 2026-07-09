@@ -84,6 +84,16 @@ type Server struct {
 	// furnishKubeDir is the baked manifest root (a kube/ aggregator) the routes read.
 	furnishClient  func() (*kube.Client, error)
 	furnishKubeDir string
+
+	// controlToken is the bearer the mutating routes and POST /mcp require, read once from
+	// the creds mount at startup and wired via UseControlToken. Empty means not provisioned:
+	// the gated routes fail closed with 503 while reads and readiness stay open (the daemon
+	// still comes up -- availability mandate). It is never logged or otherwise emitted.
+	controlToken []byte
+
+	// routePatterns records every pattern Mux registers, in registration order, so a test can
+	// assert the bearer gate covers exactly the mutating verbs and no later route can slip it.
+	routePatterns []string
 }
 
 // eventPublisher is the subset of Big Little Mesh's emit.Publisher that handleRegister uses
@@ -129,6 +139,12 @@ func (s *Server) UseFurnish(kubeDir string, client func() (*kube.Client, error))
 	s.furnishKubeDir = kubeDir
 	s.furnishClient = client
 }
+
+// UseControlToken wires the bearer the mutating routes and POST /mcp require. tok is the token
+// read from the creds mount at startup; an empty tok means it was not provisioned, and the
+// gated routes serve 503 until it is (reads and readiness stay open regardless). Called by main
+// after config is loaded.
+func (s *Server) UseControlToken(tok []byte) { s.controlToken = tok }
 
 // DrainEvents blocks until the detached NotRegistered emit goroutines have finished. It is
 // called on the shutdown path so an in-flight emit is not dropped when the daemon stops; each
@@ -245,54 +261,58 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-// Mux builds the control-port router with every route registered.
+// Mux builds the control-port router with every route registered. Every route goes through
+// s.register, which wraps a write verb (POST/PUT/PATCH/DELETE) in the bearer gate and leaves a
+// read (GET) open. Gating is derived from the method, not a hand-kept list, so a route added
+// later cannot dodge the gate: it is gated by virtue of being a mutation.
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
+	s.routePatterns = nil
 
-	mux.HandleFunc("GET /health", s.handleHealth)                      // liveness + active project count
-	mux.HandleFunc("GET /readyz", s.handleReadyz)                      // provable readiness: roots mounted + apiserver reachable
-	mux.HandleFunc("GET /metrics", metrics.Handler())                  // prometheus exposition
-	mux.HandleFunc("GET /discovery/llms", s.handleDiscovery)           // currently discoverable local LLM endpoints
-	mux.HandleFunc("GET /projects/{name}/state", s.handleProjectState) // backup state-machine diagnostics
-	mux.HandleFunc("POST /projects/{name}/backup", s.handleBackup)     // manually trigger a checkpoint
-	mux.HandleFunc("POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
+	s.register(mux, "GET /health", s.handleHealth)                      // liveness + active project count
+	s.register(mux, "GET /readyz", s.handleReadyz)                      // provable readiness: roots mounted + apiserver reachable
+	s.register(mux, "GET /metrics", metrics.Handler())                  // prometheus exposition
+	s.register(mux, "GET /discovery/llms", s.handleDiscovery)           // currently discoverable local LLM endpoints
+	s.register(mux, "GET /projects/{name}/state", s.handleProjectState) // backup state-machine diagnostics
+	s.register(mux, "POST /projects/{name}/backup", s.handleBackup)     // manually trigger a checkpoint
+	s.register(mux, "POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
 
-	mux.HandleFunc("GET /projects", s.handleProjectsAll)        // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
-	mux.HandleFunc("GET /registrations", s.handleRegistrations) // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
-	mux.HandleFunc("POST /register", s.handleRegister)          // a frood joins the live registry (additive, optional; not yet required)
-	mux.HandleFunc("GET /state", s.handleStateAll)              // enablement home: every project's effective state (absent reads disabled)
-	mux.HandleFunc("GET /state/{name}", s.handleStateGet)       // one project's enablement (NOT the backup diagnostics at /projects/{name}/state)
-	mux.HandleFunc("PUT /state/{name}", s.handleStatePut)       // idempotent enable/disable; roster-bound, reason required on disable
+	s.register(mux, "GET /projects", s.handleProjectsAll)        // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
+	s.register(mux, "GET /registrations", s.handleRegistrations) // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
+	s.register(mux, "POST /register", s.handleRegister)          // a frood joins the live registry (additive, optional; not yet required)
+	s.register(mux, "GET /state", s.handleStateAll)              // enablement home: every project's effective state (absent reads disabled)
+	s.register(mux, "GET /state/{name}", s.handleStateGet)       // one project's enablement (NOT the backup diagnostics at /projects/{name}/state)
+	s.register(mux, "PUT /state/{name}", s.handleStatePut)       // idempotent enable/disable; roster-bound, reason required on disable
 
-	mux.HandleFunc("GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
-	mux.HandleFunc("GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
-	mux.HandleFunc("GET /resolve/{name}", s.handleResolve)         // narrow widget-facing resolution (resolve.v1.ResolvedService): scheme+address for one project
+	s.register(mux, "GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
+	s.register(mux, "GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
+	s.register(mux, "GET /resolve/{name}", s.handleResolve)         // narrow widget-facing resolution (resolve.v1.ResolvedService): scheme+address for one project
 
 	// The composed entity-query surface (#42): ask delightd about one roster entry and get
 	// it back with its facets (git/backup/reachable/endpoint) as fields, instead of pulling a
 	// facet aggregate and reassembling delightd's internals. Additive -- /git, /projects, and
 	// /registrations stay; internalizing those aggregates is a separate, later step of #42.
-	mux.HandleFunc("GET /services", s.handleServicesAll)          // composed roster (entity-query list), optional ?type= filter
-	mux.HandleFunc("GET /services/{name}", s.handleServiceByName) // one composed roster entry, facets as fields
+	s.register(mux, "GET /services", s.handleServicesAll)          // composed roster (entity-query list), optional ?type= filter
+	s.register(mux, "GET /services/{name}", s.handleServiceByName) // one composed roster entry, facets as fields
 
 	// Service introspection composes backup-state-machine status with the
 	// exports engine's view of generated shims. Unknown services return 200
 	// with is_known_to_daemon=false rather than 404; logic lives in pkg/introspect.
-	mux.HandleFunc("GET /projects/{name}/introspect", introspect.Handler(s.machines, s.exports)) // is_known / backing_up / has_fragment
+	s.register(mux, "GET /projects/{name}/introspect", introspect.Handler(s.machines, s.exports)) // is_known / backing_up / has_fragment
 
-	// The furnish surface: delightd is the operator, so converging the meubilair pieces is
-	// an operator API, not a host-run binary. Mutations are localhost-only (the control
-	// port binds 127.0.0.1); what they converge to is the baked, commit-stamped manifest
-	// tree, honoring the mutation-is-high-friction principle. health is provable over the
-	// wire like /readyz: 200 all-GREEN, 503 if any piece is RED or INDETERMINATE.
-	mux.HandleFunc("GET /furnish/pieces", s.handleFurnishPieces)         // declared pieces
-	mux.HandleFunc("GET /furnish/health", s.handleFurnishHealth)         // ladder for all pieces
-	mux.HandleFunc("GET /furnish/health/{piece}", s.handleFurnishHealth) // ladder for one piece
-	mux.HandleFunc("POST /furnish/{piece}/up", s.handleFurnishUp)        // server-side apply
-	mux.HandleFunc("POST /furnish/{piece}/down", s.handleFurnishDown)    // delete (absent is success)
+	// The furnish surface: delightd is the operator, so converging the meubilair pieces is an
+	// operator API, not a host-run binary. The mutations (up/down) require the control-port
+	// bearer; the health/pieces reads are open. What they converge to is the baked,
+	// commit-stamped manifest tree, honoring the mutation-is-high-friction principle. health is
+	// provable over the wire like /readyz: 200 all-GREEN, 503 if any piece is RED or INDETERMINATE.
+	s.register(mux, "GET /furnish/pieces", s.handleFurnishPieces)         // declared pieces
+	s.register(mux, "GET /furnish/health", s.handleFurnishHealth)         // ladder for all pieces
+	s.register(mux, "GET /furnish/health/{piece}", s.handleFurnishHealth) // ladder for one piece
+	s.register(mux, "POST /furnish/{piece}/up", s.handleFurnishUp)        // server-side apply (bearer-gated)
+	s.register(mux, "POST /furnish/{piece}/down", s.handleFurnishDown)    // delete (absent is success; bearer-gated)
 
 	if s.mcpEnabled() {
-		mux.HandleFunc("POST /mcp", s.skills.HandleMCP) // agent skill aggregator (MCP)
+		s.register(mux, "POST /mcp", s.skills.HandleMCP) // agent skill aggregator (MCP; bearer-gated)
 		slog.Info("MCP server successfully exposed", "route", "POST /mcp")
 	}
 

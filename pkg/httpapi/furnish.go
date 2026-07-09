@@ -12,7 +12,7 @@ import (
 // The /furnish handlers expose delightd's operator action -- converging the meubilair
 // pieces -- over the control port, using the shared pkg/furnish operations. delightd holds
 // one persistent cluster handle (the lazy furnishClient provider) rather than building a
-// client per call. See Mux for the route table and the localhost-only / baked-manifest
+// client per call. See Mux for the route table and the bearer-gated-mutation / baked-manifest
 // rationale.
 
 // furnishCluster resolves the client-go handle, or writes a 503 and returns false. The

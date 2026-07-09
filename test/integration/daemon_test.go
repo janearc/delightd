@@ -149,9 +149,17 @@ projects:
 	// lands in the temp home, never the real ~/work or ~/var. DELIGHT_PROJECTS_DIR
 	// points at an empty dir so no stray host fragment leaks into the roster.
 	emptyFragments := t.TempDir()
+	// Provision the control-port bearer at an explicit path so the daemon gates its mutating
+	// routes on a token the test holds; the POST /backup below sends it.
+	const controlToken = "daemon-itest-control-token-000000"
+	controlTokenPath := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(controlTokenPath, []byte(controlToken), 0o600); err != nil {
+		t.Fatalf("writing control token: %v", err)
+	}
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"DELIGHT_PROJECTS_DIR="+emptyFragments,
+		"DELIGHT_CONTROL_TOKEN_PATH="+controlTokenPath,
 	)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -312,6 +320,7 @@ projects:
 		if err != nil {
 			t.Fatalf("building backup request: %v", err)
 		}
+		req.Header.Set("Authorization", "Bearer "+controlToken) // the route is bearer-gated
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST backup: %v", err)

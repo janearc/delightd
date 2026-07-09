@@ -60,10 +60,18 @@ func TestContainerImageComesUp(t *testing.T) {
 	monitorRoot := filepath.Join(fixRoot, "work")
 	configRoot := filepath.Join(fixRoot, "etc")
 	daemonRoot := filepath.Join(fixRoot, "var")
-	for _, d := range []string{monitorRoot, configRoot, daemonRoot} {
+	credsRoot := filepath.Join(fixRoot, "run")
+	for _, d := range []string{monitorRoot, configRoot, daemonRoot, credsRoot} {
 		if err := os.MkdirAll(d, 0o777); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Provision the control-port bearer where the daemon reads it (the creds mount at
+	// /run/delightd; default path with KUBECONFIG unset), so the mutating routes are driven
+	// authenticated -- the e2e mirrors the real bring-up, where the wrapper stages this file.
+	const controlToken = "itest-control-token-000000"
+	if err := os.WriteFile(filepath.Join(credsRoot, "control-token"), []byte(controlToken), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	initFakeRepo(t, filepath.Join(monitorRoot, "fake-clean"), false)
 	initFakeRepo(t, filepath.Join(monitorRoot, "fake-dirty"), true)
@@ -131,6 +139,7 @@ projects:
 		"-v", monitorRoot+":/work:ro",
 		"-v", configRoot+":/etc/delightd:ro",
 		"-v", daemonRoot+":/var:rw",
+		"-v", credsRoot+":/run/delightd:ro",
 		"-p", fmt.Sprintf("127.0.0.1:%d:8088", port),
 		tag, "--immediate")
 	if out, err := run.CombinedOutput(); err != nil {
@@ -148,6 +157,7 @@ projects:
 		apiserverReachable: false,     // no kubeconfig/route wired in this test setup yet
 		wantModel:          mockModel, // /discovery/llms must report the mocked backend
 		skillsEnabled:      true,      // agent enumerates delightd's own tools via /mcp
+		controlToken:       controlToken,
 	})
 	if t.Failed() {
 		t.Logf("container logs:\n%s", containerLogs(name))
