@@ -172,18 +172,22 @@ func Up(ctx context.Context, c *kube.Client, pieceDir string) error {
 }
 
 // Down removes every object a piece declares; an already-absent object is success
-// (idempotent, matching `kubectl delete -k --ignore-not-found`).
+// (idempotent, matching `kubectl delete -k --ignore-not-found`). Deletes cascade in the
+// background, kubectl's default: without an explicit PropagationPolicy the apiserver
+// falls back to the kind's own default, which can orphan a Deployment's ReplicaSets and
+// Pods -- the object is gone, the workload keeps running, and "removed" would be a lie.
 func Down(ctx context.Context, c *kube.Client, pieceDir string) error {
 	objs, err := buildPiece(pieceDir)
 	if err != nil {
 		return err
 	}
+	cascade := metav1.DeletePropagationBackground
 	for _, u := range objs {
 		ri, err := resourceFor(c, u)
 		if err != nil {
 			return err
 		}
-		if err := ri.Delete(ctx, u.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		if err := ri.Delete(ctx, u.GetName(), metav1.DeleteOptions{PropagationPolicy: &cascade}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("furnish: delete %s/%s: %w", u.GetKind(), u.GetName(), err)
 		}
 	}

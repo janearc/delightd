@@ -443,6 +443,29 @@ func TestDown(t *testing.T) {
 	}
 }
 
+// TestDown_CascadesInBackground: every delete must carry PropagationPolicy background --
+// the kubectl-delete default this path replaced. An unset policy lets the apiserver fall
+// back to the kind's default, which can orphan a Deployment's ReplicaSets and Pods while
+// the handler reports removed:true.
+func TestDown_CascadesInBackground(t *testing.T) {
+	c := fakeClient(liveDeployment(1))
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	var policies []*metav1.DeletionPropagation
+	fdc.PrependReactor("delete", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		policies = append(policies, a.(k8stesting.DeleteActionImpl).DeleteOptions.PropagationPolicy)
+		return true, nil, nil
+	})
+	if err := Down(context.Background(), c, writePiece(t)); err != nil {
+		t.Fatalf("down: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("deletes = %d, want 1", len(policies))
+	}
+	if policies[0] == nil || *policies[0] != metav1.DeletePropagationBackground {
+		t.Errorf("delete PropagationPolicy = %v, want Background (unset orphans workloads)", policies[0])
+	}
+}
+
 // TestDown_APIErrorPropagates: a delete error that is not NotFound is surfaced.
 func TestDown_APIErrorPropagates(t *testing.T) {
 	c := fakeClient(liveDeployment(1))
