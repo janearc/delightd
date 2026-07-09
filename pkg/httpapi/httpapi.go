@@ -140,9 +140,26 @@ func (s *Server) UseEvents(pub eventPublisher, topic, notRegisteredSchema string
 // (the baked kube/ aggregator), and a lazy provider of the client-go handle furnish
 // converges through. Called by main after config is loaded; without it the /furnish
 // routes fail loud 503.
+//
+// It also repoints the GET /readyz apiserver check at the same provider, so readiness
+// reuses furnish's shared, memoized *kube.Client (its discovery transport built once) rather
+// than the New()-default clusterReadyProbe rebuilding a kubeconfig, discovery client, and TLS
+// transport from scratch on every scrape. This does not weaken the late-mounted-kubeconfig
+// property readyz relies on: client is the same LazyClient furnish uses, which memoizes only
+// a success (see kube.LazyClient), so a kubeconfig that appears after startup is still picked
+// up on the next /readyz poll, exactly as before.
 func (s *Server) UseFurnish(kubeDir string, client func() (*kube.Client, error)) {
 	s.furnishKubeDir = kubeDir
 	s.furnishClient = client
+	s.clusterReady = func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		c, err := client()
+		if err != nil {
+			return err // not memoized on failure: a kubeconfig mounted later still resolves
+		}
+		return c.Ready(ctx)
+	}
 }
 
 // UseControlToken wires the bearer the mutating routes and POST /mcp require. tok is the token

@@ -22,11 +22,15 @@ import (
 
 // Client bundles a dynamic client (for arbitrary objects) with a RESTMapper that resolves
 // a kind to its resource. The mapper is deferred: constructing it touches no network; it
-// queries discovery only on first use.
+// queries discovery only on first use. Discovery is the same discovery client the mapper's
+// memory cache wraps, exposed directly so a caller with no need for kind resolution (the
+// readiness probe -- see Ready) can reuse its already-built transport instead of standing up
+// a second one.
 type Client struct {
-	Config  *rest.Config
-	Dynamic dynamic.Interface
-	Mapper  meta.RESTMapper
+	Config    *rest.Config
+	Dynamic   dynamic.Interface
+	Mapper    meta.RESTMapper
+	Discovery discovery.DiscoveryInterface
 }
 
 // FromKubeconfig builds a Client from a kubeconfig. An empty path uses the standard
@@ -46,10 +50,24 @@ func FromKubeconfig(path string) (*Client, error) {
 		return nil, fmt.Errorf("kube: build discovery client for %s: %w", cfg.Host, err)
 	}
 	return &Client{
-		Config:  cfg,
-		Dynamic: dyn,
-		Mapper:  restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc)),
+		Config:    cfg,
+		Dynamic:   dyn,
+		Mapper:    restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc)),
+		Discovery: dc,
 	}, nil
+}
+
+// Ready pings the apiserver's own /readyz endpoint (the programmatic equivalent of
+// `kubectl get --raw=/readyz`) using this Client's already-built discovery transport --
+// unlike APIServerReady, it does not reload the kubeconfig or rebuild the discovery client's
+// TLS transport on every call, so a caller polling this repeatedly (a /readyz scrape) pays
+// that cost once, at Client construction, rather than per request. The caller's context
+// bounds the call, so a dead apiserver fails fast rather than hanging.
+func (c *Client) Ready(ctx context.Context) error {
+	if err := c.Discovery.RESTClient().Get().AbsPath("/readyz").Do(ctx).Error(); err != nil {
+		return fmt.Errorf("apiserver /readyz: %w", err)
+	}
+	return nil
 }
 
 // RESTMapping resolves a GroupKind to its mapping, and on a no-match invalidates the

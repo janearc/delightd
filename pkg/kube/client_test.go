@@ -163,6 +163,53 @@ func TestAPIServerReady_RedWhenKubeconfigMissing(t *testing.T) {
 	}
 }
 
+// TestClientReady_ReusesDiscoveryTransport: Client.Ready pings the apiserver's own /readyz
+// through the Client's already-built Discovery client -- it must not need a fresh kubeconfig
+// path or rebuild anything to answer, unlike the one-shot APIServerReady.
+func TestClientReady_ReusesDiscoveryTransport(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		fmt.Fprintln(w, "ok")
+	}))
+	defer srv.Close()
+
+	c, err := FromKubeconfig(writeKubeconfigForServer(t, srv.URL))
+	if err != nil {
+		t.Fatalf("FromKubeconfig: %v", err)
+	}
+	if c.Discovery == nil {
+		t.Fatal("Client.Discovery must be set so Ready can reuse its transport")
+	}
+	// Two calls against the same Client must both succeed without re-resolving the
+	// kubeconfig -- there is none to re-resolve here (the fixture is a one-shot temp file);
+	// a rebuild-per-call implementation would still work here, so the point is functional:
+	// repeated use of one Client answers repeatedly.
+	for i := 0; i < 2; i++ {
+		if err := c.Ready(context.Background()); err != nil {
+			t.Fatalf("Ready call %d: %v", i, err)
+		}
+	}
+	if hits != 2 {
+		t.Errorf("apiserver hits = %d, want 2 (one per Ready call)", hits)
+	}
+}
+
+// TestClientReady_RedOn500: an apiserver up but not ready is a red check, not a pass.
+func TestClientReady_RedOn500(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ready", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c, err := FromKubeconfig(writeKubeconfigForServer(t, srv.URL))
+	if err != nil {
+		t.Fatalf("FromKubeconfig: %v", err)
+	}
+	if err := c.Ready(context.Background()); err == nil {
+		t.Fatal("Ready against a 500 apiserver: want error, got nil")
+	}
+}
+
 func TestFromKubeconfig_MissingPathErrors(t *testing.T) {
 	// FromKubeconfig surfaces a bad explicit path rather than building a client against
 	// an empty config.

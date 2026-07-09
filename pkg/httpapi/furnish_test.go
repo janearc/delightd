@@ -19,6 +19,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"delightd/config"
 	"delightd/pkg/kube"
 )
 
@@ -214,6 +215,51 @@ func TestFurnishMutate_DeadlineIsLoud(t *testing.T) {
 				t.Errorf("%s deadline body should name %q (fail loud): %q", tc.op, want, msg)
 			}
 		}
+	}
+}
+
+// TestUseFurnish_WiresReadyzToSharedClient: GET /readyz's apiserver check must go through
+// the SAME lazily-built *kube.Client UseFurnish wires for the /furnish routes, rather than
+// standing up its own kubeconfig+discovery+TLS on every call (M-minor, sprints#58).
+func TestUseFurnish_WiresReadyzToSharedClient(t *testing.T) {
+	var hits int
+	apiserver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte("ok"))
+	}))
+	defer apiserver.Close()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "kubeconfig")
+	kubeconfig := "apiVersion: v1\nkind: Config\nclusters:\n- name: t\n  cluster:\n    server: " +
+		apiserver.URL + "\ncontexts:\n- name: t\n  context: {cluster: t, user: t}\ncurrent-context: t\nusers:\n- name: t\n  user:\n    token: abc\n"
+	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := kube.FromKubeconfig(kubeconfigPath)
+	if err != nil {
+		t.Fatalf("FromKubeconfig: %v", err)
+	}
+
+	var provideCalls int
+	s := &Server{cfg: &config.DelightConfig{}}
+	s.cfg.System.MonitorRoot = t.TempDir()
+	s.cfg.System.DaemonRoot = t.TempDir()
+	s.cfg.System.ConfigRoot = t.TempDir()
+	s.UseFurnish(furnishFixture(t), func() (*kube.Client, error) {
+		provideCalls++
+		return c, nil
+	})
+
+	rr := httptest.NewRecorder()
+	s.handleReadyz(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("readyz code = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+	if hits == 0 {
+		t.Error("readyz never reached the apiserver through the shared client")
+	}
+	if provideCalls == 0 {
+		t.Error("readyz did not go through the client provider UseFurnish wired")
 	}
 }
 
