@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -144,11 +146,72 @@ func TestFurnishUp_Applies(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (%s)", rr.Code, rr.Body.String())
 	}
-	if body := decodeBody(t, rr); body["applied"] != true {
-		t.Errorf("applied = %v, want true", body["applied"])
+	body := decodeBody(t, rr)
+	bodyApplied, _ := body["applied"].([]any)
+	if len(bodyApplied) != 1 || bodyApplied[0] != "Deployment/delightd" {
+		t.Errorf("body[applied] = %v, want [Deployment/delightd] -- a bare true would claim success without naming what applied", body["applied"])
 	}
 	if len(applied) != 1 || applied[0] != "delightd" {
-		t.Errorf("applied = %v, want [delightd]", applied)
+		t.Errorf("applied (reactor-observed) = %v, want [delightd]", applied)
+	}
+}
+
+// TestFurnishUp_PartialFailureReportsAppliedAndFailed: a mid-piece apply failure must not
+// discard the objects that already landed -- the body names both applied[] and failed{}, and
+// the split is preserved even on the error path (never a bare {"applied":true}).
+func TestFurnishUp_PartialFailureReportsAppliedAndFailed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte("resources:\n  - two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pieceDir := filepath.Join(root, "two")
+	if err := os.MkdirAll(pieceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dep := func(name string) string {
+		return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: " + name + "\n  namespace: fleet\nspec:\n  replicas: 1\n"
+	}
+	if err := os.WriteFile(filepath.Join(pieceDir, "alpha.yaml"), []byte(dep("alpha")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pieceDir, "beta.yaml"), []byte(dep("beta")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pieceDir, "kustomization.yaml"), []byte("resources:\n  - alpha.yaml\n  - beta.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := furnishFakeClient()
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		pa := a.(k8stesting.PatchActionImpl)
+		if pa.Name == "alpha" {
+			return true, nil, fmt.Errorf("apiserver said no")
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(fDeployGVK)
+		u.SetName(pa.Name)
+		u.SetNamespace(pa.Namespace)
+		return true, u, nil
+	})
+
+	s := furnishServer(root, c)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/furnish/two/up", nil)
+	req.SetPathValue("piece", "two")
+	s.handleFurnishUp(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500 (a daemon-side/unclassified apply error) (%s)", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	bodyApplied, _ := body["applied"].([]any)
+	if len(bodyApplied) != 1 || bodyApplied[0] != "Deployment/beta" {
+		t.Errorf("body[applied] = %v, want [Deployment/beta] (beta must still be reported despite alpha failing)", body["applied"])
+	}
+	failed, _ := body["failed"].(map[string]any)
+	if _, ok := failed["Deployment/alpha"]; !ok {
+		t.Errorf("body[failed] = %v, want Deployment/alpha present", body["failed"])
 	}
 }
 
@@ -179,6 +242,62 @@ func TestFurnishHealth_GreenAndRed(t *testing.T) {
 	}
 	if body := decodeBody(t, rr); body["healthy"] != false {
 		t.Errorf("healthy = %v, want false", body["healthy"])
+	}
+}
+
+// TestFurnishHealth_OnePieceUnrenderableDoesNotBlindTheRest: an all-pieces health read must
+// not 500 the whole report because one piece's kustomization will not render -- that piece
+// degrades to a single INDETERMINATE entry naming why, and the other (healthy) pieces still
+// come back.
+func TestFurnishHealth_OnePieceUnrenderableDoesNotBlindTheRest(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "kustomization.yaml"), []byte("resources:\n  - good\n  - broken\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	goodDir := filepath.Join(root, "good")
+	if err := os.MkdirAll(goodDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dep := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: delightd\n  namespace: fleet\nspec:\n  replicas: 1\n"
+	if err := os.WriteFile(filepath.Join(goodDir, "deployment.yaml"), []byte(dep), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(goodDir, "kustomization.yaml"), []byte("resources:\n  - deployment.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brokenDir := filepath.Join(root, "broken")
+	if err := os.MkdirAll(brokenDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A kustomization naming a resource file that does not exist fails to render.
+	if err := os.WriteFile(filepath.Join(brokenDir, "kustomization.yaml"), []byte("resources:\n  - nope.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "apps", Version: "v1"}})
+	m.Add(fDeployGVK, meta.RESTScopeNamespace)
+	c := &kube.Client{
+		Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), fLiveDeployment(1)),
+		Mapper:  m,
+	}
+	s := furnishServer(root, c)
+	rr := httptest.NewRecorder()
+	s.handleFurnishHealth(rr, httptest.NewRequest(http.MethodGet, "/furnish/health", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code = %d, want 503 (the broken piece makes the report unhealthy) (%s)", rr.Code, rr.Body.String())
+	}
+	body := decodeBody(t, rr)
+	results, _ := body["results"].(map[string]any)
+	if _, ok := results["good"]; !ok {
+		t.Errorf("results = %v, want the good piece still reported despite broken failing to render", results)
+	}
+	brokenLadder, _ := results["broken"].([]any)
+	if len(brokenLadder) != 1 {
+		t.Fatalf("broken piece ladder = %v, want one INDETERMINATE entry", results["broken"])
+	}
+	entry, _ := brokenLadder[0].(map[string]any)
+	if entry["state"] != "INDETERMINATE" {
+		t.Errorf("broken piece state = %v, want INDETERMINATE (never RED for an unrenderable piece)", entry["state"])
 	}
 }
 
@@ -260,6 +379,25 @@ func TestUseFurnish_WiresReadyzToSharedClient(t *testing.T) {
 	}
 	if provideCalls == 0 {
 		t.Error("readyz did not go through the client provider UseFurnish wired")
+	}
+}
+
+// TestFurnishUp_ClusterDeclineIs502: an RBAC/admission decline from the apiserver (a typed
+// apierrors status, not a transport failure) must read as the cluster saying no, distinct
+// from delightd being broken -- 502, not the generic 500 a daemon fault gets.
+func TestFurnishUp_ClusterDeclineIs502(t *testing.T) {
+	c := furnishFakeClient()
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("patch", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "delightd", fmt.Errorf("rbac: no"))
+	})
+	s := furnishServer(furnishFixture(t), c)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/furnish/delightd/up", nil)
+	req.SetPathValue("piece", "delightd")
+	s.handleFurnishUp(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502 (a cluster decline, not a daemon fault) (%s)", rr.Code, rr.Body.String())
 	}
 }
 

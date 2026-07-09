@@ -145,30 +145,65 @@ func resourceFor(c *kube.Client, u *unstructured.Unstructured) (dynamic.Resource
 	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
 		ns := u.GetNamespace()
 		if ns == "" {
-			ns = metav1.NamespaceDefault
+			// Every piece declares its namespace (fleet) on every namespaced object; a manifest
+			// that omits it is a bug in that manifest, not license to guess. Silently defaulting
+			// to "default" would land the object somewhere no piece declares and no health check
+			// looks -- fail loud and name the object instead.
+			return nil, fmt.Errorf("furnish: %s/%s declares no namespace (every piece's namespaced objects must set one)", gvk.Kind, u.GetName())
 		}
 		return c.Dynamic.Resource(mapping.Resource).Namespace(ns), nil
 	}
 	return c.Dynamic.Resource(mapping.Resource), nil
 }
 
+// UpResult reports what Up actually touched: Applied names every object ("Kind/name") that
+// server-side-apply succeeded on; Failed maps a failed object's "Kind/name" to its error. A
+// failure partway through a piece must not discard the objects that already landed -- the
+// caller (the POST /furnish/{piece}/up handler) reports both, never a bare {"applied":true}
+// that would claim success for objects that never actually applied.
+type UpResult struct {
+	Applied []string
+	Failed  map[string]string
+}
+
 // Up converges every object a piece declares via server-side apply -- the API-native
-// equivalent of `kubectl apply -k`, idempotent and merge-based.
-func Up(ctx context.Context, c *kube.Client, pieceDir string) error {
+// equivalent of `kubectl apply -k`, idempotent and merge-based. It does not abort on the
+// first failing object: every declared object gets an apply attempt, so one bad object (a
+// field-manager conflict, an RBAC refusal) does not hide whether the rest of the piece
+// landed. The returned error is non-nil whenever any object failed and wraps the first
+// failure (so a caller checking for a specific cause, e.g. a cluster-side refusal via
+// errors.As, still can); the full split lives in the returned UpResult regardless.
+func Up(ctx context.Context, c *kube.Client, pieceDir string) (UpResult, error) {
 	objs, err := buildPiece(pieceDir)
 	if err != nil {
-		return err
+		return UpResult{}, err
 	}
+	result := UpResult{Failed: map[string]string{}}
+	var firstErr error
 	for _, u := range objs {
+		key := fmt.Sprintf("%s/%s", u.GetKind(), u.GetName())
 		ri, err := resourceFor(c, u)
 		if err != nil {
-			return err
+			result.Failed[key] = err.Error()
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if _, err := ri.Apply(ctx, u.GetName(), u, metav1.ApplyOptions{FieldManager: fieldManager, Force: true}); err != nil {
-			return fmt.Errorf("furnish: apply %s/%s: %w", u.GetKind(), u.GetName(), err)
+			objErr := fmt.Errorf("furnish: apply %s: %w", key, err)
+			result.Failed[key] = objErr.Error()
+			if firstErr == nil {
+				firstErr = objErr
+			}
+			continue
 		}
+		result.Applied = append(result.Applied, key)
 	}
-	return nil
+	if len(result.Failed) > 0 {
+		return result, fmt.Errorf("furnish: %d of %d object(s) failed to apply in %s: %w", len(result.Failed), len(objs), pieceDir, firstErr)
+	}
+	return result, nil
 }
 
 // Down removes every object a piece declares; an already-absent object is success

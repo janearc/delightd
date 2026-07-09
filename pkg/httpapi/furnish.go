@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"delightd/pkg/furnish"
 	"delightd/pkg/kube"
 )
@@ -26,17 +28,33 @@ const (
 	furnishHealthTimeout = 15 * time.Second
 )
 
-// writeFurnishError writes an op failure. A hit deadline is distinguished as 504 and the
-// body names the operation, the piece, and the bound that fired -- a wedged apiserver
-// must read as "timed out after X", never as an anonymous 500 (fail loud).
-func writeFurnishError(w http.ResponseWriter, op, piece string, timeout time.Duration, err error) {
+// writeFurnishError writes an op failure. extra carries additional body fields (e.g. Up's
+// partial applied[]/failed{} split); nil is fine, and a set field is added before the error
+// so a caller-passed "error" key cannot shadow the real one. A hit deadline is distinguished
+// as 504 and the body names the operation, the piece, and the bound that fired -- a wedged
+// apiserver must read as "timed out after X", never as an anonymous 500 (fail loud). A
+// cluster-side decline (RBAC forbidden, admission rejected -- the apiserver answering "no")
+// is distinguished as 502: delightd is the gateway to the cluster here, and it is the
+// cluster that declined, not delightd that broke, so a caller must not read it as -- and
+// retry through -- a daemon fault the same way it would a 500.
+func writeFurnishError(w http.ResponseWriter, op, piece string, timeout time.Duration, err error, extra map[string]any) {
+	body := map[string]any{}
+	for k, v := range extra {
+		body[k] = v
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-			"error": fmt.Sprintf("%s %s: deadline exceeded after %s waiting on the cluster: %v", op, piece, timeout, err),
-		})
+		body["error"] = fmt.Sprintf("%s %s: deadline exceeded after %s waiting on the cluster: %v", op, piece, timeout, err)
+		writeJSON(w, http.StatusGatewayTimeout, body)
 		return
 	}
-	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	var statusErr apierrors.APIStatus
+	if errors.As(err, &statusErr) {
+		body["error"] = err.Error()
+		writeJSON(w, http.StatusBadGateway, body)
+		return
+	}
+	body["error"] = err.Error()
+	writeJSON(w, http.StatusInternalServerError, body)
 }
 
 // The /furnish handlers expose delightd's operator action -- converging the meubilair
@@ -121,9 +139,14 @@ func (s *Server) handleFurnishHealth(w http.ResponseWriter, r *http.Request) {
 	for _, p := range names {
 		items, err := furnish.Health(ctx, c, filepath.Join(s.furnishKubeDir, p))
 		if err != nil {
-			// A piece that will not render is a hard error -- nothing to report against.
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
+			// A piece that will not render (a bad kustomization) has no per-object items to
+			// report, but that must not cost the report the OTHER pieces that did render --
+			// degrade this one piece to a single INDETERMINATE entry naming why, and keep
+			// going, the same "one bad piece never blinds the rest" contract Health already
+			// gives per-object within a piece.
+			healthy = false
+			results[p] = []map[string]any{{"kind": "piece", "name": p, "state": "INDETERMINATE", "detail": err.Error()}}
+			continue
 		}
 		ok, ladder := furnish.PieceHealth(items)
 		if !ok {
@@ -151,11 +174,15 @@ func (s *Server) handleFurnishUp(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), furnishMutateTimeout)
 	defer cancel()
-	if err := furnish.Up(ctx, c, dir); err != nil {
-		writeFurnishError(w, "furnish.up", name, furnishMutateTimeout, err)
+	result, err := furnish.Up(ctx, c, dir)
+	if err != nil {
+		writeFurnishError(w, "furnish.up", name, furnishMutateTimeout, err, map[string]any{
+			"applied": result.Applied,
+			"failed":  result.Failed,
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"command": "furnish.up", "piece": name, "applied": true})
+	writeJSON(w, http.StatusOK, map[string]any{"command": "furnish.up", "piece": name, "applied": result.Applied})
 }
 
 // handleFurnishDown removes one piece's objects (an already-absent object is success).
@@ -172,7 +199,7 @@ func (s *Server) handleFurnishDown(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), furnishMutateTimeout)
 	defer cancel()
 	if err := furnish.Down(ctx, c, dir); err != nil {
-		writeFurnishError(w, "furnish.down", name, furnishMutateTimeout, err)
+		writeFurnishError(w, "furnish.down", name, furnishMutateTimeout, err, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"command": "furnish.down", "piece": name, "removed": true})

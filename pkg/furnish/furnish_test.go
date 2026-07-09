@@ -370,24 +370,86 @@ func TestUp(t *testing.T) {
 		u.SetNamespace(pa.Namespace)
 		return true, u, nil
 	})
-	if err := Up(context.Background(), c, writePiece(t)); err != nil {
+	result, err := Up(context.Background(), c, writePiece(t))
+	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
 	if len(applied) != 1 || applied[0] != "delightd" {
-		t.Errorf("applied = %v, want [delightd]", applied)
+		t.Errorf("applied (reactor-observed) = %v, want [delightd]", applied)
+	}
+	if len(result.Applied) != 1 || result.Applied[0] != "Deployment/delightd" {
+		t.Errorf("result.Applied = %v, want [Deployment/delightd]", result.Applied)
+	}
+	if len(result.Failed) != 0 {
+		t.Errorf("result.Failed = %v, want none", result.Failed)
 	}
 }
 
-// TestUp_APIErrorPropagates: an apiserver error on apply is surfaced with the object named.
+// TestUp_APIErrorPropagates: an apiserver error on apply is surfaced with the object named,
+// and the object is reported in Failed rather than silently dropped.
 func TestUp_APIErrorPropagates(t *testing.T) {
 	c := fakeClient()
 	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
 	fdc.PrependReactor("patch", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("apiserver said no")
 	})
-	err := Up(context.Background(), c, writePiece(t))
+	result, err := Up(context.Background(), c, writePiece(t))
 	if err == nil || !strings.Contains(err.Error(), "delightd") {
 		t.Errorf("apply error should propagate and name the object: %v", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Errorf("result.Applied = %v, want none (the only object failed)", result.Applied)
+	}
+	if msg := result.Failed["Deployment/delightd"]; !strings.Contains(msg, "apiserver said no") {
+		t.Errorf("result.Failed[Deployment/delightd] = %q, want it to carry the apiserver error", msg)
+	}
+}
+
+// TestUp_PartialFailureReportsBoth: when a piece declares two objects and only one fails to
+// apply, the successful object must still be reported Applied -- a mid-piece failure must
+// not discard what already landed.
+func TestUp_PartialFailureReportsBoth(t *testing.T) {
+	c := fakeClient()
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		pa := a.(k8stesting.PatchActionImpl)
+		if pa.Name == "alpha" {
+			return true, nil, fmt.Errorf("apiserver said no")
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(deploymentGVK)
+		u.SetName(pa.Name)
+		u.SetNamespace(pa.Namespace)
+		return true, u, nil
+	})
+	result, err := Up(context.Background(), c, writeTwoPiece(t))
+	if err == nil {
+		t.Fatal("a partial failure must still return an error")
+	}
+	if len(result.Applied) != 1 || result.Applied[0] != "Deployment/beta" {
+		t.Errorf("result.Applied = %v, want [Deployment/beta] (alpha failed, beta must still be reported)", result.Applied)
+	}
+	if _, failed := result.Failed["Deployment/alpha"]; !failed {
+		t.Errorf("result.Failed = %v, want Deployment/alpha present", result.Failed)
+	}
+}
+
+// TestUp_MissingNamespaceFailsLoud: a namespaced object with no declared namespace must not
+// silently land in "default" -- every piece declares its namespace (fleet), so an absent one
+// is a manifest bug, and resourceFor must refuse rather than guess.
+func TestUp_MissingNamespaceFailsLoud(t *testing.T) {
+	manifest := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: delightd\nspec:\n  replicas: 1\n" // no namespace
+	dir := writeSinglePiece(t, manifest)
+	c := fakeClient()
+	result, err := Up(context.Background(), c, dir)
+	if err == nil {
+		t.Fatal("Up with no declared namespace: want error, got nil (must not default to \"default\")")
+	}
+	if !strings.Contains(err.Error(), "namespace") {
+		t.Errorf("error should name the missing namespace: %v", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Errorf("result.Applied = %v, want none", result.Applied)
 	}
 }
 
@@ -396,7 +458,7 @@ func TestUp_APIErrorPropagates(t *testing.T) {
 func TestUpDown_UnresolvableKindErrors(t *testing.T) {
 	dir := writeSinglePiece(t, configMapManifest)
 	c := fakeClient()
-	if err := Up(context.Background(), c, dir); err == nil {
+	if _, err := Up(context.Background(), c, dir); err == nil {
 		t.Error("Up should surface an unresolvable kind, not silently skip it")
 	}
 	if err := Down(context.Background(), c, dir); err == nil {
@@ -441,7 +503,7 @@ func TestUp_LateKindResolvesAfterOneInvalidation(t *testing.T) {
 		u.SetNamespace(pa.Namespace)
 		return true, u, nil
 	})
-	if err := Up(context.Background(), c, writePiece(t)); err != nil {
+	if _, err := Up(context.Background(), c, writePiece(t)); err != nil {
 		t.Fatalf("up after a late-appearing kind: %v", err)
 	}
 	if m.resets != 1 {
@@ -458,7 +520,7 @@ func TestUp_MissAfterInvalidationIsFinal(t *testing.T) {
 	c := fakeClient()
 	m := &lateKindMapper{RESTMapper: staticMapper(), alwaysMiss: true}
 	c.Mapper = m
-	if err := Up(context.Background(), c, writePiece(t)); err == nil {
+	if _, err := Up(context.Background(), c, writePiece(t)); err == nil {
 		t.Error("a kind absent even after re-discovery must still error")
 	}
 	if m.resets != 1 {
