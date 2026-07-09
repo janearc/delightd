@@ -22,6 +22,24 @@ func TestRenderURL(t *testing.T) {
 	}
 }
 
+// TestRenderArgs checks named substitution across a command tool's declared argv, and that
+// it never joins the argv into one string (each element stays its own slice entry).
+func TestRenderArgs(t *testing.T) {
+	out, err := renderArgs([]string{"-c", "backup {project}"}, map[string]any{"project": "paling"})
+	if err != nil || len(out) != 2 || out[0] != "-c" || out[1] != "backup paling" {
+		t.Errorf("renderArgs = %v, %v", out, err)
+	}
+	if _, err := renderArgs([]string{"{x}"}, map[string]any{}); err == nil {
+		t.Error("renderArgs with a missing param: want error")
+	}
+	// A value containing shell metacharacters lands as one argv element verbatim -- there is
+	// no shell in the exec.Command path to interpret it, so this is not an injection vector.
+	out, _ = renderArgs([]string{"{project}"}, map[string]any{"project": "a; rm -rf /"})
+	if len(out) != 1 || out[0] != "a; rm -rf /" {
+		t.Errorf("renderArgs should pass the raw value through as one argv element, got %v", out)
+	}
+}
+
 // TestPositionalURL checks the CLI's {name} -> $N rewrite in order of appearance.
 func TestPositionalURL(t *testing.T) {
 	if got := positionalURL("http://h/furnish/{piece}/up"); got != "http://h/furnish/$1/up" {

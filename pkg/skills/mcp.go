@@ -6,12 +6,20 @@ import (
 	"os/exec"
 )
 
+// maxMCPBodyBytes bounds a POST /mcp request body. There is no legitimate call whose JSON-RPC
+// envelope (a tool name plus its arguments) approaches this size; without a cap an
+// unauthenticated-until-the-bearer-check-runs -- reads are open on this route -- caller could
+// hand the decoder an unbounded body and exhaust memory before the request is ever rejected.
+const maxMCPBodyBytes = 1 << 20 // 1MB
+
 // HandleMCP provides a simple JSON-RPC 2.0 endpoint for the Model Context Protocol
 func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBodyBytes)
 
 	var req struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -68,7 +76,18 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 		var isErr bool
 		switch tool.Handler.Type {
 		case "command":
-			cmd := exec.Command(tool.Handler.Command, tool.Handler.Args...)
+			// Render each declared arg's {name} placeholders from the call arguments (the
+			// same substitution renderURL does for an http tool's path), so a parameterized
+			// command tool actually receives its parameters instead of running arg-less. Each
+			// rendered value stays its own argv element -- exec.Command never goes through a
+			// shell, so there is no join-into-one-string step for an argument to inject through.
+			renderedArgs, err := renderArgs(tool.Handler.Args, params.Arguments)
+			if err != nil {
+				output = err.Error()
+				isErr = true
+				break
+			}
+			cmd := exec.Command(tool.Handler.Command, renderedArgs...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				output = err.Error() + ": " + string(out)

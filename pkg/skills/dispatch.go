@@ -30,6 +30,25 @@ func renderURL(rawURL string, args map[string]any) (string, error) {
 	return rawURL, nil
 }
 
+// renderArgs fills each {name} placeholder across a command tool's declared argv with the
+// named call argument, element-wise -- unlike renderURL there is no path-escaping (an argv
+// entry is not a URL segment) and no shell involved (the caller execs directly), so a value
+// lands as exactly one argument no matter what it contains. An unfilled placeholder is
+// reported rather than passed through literally, matching renderURL's missing-param error.
+func renderArgs(args []string, callArgs map[string]any) ([]string, error) {
+	out := make([]string, len(args))
+	for i, a := range args {
+		for name, v := range callArgs {
+			a = strings.ReplaceAll(a, "{"+name+"}", fmt.Sprint(v))
+		}
+		if strings.ContainsAny(a, "{}") {
+			return nil, fmt.Errorf("unfilled command argument in %q", a)
+		}
+		out[i] = a
+	}
+	return out, nil
+}
+
 // positionalURL rewrites each {name} placeholder to a positional shell arg ($1, $2, ...) in
 // order of appearance, for the generated CLI. Same deliberately-trivial substitution as
 // renderURL; not a parser.

@@ -104,6 +104,53 @@ func TestHandleMCPCallTool_CommandFailureIsError(t *testing.T) {
 	}
 }
 
+// TestHandleMCPCallTool_CommandArgsSubstituted: a command tool declaring an {name}
+// placeholder in its Args must receive the call argument on argv, not run arg-less (M-minor,
+// sprints#58: command dispatch previously ignored params.Arguments entirely).
+func TestHandleMCPCallTool_CommandArgsSubstituted(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["example_echo"] = Tool{
+		Name:    "example_echo",
+		Handler: HandlerDef{Type: "command", Command: "echo", Args: []string{"-n", "{project}"}},
+	}
+	text := mcpCallText(t, agg, "example_echo", `{"project":"paling"}`)
+	if text != "paling" {
+		t.Errorf("command output = %q, want the substituted argument %q", text, "paling")
+	}
+}
+
+// TestHandleMCPCallTool_CommandArgsUnfilledIsError: a missing required argument is reported,
+// never silently dropped or passed through as the literal "{project}".
+func TestHandleMCPCallTool_CommandArgsUnfilledIsError(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["example_echo"] = Tool{
+		Name:    "example_echo",
+		Handler: HandlerDef{Type: "command", Command: "echo", Args: []string{"{project}"}},
+	}
+	text, isErr := mcpCallResult(t, agg, "example_echo", `{}`)
+	if !isErr {
+		t.Error("an unfilled command argument must set isError=true")
+	}
+	if !strings.Contains(text, "unfilled command argument") {
+		t.Errorf("missing arg should report the unfilled placeholder, got: %s", text)
+	}
+}
+
+// TestHandleMCP_BodyTooLargeIsRejected: POST /mcp must cap the request body -- an
+// unauthenticated caller (reads are open on this route) must not be able to hand the JSON
+// decoder an unbounded body before any bearer check runs.
+func TestHandleMCP_BodyTooLargeIsRejected(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	oversized := bytes.Repeat([]byte(" "), maxMCPBodyBytes+1)
+	body := append([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":`), append(oversized, []byte(`}`)...)...)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	agg.HandleMCP(w, req)
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Errorf("oversized body: status = %d, want 400 (rejected before it is parsed as a tool call)", w.Result().StatusCode)
+	}
+}
+
 func TestHandleMCPListTools(t *testing.T) {
 	agg := NewAggregator("/tmp")
 	agg.tools["test_tool"] = Tool{Name: "test_tool"}
