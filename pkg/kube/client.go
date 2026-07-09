@@ -98,6 +98,19 @@ func (c *Client) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RES
 // start with no kubeconfig present and pick up a late-mounted one on a later call, while a
 // success is built once and shared (delightd holds a single cluster handle, not one per
 // request). Safe for concurrent use.
+//
+// Rotated credential note (the memoized Client is long-lived, so this matters): a rotated
+// bearer token IS picked up without a restart -- our kubeconfig sets the user's tokenFile
+// (see scripts/delightd's resolve_creds), and clientcmd copies that into rest.Config's
+// BearerTokenFile rather than reading the token once into BearerToken. client-go's transport
+// wraps that in a cachingTokenSource (transport.NewCachedFileTokenSource) that re-reads the
+// file every ~1 minute, so a token the wrapper atomically replaces on the creds mount reaches
+// the daemon on its own within that window. A rotated CA is NOT picked up without a restart:
+// the CA is parsed into the TLS transport's RootCAs once, at Client construction (inside
+// FromKubeconfig, via rest.Config -> the HTTP transport), and this memoized Client never
+// rebuilds that transport -- a new CA on disk has no effect until the daemon restarts (a new
+// LazyClient) or the process is bounced.
+
 func LazyClient() func() (*Client, error) {
 	var (
 		mu sync.Mutex

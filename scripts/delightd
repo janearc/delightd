@@ -105,10 +105,12 @@ resolve_creds() {
   fi
   chmod 600 "$tmp_token"
 
-  # Sanity-check the token before it goes live: a defined-but-empty `op read`, or
-  # a read that returned only whitespace, is worth refusing instead of handing it to
-  # client-go and finding out via a 401. 8 bytes is a low bar (real ServiceAccount JWTs
-  # run to hundreds of bytes) -- it exists to catch "empty", not to validate JWT shape.
+  # Sanity-check the token before it goes live: a defined-but-empty `op read` is worth
+  # catching here instead of handing it to client-go and finding out via a 401. This is a
+  # byte count (wc -c), so it catches empty or truncated, not whitespace-only -- a token that
+  # is all whitespace still passes at >= 8 bytes and fails downstream at the apiserver instead.
+  # 8 bytes is a low bar (real ServiceAccount JWTs run to hundreds of bytes) -- it exists to
+  # catch "empty", not to validate JWT shape.
   local token_bytes
   token_bytes=$(wc -c <"$tmp_token" | tr -d ' ')
   if [ "$token_bytes" -lt 8 ]; then
