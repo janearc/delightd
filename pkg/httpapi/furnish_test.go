@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -177,6 +178,42 @@ func TestFurnishHealth_GreenAndRed(t *testing.T) {
 	}
 	if body := decodeBody(t, rr); body["healthy"] != false {
 		t.Errorf("healthy = %v, want false", body["healthy"])
+	}
+}
+
+// TestFurnishMutate_DeadlineIsLoud: a cluster op that runs out its deadline must answer
+// 504 with the operation, the piece, and the bound that fired named in the body -- a
+// wedged apiserver reads as "timed out after X", never a hang or an anonymous 500.
+func TestFurnishMutate_DeadlineIsLoud(t *testing.T) {
+	stuck := func(verb string) *kube.Client {
+		c := furnishFakeClient()
+		c.Dynamic.(*dynamicfake.FakeDynamicClient).PrependReactor(verb, "deployments",
+			func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, context.DeadlineExceeded // the apiserver call ran out its deadline
+			})
+		return c
+	}
+	for _, tc := range []struct {
+		op, verb, path string
+		handle         func(*Server, http.ResponseWriter, *http.Request)
+	}{
+		{"furnish.up", "patch", "/furnish/delightd/up", (*Server).handleFurnishUp},
+		{"furnish.down", "delete", "/furnish/delightd/down", (*Server).handleFurnishDown},
+	} {
+		s := furnishServer(furnishFixture(t), stuck(tc.verb))
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+		req.SetPathValue("piece", "delightd")
+		tc.handle(s, rr, req)
+		if rr.Code != http.StatusGatewayTimeout {
+			t.Errorf("%s deadline: code = %d, want 504 (%s)", tc.op, rr.Code, rr.Body.String())
+		}
+		msg, _ := decodeBody(t, rr)["error"].(string)
+		for _, want := range []string{tc.op, "delightd", "1m0s"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s deadline body should name %q (fail loud): %q", tc.op, want, msg)
+			}
+		}
 	}
 }
 

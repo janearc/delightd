@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -117,8 +118,18 @@ func RESTConfig(path string) (*rest.Config, error) {
 		}
 		return nil, fmt.Errorf("kube: load kubeconfig (%s): %w", where, err)
 	}
+	// Every request through this config is bounded, so a wedged apiserver fails loud
+	// instead of hanging a handler forever. This is the per-request floor -- callers with
+	// tighter needs bound their contexts lower (the /readyz probe at 3s, furnish health at
+	// 15s), and a whole multi-request operation is bounded by its handler's context.
+	cfg.Timeout = requestTimeout
 	return cfg, nil
 }
+
+// requestTimeout bounds each individual apiserver request issued through RESTConfig.
+// Generous because a single server-side apply of a large object can legitimately take
+// seconds; the point is that "forever" is not an outcome.
+const requestTimeout = 30 * time.Second
 
 // APIServerReady pings the apiserver's own /readyz endpoint via client-go, returning nil
 // only when the server answers 2xx -- the programmatic equivalent of

@@ -6,7 +6,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// dispatchClient bounds every dispatched call -- http.DefaultClient has no timeout, so a
+// wedged control port would hang the MCP tool silently. The ceiling sits above the
+// longest server-side furnish deadline (60s, pkg/httpapi/furnish.go) so the daemon's own
+// loud timeout body is relayed to the tool caller rather than clipped by the client.
+var dispatchClient = &http.Client{Timeout: 90 * time.Second}
 
 // renderURL fills each {name} placeholder in rawURL with the named argument (path-escaped),
 // and reports any placeholder left unfilled as an error rather than a malformed URL. This
@@ -57,7 +64,7 @@ func doHTTP(method, rawURL, bearer string) (string, error) {
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dispatchClient.Do(req)
 	if err != nil {
 		return "", err
 	}

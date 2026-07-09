@@ -513,6 +513,14 @@ func runDaemon(dryRun, immediate bool) error {
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
+		// A client that connects and never finishes its headers must not hold a
+		// connection open forever; idle keep-alives are reaped on the same principle.
+		// Deliberately NO WriteTimeout: it starts counting at request read and would
+		// kill legitimately long responses -- a furnish up is allowed up to its 60s
+		// handler deadline (pkg/httpapi/furnish.go), which is the right bound: per
+		// operation, not per connection.
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

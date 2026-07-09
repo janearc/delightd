@@ -244,6 +244,34 @@ func TestHealth_Indeterminate(t *testing.T) {
 	}
 }
 
+// TestHealth_DeadlineIsIndeterminate: a read that runs out its deadline observed nothing,
+// so the taxonomy maps it to INDETERMINATE -- never RED (not observed to fail) and never
+// Absent -- with the cause carried in the reason.
+func TestHealth_DeadlineIsIndeterminate(t *testing.T) {
+	c := fakeClient()
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	fdc.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	items, err := Health(context.Background(), c, writePiece(t))
+	if err != nil {
+		t.Fatalf("a deadline must not hard-error the read: %v", err)
+	}
+	if len(items) != 1 || !items[0].Indeterminate || items[0].Absent {
+		t.Fatalf("deadline should mark the object indeterminate (not absent): %+v", items)
+	}
+	if !strings.Contains(items[0].Reason, context.DeadlineExceeded.Error()) {
+		t.Errorf("indeterminate reason should carry the deadline cause: %q", items[0].Reason)
+	}
+	ok, ladder := PieceHealth(items)
+	if ok {
+		t.Error("a timed-out read must not report healthy")
+	}
+	if ladder[0]["state"] != "INDETERMINATE" {
+		t.Errorf("state = %v, want INDETERMINATE (a timeout is never RED)", ladder[0]["state"])
+	}
+}
+
 // TestHealth_OneBadObjectDoesNotBlindOthers: one object's read failure leaves the other
 // objects' states intact.
 func TestHealth_OneBadObjectDoesNotBlindOthers(t *testing.T) {

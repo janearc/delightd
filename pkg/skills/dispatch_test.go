@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestRenderURL checks named substitution, escaping, and the unfilled-placeholder error.
@@ -31,6 +32,19 @@ func TestPositionalURL(t *testing.T) {
 	}
 	if got := positionalURL("http://h/health"); got != "http://h/health" {
 		t.Errorf("positionalURL plain = %q, want unchanged", got)
+	}
+}
+
+// TestDispatchClientIsBounded: the dispatch client must carry a timeout (http.DefaultClient
+// has none -- a wedged control port would hang the tool silently), and the ceiling must sit
+// above the server-side furnish mutate deadline (60s) so the daemon's own loud timeout body
+// is relayed rather than clipped by the client.
+func TestDispatchClientIsBounded(t *testing.T) {
+	if dispatchClient.Timeout <= 0 {
+		t.Fatal("dispatchClient has no timeout: a wedged control port would hang forever")
+	}
+	if dispatchClient.Timeout <= 60*time.Second {
+		t.Errorf("dispatchClient timeout = %s, must exceed the 60s server-side furnish deadline", dispatchClient.Timeout)
 	}
 }
 
