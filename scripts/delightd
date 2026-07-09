@@ -18,6 +18,17 @@ CTRL="http://${DELIGHT_CONTROL_ADDR:-127.0.0.1:8088}"
 SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
 NETWORK="dev-fleet"
 
+# Credential resolution (the light fake-EKS model -- see docs/kubernetes-access.md). These
+# name where the scoped token lives (1Password), the ring0-internal apiserver URL, and the
+# host file holding the cluster CA that k3d writes. Finalized against the real cluster at
+# bring-up; override per-workstation.
+TOKEN_ITEM="${DELIGHT_TOKEN_ITEM:-op://fleet/delightd-k8s-token/credential}"
+APISERVER="${DELIGHT_APISERVER:-https://k3d-fleet-serverlb:6443}"
+CA_SOURCE="${DELIGHT_CA_SOURCE:-$HOME/.kube/k3d-fleet-ca.crt}"
+# Creds land here and mount read-only at /run/delightd. MUST be under $HOME: colima shares
+# /Users with its VM, not /tmp, so a mount of /tmp lands empty in the container.
+CREDS_DIR="${DELIGHT_CREDS_DIR:-$HOME/.delightd/creds}"
+
 log() { printf 'delightd: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
 
@@ -43,16 +54,54 @@ ensure_colima() {
   fi
 }
 
+# resolve_creds is delightd's local IMDS: it reads the scoped ServiceAccount token from
+# 1Password host-side (never in the container), and writes a credential-less kubeconfig
+# (server + CA + tokenFile -- no secret in the file) plus the token into CREDS_DIR, which
+# mounts read-only at /run/delightd. See docs/kubernetes-access.md.
+resolve_creds() {
+  mkdir -p "$CREDS_DIR"
+  chmod 700 "$CREDS_DIR"
+
+  op read "$TOKEN_ITEM" >"$CREDS_DIR/token" 2>/dev/null || die "could not read the k8s token from 1Password ($TOKEN_ITEM); is op authed?"
+  chmod 600 "$CREDS_DIR/token"
+
+  # The cluster CA is public, not a secret; k3d writes it and we copy it beside the token.
+  cp "$CA_SOURCE" "$CREDS_DIR/ca.crt" 2>/dev/null || die "could not read the cluster CA ($CA_SOURCE); is k3d up?"
+
+  cat >"$CREDS_DIR/kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+  - name: fleet
+    cluster:
+      server: ${APISERVER}
+      certificate-authority: /run/delightd/ca.crt
+contexts:
+  - name: fleet
+    context: { cluster: fleet, user: delightd }
+current-context: fleet
+users:
+  - name: delightd
+    user:
+      tokenFile: /run/delightd/token
+EOF
+}
+
 cmd_start() {
   ensure_colima
   docker network create "$NETWORK" >/dev/null 2>&1 || true
+  resolve_creds
   local sha
   sha="$(git_sha)"
-  GIT_SHA="$sha" compose up -d --build delightd
+  DELIGHT_CREDS_DIR="$CREDS_DIR" GIT_SHA="$sha" compose up -d --build delightd
   log "started (image stamp $sha); check: delightd status"
 }
 
-cmd_stop() { compose stop delightd; }
+cmd_stop() {
+  compose stop delightd
+  # The token is only needed while the container runs; take it off disk once it is down.
+  rm -f "$CREDS_DIR/token" 2>/dev/null || true
+}
 
 cmd_restart() {
   cmd_stop

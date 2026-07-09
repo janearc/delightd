@@ -17,14 +17,17 @@ services:
     # FLEET STANDARD: Bind the container's execution user to the host engineer's ID.
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
-      # Host source paths are passed in, never hardcoded here. The four roots are
-      # separate host locations (~/etc is not under ~/work), so each is its own
-      # variable; when the workstation layout moves (#87) you set these (an .env or the
-      # wrapper), not this file. The in-container targets are fixed -- the container's
-      # own view of its roots. /work is read-only: delightd watches it, never writes it.
+      # Host source paths are passed in, never hardcoded here. /work is the read-only
+      # git-state source; /var is delightd's writable state tree. Config is NOT mounted --
+      # it is baked into the image (delight.yaml, mcp.json, the kube/ manifest tree),
+      # commit-stamped, so a running orchestrator is pinned to its image, not the host
+      # filesystem. The one thing delivered at runtime is credentials: the wrapper writes
+      # the credential-less kubeconfig and the scoped token into DELIGHT_CREDS_DIR and
+      # mounts it read-only at /run/delightd (see docs/kubernetes-access.md, the light
+      # fake-EKS model). Nothing kube-credential is baked.
       - ${DELIGHT_MONITOR_ROOT_HOST:?host path for /work}:/work:ro
-      - ${DELIGHT_CONFIG_ROOT_HOST:?host path for /etc/delightd}:/etc/delightd:ro
       - ${DELIGHT_DAEMON_ROOT_HOST:?host path for /var}:/var:rw
+      - ${DELIGHT_CREDS_DIR:?the delightd wrapper provides this (kubeconfig + token)}:/run/delightd:ro
     ports:
       - "127.0.0.1:8088:8088"
     environment:
@@ -35,12 +38,14 @@ services:
       #     daemon writes archives here directly (no appended "/backups"). Set
       #     explicitly rather than relying on the ${DAEMON_ROOT}/backups default so
       #     it is visible in the deployment. Resolves to ~/var/backups on the host.
-      #   CONFIG_ROOT  /etc/delightd -- the read-only ~/etc/delightd config mount.
+      #   CONFIG_ROOT  /etc/delightd -- the baked config tree (not a mount).
+      # KUBECONFIG points at the wrapper-delivered, credential-less kubeconfig on the
+      # /run/delightd mount; its tokenFile resolves the scoped token beside it.
       - DELIGHT_MONITOR_ROOT=/work
       - DELIGHT_DAEMON_ROOT=/var
       - DELIGHT_BACKUPS_ROOT=/var/backups
       - DELIGHT_CONFIG_ROOT=/etc/delightd
-      - DELIGHT_EXPORTS_REGISTRY=/etc/delightd/delight-registry.yaml
+      - KUBECONFIG=/run/delightd/kubeconfig
       - DELIGHT_EXPORTS_BIN=/var/bin
       - DELIGHT_EXPORTS_STATE=/var/runtime/delightd/exports
       - DELIGHT_EXPORTS_ARCHIVE=/var/archive/delightd/exports
@@ -52,7 +57,12 @@ services:
       - "traefik.http.routers.delightd.rule=Host(`delightd.local`)"
       - "traefik.http.services.delightd.loadbalancer.server.port=8088"
     networks:
+      # dev-fleet: the ingress side (traefik routes to delightd). ring0: the control-plane
+      # side -- the network holding only the apiserver and delightd, delightd the sole
+      # ingress. See docs/kubernetes-access.md. ring0 is created by the k3d bring-up
+      # (k3d cluster create --network ring0), so it is external here.
       - dev-fleet
+      - ring0
 
   # --------------------------------------------------------
   # TRAEFIK PROFILE (Dynamic Reverse Proxy + Endpoint Registry)
@@ -73,4 +83,8 @@ services:
 
 networks:
   dev-fleet:
+    external: true
+  # ring0 holds only the k3d apiserver and delightd; delightd is the sole ingress. Created
+  # by the k3d bring-up (k3d cluster create --network ring0), so external here.
+  ring0:
     external: true

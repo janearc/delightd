@@ -96,16 +96,18 @@ func TestWrapperForwarding(t *testing.T) {
 	}
 }
 
-// TestWrapperStartDispatch stubs colima, docker, and git on PATH and asserts `start`
-// ensures the runtime and brings the container up through docker compose.
+// TestWrapperStartDispatch stubs colima, docker, git, and op on PATH and asserts `start`
+// resolves credentials (reads the token from 1Password, assembles a credential-less
+// kubeconfig) and brings the container up through docker compose.
 func TestWrapperStartDispatch(t *testing.T) {
 	binDir := t.TempDir()
 	dockerLog := filepath.Join(t.TempDir(), "docker.log")
-	// colima status -> up (so start does not try to boot it); git -> a clean stamp;
-	// docker -> record args (and answer `compose ps -q` empty).
-	writeStub(t, filepath.Join(binDir, "colima"), `#!/usr/bin/env bash
-exit 0
-`)
+	credsDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+
+	// colima status -> up; git -> a clean stamp; op -> a fake token; docker -> record args.
+	writeStub(t, filepath.Join(binDir, "colima"), "#!/usr/bin/env bash\nexit 0\n")
 	writeStub(t, filepath.Join(binDir, "git"), `#!/usr/bin/env bash
 case "$*" in
   *rev-parse*) echo testsha ;;
@@ -113,25 +115,37 @@ case "$*" in
 esac
 exit 0
 `)
-	writeStub(t, filepath.Join(binDir, "docker"), fmt.Sprintf(`#!/usr/bin/env bash
-echo "docker $*" >> %q
-exit 0
-`, dockerLog))
+	writeStub(t, filepath.Join(binDir, "op"), "#!/usr/bin/env bash\necho fake-token\n")
+	writeStub(t, filepath.Join(binDir, "docker"), fmt.Sprintf("#!/usr/bin/env bash\necho \"docker $*\" >> %q\nexit 0\n", dockerLog))
 
 	env := []string{
 		"PATH=" + binDir + ":" + os.Getenv("PATH"),
 		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+		"DELIGHT_CA_SOURCE=" + caFile,
 	}
 	if out, code := runWrapper(t, env, "start"); code != 0 {
 		t.Fatalf("start: code=%d out=%q", code, out)
 	}
-	log, _ := os.ReadFile(dockerLog)
-	got := string(log)
-	if !strings.Contains(got, "up -d --build delightd") {
+
+	got, _ := os.ReadFile(dockerLog)
+	if !strings.Contains(string(got), "up -d --build delightd") {
 		t.Errorf("start did not bring the container up via compose; docker calls:\n%s", got)
 	}
-	if !strings.Contains(got, "network create dev-fleet") {
+	if !strings.Contains(string(got), "network create dev-fleet") {
 		t.Errorf("start did not ensure the fleet network; docker calls:\n%s", got)
+	}
+	// resolve_creds assembled a credential-less kubeconfig pointing at the token file, and
+	// laid down the token from op.
+	kubeconfig, _ := os.ReadFile(filepath.Join(credsDir, "kubeconfig"))
+	if !strings.Contains(string(kubeconfig), "tokenFile: /run/delightd/token") {
+		t.Errorf("kubeconfig missing tokenFile:\n%s", kubeconfig)
+	}
+	if strings.Contains(string(kubeconfig), "fake-token") {
+		t.Error("token leaked into the kubeconfig; it must stay in a separate file")
+	}
+	if tok, _ := os.ReadFile(filepath.Join(credsDir, "token")); strings.TrimSpace(string(tok)) != "fake-token" {
+		t.Errorf("token = %q, want fake-token from op", tok)
 	}
 }
 
