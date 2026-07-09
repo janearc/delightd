@@ -34,7 +34,7 @@ NETWORK="dev-fleet"
 # name where the scoped token lives (1Password), the ring0-internal apiserver URL, and the
 # host file holding the cluster CA that k3d writes. Finalized against the real cluster at
 # bring-up; override per-workstation.
-TOKEN_ITEM="${DELIGHT_TOKEN_ITEM:-op://fleet/delightd-k8s-token/credential}"
+TOKEN_ITEM="${DELIGHT_TOKEN_ITEM:-op://Personal/delightd-k8s-token/credential}"
 APISERVER="${DELIGHT_APISERVER:-https://k3d-fleet-serverlb:6443}"
 CA_SOURCE="${DELIGHT_CA_SOURCE:-$HOME/.kube/k3d-fleet-ca.crt}"
 # Creds land here and mount read-only at /run/delightd. MUST be under $HOME: colima shares
@@ -141,6 +141,11 @@ EOF
 cmd_start() {
   ensure_colima
   docker network create "$NETWORK" >/dev/null 2>&1 || true
+  # ring0 is k3d's network, not ours (see docker-compose.yml): created by
+  # `k3d cluster create --network ring0`. Do NOT create it here -- a delightd-created
+  # ring0 would not have the apiserver on it, and the failure downstream would be
+  # cryptic. Fail loud now instead.
+  docker network inspect ring0 >/dev/null 2>&1 || die "network 'ring0' does not exist -- it is created by the k3d bring-up (k3d cluster create --network ring0), not by this wrapper. Bring up k3d first, then retry."
   resolve_creds
   local sha
   sha="$(git_sha)"
@@ -149,9 +154,15 @@ cmd_start() {
 }
 
 cmd_stop() {
+  # Trap-guaranteed: a killed/failed stop must not leave the token on disk. Cleared
+  # again below on the normal-completion path so it does not fire a second time and
+  # remove the token cmd_start just wrote (cmd_restart calls cmd_stop then cmd_start
+  # in the same process).
+  trap 'rm -f "$CREDS_DIR/token" 2>/dev/null || true' EXIT INT TERM
   compose stop delightd
   # The token is only needed while the container runs; take it off disk once it is down.
   rm -f "$CREDS_DIR/token" 2>/dev/null || true
+  trap - EXIT INT TERM
 }
 
 # creds resolves the credentials without starting anything -- so the op path (and its Touch

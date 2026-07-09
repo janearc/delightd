@@ -339,6 +339,48 @@ func TestWrapperCredsUnsetsServiceAccountToken(t *testing.T) {
 	}
 }
 
+// TestWrapperStartFailsLoudWithoutRing0: `start` must refuse with an actionable message
+// when ring0 (k3d's network, declared external in compose) does not exist yet, instead
+// of a cryptic downstream compose failure.
+func TestWrapperStartFailsLoudWithoutRing0(t *testing.T) {
+	binDir := t.TempDir()
+	credsDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+
+	writeStub(t, filepath.Join(binDir, "colima"), "#!/usr/bin/env bash\nexit 0\n")
+	writeStub(t, filepath.Join(binDir, "git"), `#!/usr/bin/env bash
+case "$*" in
+  *rev-parse*) echo testsha ;;
+  *status*) echo "" ;;
+esac
+exit 0
+`)
+	writeStub(t, filepath.Join(binDir, "op"), "#!/usr/bin/env bash\necho fake-token-0000000000\n")
+	// dev-fleet network create succeeds; ring0 inspect fails, as it does when k3d has
+	// never created it -- the real-world case this guards against.
+	writeStub(t, filepath.Join(binDir, "docker"), `#!/usr/bin/env bash
+case "$*" in
+  "network inspect ring0"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`)
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+		"DELIGHT_CA_SOURCE=" + caFile,
+	}
+	out, code := runWrapper(t, env, "start")
+	if code == 0 {
+		t.Errorf("start without ring0: want non-zero exit, got 0 (%q)", out)
+	}
+	if !strings.Contains(out, "ring0") {
+		t.Errorf("start without ring0: want an actionable message naming ring0, got %q", out)
+	}
+}
+
 func writeStub(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
