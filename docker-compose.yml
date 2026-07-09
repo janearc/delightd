@@ -30,6 +30,34 @@ services:
       - ${DELIGHT_MONITOR_ROOT_HOST:?host path for /work}:/work:ro
       - ${DELIGHT_DAEMON_ROOT_HOST:?host path for /var}:/var:rw
       - ${DELIGHT_CREDS_DIR:?the delightd wrapper provides this (kubeconfig + token)}:/run/delightd:ro
+    # Compensating hardening for the root-namespaced container above (M11, sprints#58).
+    # read_only locks the image's own layers (the scratch runtime plus the baked
+    # /etc/delightd tree, which was already read-only "by virtue of the image" per the
+    # comment above -- this makes that guarantee load-bearing instead of incidental) and
+    # anything else NOT named in `volumes:`. The three explicit mounts above keep their
+    # own mode regardless: /work and /run/delightd stay :ro as declared, and /var stays
+    # :rw, which is every writable path the daemon actually uses -- checked via
+    # pkg/exports/sync.go, pkg/registry/registry.go, pkg/enablement/enablement.go, and
+    # pkg/backup/backup.go, all of which resolve under DaemonRoot (/var) or one of its
+    # env-configured subpaths (DELIGHT_EXPORTS_BIN, DELIGHT_EXPORTS_STATE,
+    # DELIGHT_EXPORTS_ARCHIVE, all under /var). No tmpfs is added: there is no other
+    # write path to cover. (pkg/traefik/dynamic.go's SyncLLMRoutes joins os.UserHomeDir()
+    # with "var/traefik/dynamic"; no $HOME is set in this image, so UserHomeDir()
+    # resolves empty and the join lands relative to the container's WORKDIR, "/" --
+    # i.e. /var/traefik/dynamic, still under the /var mount. Confirmed live: --read-only
+    # + --cap-drop=ALL + --security-opt no-new-privileges:true and llms.yml still landed
+    # on the host side of the /var mount.)
+    read_only: true
+    # A Go daemon speaking HTTP + the k8s API needs no Linux capability at all -- no raw
+    # sockets, no chown, no bind on a privileged port (8088 is unprivileged). Drop
+    # everything rather than pare the default set down by name.
+    cap_drop:
+      - ALL
+    # Blocks a setuid/setgid binary in the image from gaining privileges beyond the
+    # invoking process. delightd execs nothing (it is a single static binary with no
+    # subprocess calls), so this has no functional cost.
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:8088:8088"
     environment:
