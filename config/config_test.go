@@ -12,7 +12,7 @@ import (
 )
 
 // TestResolveControlPortDefault locks the canonical control port. compose,
-// kube/delightd/deployment.yaml, and every client route to 8088; an absent control_port
+// the host wrapper, and every client route to 8088; an absent control_port
 // key must resolve here, not to a port nothing reaches.
 func TestResolveControlPortDefault(t *testing.T) {
 	if DefaultControlPort != 8088 {

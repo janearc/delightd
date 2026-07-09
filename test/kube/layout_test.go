@@ -21,8 +21,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"delightd/config"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -155,136 +153,70 @@ func decodeKube(t *testing.T, data []byte) ([]runtime.Object, int) {
 	return out, realDocs
 }
 
-func containerPort(c corev1.Container, name string) (int32, bool) {
-	for _, p := range c.Ports {
-		if p.Name == name {
-			return p.ContainerPort, true
-		}
-	}
-	return 0, false
-}
-
-func servicePort(s *corev1.Service, name string) (int32, bool) {
-	for _, p := range s.Spec.Ports {
-		if p.Name == name {
-			return p.Port, true
-		}
-	}
-	return 0, false
-}
-
-// TestLayoutFilesPresent asserts delightd's manifests live under kube/delightd/
-// and the pre-restructure flat paths are gone -- a partial revert that left one
-// behind would build a duplicate delightd under the aggregator.
+// TestLayoutFilesPresent asserts the aggregator exists and that no delightd
+// manifests do -- neither the pre-restructure flat paths nor kube/delightd/.
+// delightd is the operator, not a piece: it runs as a host-level container,
+// never a pod, and is never supervised by the fleet it operates. A revert that
+// brings kube/delightd/ back would make the default `furnish health` RED by
+// construction (the operator never exists in-cluster) and reintroduce the
+// in-cluster delightd model docs/kubernetes-access.md records as rejected.
 func TestLayoutFilesPresent(t *testing.T) {
 	root := repoRoot(t)
 
-	for _, rel := range []string{
-		"kube/kustomization.yaml",
-		"kube/delightd/deployment.yaml",
-		"kube/delightd/service.yaml",
-		"kube/delightd/kustomization.yaml",
-	} {
-		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
-			t.Errorf("expected %s to exist: %v", rel, err)
-		}
+	if _, err := os.Stat(filepath.Join(root, "kube/kustomization.yaml")); err != nil {
+		t.Errorf("expected kube/kustomization.yaml to exist: %v", err)
 	}
 	for _, rel := range []string{"kube/deployment.yaml", "kube/service.yaml"} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
-			t.Errorf("stale flat manifest %s still present; it moved to kube/delightd/", rel)
+			t.Errorf("stale flat manifest %s still present; delightd has no in-cluster manifests", rel)
 		}
 	}
-}
-
-// TestDelightdManifestsAreValidKube decodes the delightd manifests into their
-// real typed objects and asserts the invariants that must hold on the wire: the
-// fleet namespace, a container image, and the served control port matching the
-// canonical DefaultControlPort the code defaults to.
-func TestDelightdManifestsAreValidKube(t *testing.T) {
-	root := repoRoot(t)
-
-	objs, _ := decodeKube(t, readFile(t, filepath.Join(root, "kube/delightd/deployment.yaml")))
-	if len(objs) != 1 {
-		t.Fatalf("deployment.yaml decoded to %d objects, want 1", len(objs))
-	}
-	d, ok := objs[0].(*appsv1.Deployment)
-	if !ok {
-		t.Fatalf("deployment.yaml decoded to %T, want *appsv1.Deployment", objs[0])
-	}
-	if d.Namespace != "fleet" {
-		t.Errorf("deployment namespace = %q, want \"fleet\"", d.Namespace)
-	}
-	if len(d.Spec.Template.Spec.Containers) == 0 {
-		t.Fatal("deployment has no containers")
-	}
-	c := d.Spec.Template.Spec.Containers[0]
-	if c.Image == "" {
-		t.Error("deployment container image is empty")
-	}
-	if port, found := containerPort(c, "control"); !found {
-		t.Error("deployment has no container port named \"control\"")
-	} else if int(port) != config.DefaultControlPort {
-		t.Errorf("deployment control containerPort = %d, want DefaultControlPort %d", port, config.DefaultControlPort)
-	}
-
-	objs, _ = decodeKube(t, readFile(t, filepath.Join(root, "kube/delightd/service.yaml")))
-	if len(objs) != 1 {
-		t.Fatalf("service.yaml decoded to %d objects, want 1", len(objs))
-	}
-	s, ok := objs[0].(*corev1.Service)
-	if !ok {
-		t.Fatalf("service.yaml decoded to %T, want *corev1.Service", objs[0])
-	}
-	if s.Namespace != "fleet" {
-		t.Errorf("service namespace = %q, want \"fleet\"", s.Namespace)
-	}
-	if port, found := servicePort(s, "control"); !found {
-		t.Error("service has no port named \"control\"")
-	} else if int(port) != config.DefaultControlPort {
-		t.Errorf("service control port = %d, want DefaultControlPort %d", port, config.DefaultControlPort)
+	if _, err := os.Stat(filepath.Join(root, "kube/delightd")); err == nil {
+		t.Error("kube/delightd/ exists; delightd is the operator, not a furnish piece -- an in-cluster delightd is the rejected pod model")
 	}
 }
 
 // TestAggregatorRendersValidKube runs the real kustomize build for the whole
-// environment and for the delightd piece alone, and strictly decodes the
-// rendered output. It proves the top-level kustomization actually aggregates
-// delightd (the rendered set contains it) and that both builds produce valid
-// kube -- not just that the files parse. The render is in-process via kustomize's
-// own library, the same path furnish's buildPiece uses, so it needs no kubectl or
-// kustomize binary on PATH.
+// environment and strictly decodes the rendered output. It proves the top-level
+// kustomization aggregates real workloads (the render is non-trivial and every
+// object strictly decodes) and that no object named delightd is among them --
+// the operator must never render into the fleet it operates. The render is
+// in-process via kustomize's own library, the same path furnish's buildPiece
+// uses, so it needs no kubectl or kustomize binary on PATH.
 func TestAggregatorRendersValidKube(t *testing.T) {
 	root := repoRoot(t)
 
-	for _, target := range []string{"kube/", "kube/delightd/"} {
-		m, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(filesys.MakeFsOnDisk(), filepath.Join(root, target))
-		if err != nil {
-			t.Fatalf("kustomize build %s failed: %v", target, err)
-		}
-		out, err := m.AsYaml()
-		if err != nil {
-			t.Fatalf("render %s to yaml: %v", target, err)
-		}
+	m, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(filesys.MakeFsOnDisk(), filepath.Join(root, "kube/"))
+	if err != nil {
+		t.Fatalf("kustomize build kube/ failed: %v", err)
+	}
+	out, err := m.AsYaml()
+	if err != nil {
+		t.Fatalf("render kube/ to yaml: %v", err)
+	}
 
-		var haveDeploy, haveSvc bool
-		objs, _ := decodeKube(t, out)
-		for _, obj := range objs {
-			switch o := obj.(type) {
-			case *appsv1.Deployment:
-				if o.Name == "delightd" && o.Namespace == "fleet" {
-					haveDeploy = true
-				}
-			case *corev1.Service:
-				if o.Name == "delightd" && o.Namespace == "fleet" {
-					haveSvc = true
-				}
+	var workloads int
+	objs, _ := decodeKube(t, out)
+	for _, obj := range objs {
+		switch o := obj.(type) {
+		case *appsv1.Deployment:
+			workloads++
+			if o.Name == "delightd" {
+				t.Errorf("aggregator rendered a delightd Deployment (ns %q); the operator must not be a piece", o.Namespace)
+			}
+		case *appsv1.StatefulSet:
+			workloads++
+			if o.Name == "delightd" {
+				t.Errorf("aggregator rendered a delightd StatefulSet (ns %q); the operator must not be a piece", o.Namespace)
+			}
+		case *corev1.Service:
+			if o.Name == "delightd" {
+				t.Errorf("aggregator rendered a delightd Service (ns %q); the operator must not be a piece", o.Namespace)
 			}
 		}
-		if !haveDeploy {
-			t.Errorf("kustomize %s did not render a delightd Deployment in fleet", target)
-		}
-		if !haveSvc {
-			t.Errorf("kustomize %s did not render a delightd Service in fleet", target)
-		}
+	}
+	if workloads == 0 {
+		t.Error("aggregator rendered no Deployment/StatefulSet at all; the whole-environment build is empty of workloads")
 	}
 }
 
