@@ -85,11 +85,39 @@ resolve_creds() {
   mkdir -p "$CREDS_DIR"
   chmod 700 "$CREDS_DIR"
 
-  op read "$TOKEN_ITEM" >"$CREDS_DIR/token" 2>/dev/null || die "could not read the k8s token from 1Password ($TOKEN_ITEM); is op authed?"
-  chmod 600 "$CREDS_DIR/token"
+  # A stray OP_SERVICE_ACCOUNT_TOKEN (inherited from .env or the shell) makes `op read`
+  # non-interactive and silently skips the Touch ID prompt -- refuse to inherit one.
+  unset OP_SERVICE_ACCOUNT_TOKEN
+
+  # Write to a temp file in CREDS_DIR, then atomic-rename over the live token. CREDS_DIR
+  # is bind-mounted read-only into the running container: a bare `op read > token` would
+  # truncate the file to 0 bytes for the duration of the (Touch-ID-latency) write, and a
+  # re-run while the container is up can hand client-go a momentarily empty token.
+  local tmp_token op_err
+  tmp_token=$(mktemp "$CREDS_DIR/.token.XXXXXX") || die "could not create a temp file in $CREDS_DIR for the atomic token write"
+  if ! op_err=$(op read "$TOKEN_ITEM" 2>&1 >"$tmp_token"); then
+    rm -f "$tmp_token"
+    die "could not read the k8s token from 1Password ($TOKEN_ITEM); is op authed?${op_err:+ ($op_err)}"
+  fi
+  chmod 600 "$tmp_token"
+
+  # Sanity-check the token before it goes live: a defined-but-empty `op read`, or
+  # a read that returned only whitespace, is worth refusing instead of handing it to
+  # client-go and finding out via a 401. 8 bytes is a low bar (real ServiceAccount JWTs
+  # run to hundreds of bytes) -- it exists to catch "empty", not to validate JWT shape.
+  local token_bytes
+  token_bytes=$(wc -c <"$tmp_token" | tr -d ' ')
+  if [ "$token_bytes" -lt 8 ]; then
+    rm -f "$tmp_token"
+    die "token from 1Password ($TOKEN_ITEM) is empty or implausibly short (${token_bytes} bytes) -- refusing to use it"
+  fi
+  mv -f "$tmp_token" "$CREDS_DIR/token"
 
   # The cluster CA is public, not a secret; k3d writes it and we copy it beside the token.
-  cp "$CA_SOURCE" "$CREDS_DIR/ca.crt" 2>/dev/null || die "could not read the cluster CA ($CA_SOURCE); is k3d up?"
+  local cp_err
+  if ! cp_err=$(cp "$CA_SOURCE" "$CREDS_DIR/ca.crt" 2>&1); then
+    die "could not read the cluster CA ($CA_SOURCE); is k3d up?${cp_err:+ ($cp_err)}"
+  fi
 
   cat >"$CREDS_DIR/kubeconfig" <<EOF
 apiVersion: v1

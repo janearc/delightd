@@ -231,6 +231,114 @@ func TestWrapperFurnishHealthDaemonDown(t *testing.T) {
 	}
 }
 
+// TestWrapperCredsAtomicWrite: a re-resolve over an existing token must never leave the
+// token file empty (M13) -- it must be either the old value or the new one, written via
+// temp-file + rename, with no leftover temp file.
+func TestWrapperCredsAtomicWrite(t *testing.T) {
+	binDir := t.TempDir()
+	credsDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+	writeStub(t, filepath.Join(binDir, "op"), "#!/usr/bin/env bash\necho new-token-value-0000000000\n")
+
+	tokenPath := filepath.Join(credsDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("old-token-value-0000000000"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+		"DELIGHT_CA_SOURCE=" + caFile,
+	}
+	out, code := runWrapper(t, env, "creds")
+	if code != 0 {
+		t.Fatalf("creds: code=%d out=%q", code, out)
+	}
+
+	got, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("token missing after creds: %v", err)
+	}
+	if len(got) == 0 {
+		t.Error("token file is empty after resolve_creds -- write was not atomic")
+	}
+	if strings.TrimSpace(string(got)) != "new-token-value-0000000000" {
+		t.Errorf("token = %q, want the freshly resolved value", got)
+	}
+
+	// No leftover temp file from the atomic-write dance, and token permissions stay 0600.
+	entries, err := os.ReadDir(credsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "token" || e.Name() == "ca.crt" || e.Name() == "kubeconfig" {
+			continue
+		}
+		t.Errorf("unexpected leftover in creds dir: %s", e.Name())
+	}
+	if info, err := os.Stat(tokenPath); err == nil && info.Mode().Perm() != 0o600 {
+		t.Errorf("token permissions = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestWrapperCredsRejectsEmptyToken: `creds` (and by extension `start`) must refuse an
+// empty/garbage token from `op read` instead of green-lighting it (M13 sanity check).
+func TestWrapperCredsRejectsEmptyToken(t *testing.T) {
+	binDir := t.TempDir()
+	credsDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+	writeStub(t, filepath.Join(binDir, "op"), "#!/usr/bin/env bash\ntrue\n") // prints nothing
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+		"DELIGHT_CA_SOURCE=" + caFile,
+	}
+	out, code := runWrapper(t, env, "creds")
+	if code == 0 {
+		t.Errorf("creds with an empty token from op: want non-zero exit, got 0 (%q)", out)
+	}
+	if _, err := os.Stat(filepath.Join(credsDir, "token")); err == nil {
+		t.Error("creds left an empty/garbage token on disk after refusing it")
+	}
+}
+
+// TestWrapperCredsUnsetsServiceAccountToken: a stray OP_SERVICE_ACCOUNT_TOKEN in the
+// environment must not reach `op read` -- it makes op non-interactive and silently
+// bypasses the Touch ID gate (M9).
+func TestWrapperCredsUnsetsServiceAccountToken(t *testing.T) {
+	binDir := t.TempDir()
+	credsDir := t.TempDir()
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	writeStub(t, caFile, "FAKE-CA")
+	writeStub(t, filepath.Join(binDir, "op"),
+		"#!/usr/bin/env bash\nif [ -n \"${OP_SERVICE_ACCOUNT_TOKEN:-}\" ]; then echo LEAKED-TOKEN-VALUE-000000; else echo clean-token-value-000000; fi\n")
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+		"DELIGHT_CA_SOURCE=" + caFile,
+		"OP_SERVICE_ACCOUNT_TOKEN=stray-service-account-token",
+	}
+	out, code := runWrapper(t, env, "creds")
+	if code != 0 {
+		t.Fatalf("creds: code=%d out=%q", code, out)
+	}
+	tok, err := os.ReadFile(filepath.Join(credsDir, "token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(tok), "LEAKED") {
+		t.Error("wrapper did not unset OP_SERVICE_ACCOUNT_TOKEN before op read -- silent non-interactive bypass of Touch ID")
+	}
+}
+
 func writeStub(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
