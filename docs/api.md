@@ -7,7 +7,7 @@ surface registered in `Mux()`.
 | Method | Path | Handler purpose |
 |--------|------|-----------------|
 | GET | `/health` | liveness + active project count |
-| GET | `/readyz` | provable readiness: roots mounted + kubectl reachable |
+| GET | `/readyz` | provable readiness: roots mounted + apiserver reachable |
 | GET | `/metrics` | prometheus exposition |
 | GET | `/discovery/llms` | currently discoverable local LLM endpoints |
 | GET | `/projects` | authoritative roster (name/path/essential/deploy/remote_url) for all managed projects |
@@ -25,11 +25,46 @@ surface registered in `Mux()`.
 | GET | `/resolve/{name}` | narrow widget-facing resolution (`resolve.v1.ResolvedService`): scheme + address for one project |
 | GET | `/services` | composed roster (entity-query list), optional `?type=` filter |
 | GET | `/services/{name}` | one composed roster entry, facets as fields |
+| GET | `/furnish/pieces` | declared meubilair pieces from the baked manifest root |
+| GET | `/furnish/health` | health ladder for every piece |
+| GET | `/furnish/health/{piece}` | health ladder for one piece |
+| POST | `/furnish/{piece}/up` | server-side apply for one piece |
+| POST | `/furnish/{piece}/down` | remove one piece's objects (absent is success) |
 | POST | `/mcp` | agent skill aggregator (MCP JSON-RPC); only when MCP is enabled |
 
-`/mcp` is registered only when `system.agent_skills.enabled` is true **and**
-`system.agent_skills.expose_via` contains `"mcp"`. When disabled, the route does
-not exist and a request returns 404 from the mux.
+24 routes are always registered; `/mcp` is the 25th, present only when
+`system.agent_skills.enabled` is true **and** `system.agent_skills.expose_via`
+contains `"mcp"`. When disabled, the route does not exist and a request
+returns 404 from the mux. `readyz` and every `GET` above are open reads,
+requiring no bearer. Every `POST`/`PUT` above requires the control-port bearer
+except `POST /register`, which is deliberately ungated — a frood announcing
+itself is a citizen right, not a privileged mutation (see `registerCitizenRoute`
+in `pkg/httpapi/auth.go`). `POST /mcp` also requires the bearer, regardless of
+which tool a call dispatches. See [Authentication](#authentication) below.
+
+## Authentication
+
+The control port has no network boundary of its own — the daemon binds all
+interfaces (`docker-compose.yml` publishes `127.0.0.1:8088` on the host side,
+but that is a port-mapping choice, not something the daemon enforces) — so
+the bearer is the actual gate, not an IP check. `pkg/httpapi.register` wraps
+every write verb (`POST`/`PUT`/`PATCH`/`DELETE`) in `requireBearer`; a route
+is gated by virtue of being a mutation, not by a hand-kept list, so a route
+added later cannot dodge it. `POST /register` is the one deliberate exemption
+(`registerCitizenRoute`, see above); `POST /mcp` is gated like any other
+mutation regardless of which tool the call dispatches.
+
+`requireBearer` checks `Authorization: Bearer <token>` against the
+control-port token with `subtle.ConstantTimeCompare` — a timing side-channel
+on the comparison must not be a way to recover the token byte by byte. A
+missing or non-matching bearer is `401`. If the token was never provisioned
+(nothing mounted at the creds path, or an empty file) the gate serves `503`
+instead of `401` on every write: an unauthenticated mutation must never be
+silently accepted, but a daemon that came up without its token is also not
+lying about who called — it is telling the truth about its own
+not-yet-provisioned state (the availability mandate: the daemon still comes
+up and reads still work; only writes are blocked, and the reason is named).
+Reads and `/readyz` are open regardless — there is nothing in a `GET` to gate.
 
 The word "state" appears in two route families that do different jobs.
 `/state` and `/state/{name}` are enablement: the fleet-wide enable/disable
@@ -484,6 +519,8 @@ is a `404` — same axis as the control routes: no project, nothing to compose.
 
 JSON-RPC 2.0 endpoint for the Model Context Protocol — the aggregated agent-tool
 surface. Registered only when MCP exposure is enabled (see top of this doc).
+`POST /mcp` requires the control-port bearer regardless of which tool a call
+dispatches — see [Authentication](#authentication) below.
 
 `tools/list` returns every aggregated tool:
 
@@ -551,15 +588,23 @@ as healthy), so hm or a monitor can gate on the status code alone.
 ## POST /furnish/{piece}/up, POST /furnish/{piece}/down
 
 Converge one piece onto its manifests (server-side apply, idempotent) or remove its
-objects (an already-absent object is success). Mutations are localhost-only — the
-control port binds `127.0.0.1` — and what they converge to is the baked,
-commit-stamped manifest tree, not a mutable input: triggering convergence is
+objects (an already-absent object is success). Both are gated by the control-port
+bearer (see [Authentication](#authentication)) — the daemon binds all interfaces, so
+the bearer is the actual boundary, not a loopback bind. What they converge to is the
+baked, commit-stamped manifest tree, not a mutable input: triggering convergence is
 low-friction, changing what gets converged is a rebuild. An undeclared piece is
 `404`; if delightd cannot reach a kubeconfig the route is `503` (it operates the
 cluster, so it fails loud rather than pretending).
 
+`up`'s body always names what happened rather than a bare boolean: `applied` lists
+every object ("Kind/name") that landed. On a partial failure the object(s) that did
+not apply are named too, in `failed` (object → error), and the status distinguishes
+why: `504` on a hit deadline, `502` when the cluster itself declined (an RBAC or
+admission refusal — a typed apiserver status), `500` for anything else on delightd's
+side.
+
 ```json
-{ "command": "furnish.up", "piece": "surrealdb", "applied": true }
+{ "command": "furnish.up", "piece": "surrealdb", "applied": ["Deployment/surrealdb"] }
 ```
 
 The furnish surface is delightd's operator action exposed as an API, so the host

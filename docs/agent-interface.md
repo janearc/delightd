@@ -57,6 +57,7 @@ Nothing else is scanned — there is no `swagger.json` or OpenAPI requirement.
 |----------------|----------|
 | `command` | exec `command` with `args` (+ caller args in the CLI) |
 | `http` | request `<method> <url>`; `{name}` path params in the URL are filled from the call arguments (MCP) or positional args (generated CLI), so a parameterized route like `/furnish/{piece}/up` works. A non-2xx status is returned to the caller with its body (e.g. a 503 health ladder). |
+| `internal` | generated-CLI-only (not dispatched over MCP); today only `method: "backup"` is implemented, and it posts to the daemon's own `/projects/<arg>/backup`, carrying the control-port bearer (`cli.go`'s `internal` case). |
 
 `{name}` templating is what lets an operator surface with path parameters —
 delightd's own furnish routes — be driven by name through both the MCP tool and
