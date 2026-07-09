@@ -14,8 +14,11 @@ services:
         # produced. The `delightd` host wrapper sets this (git rev-parse --short HEAD,
         # plus -dirty on an unclean tree); a bare `docker compose build` must pass it too.
         GIT_SHA: ${GIT_SHA:?set GIT_SHA (the delightd wrapper does this; or export it)}
-    # FLEET STANDARD: Bind the container's execution user to the host engineer's ID.
-    user: "${UID:-1000}:${GID:-1000}"
+    # No `user:` override -- the container runs as root. On colima's virtiofs share a
+    # non-root container uid does not map onto the host engineer's ownership of the /var
+    # write mount, so writes fail; root is the reliable execution user (the integration
+    # test runs the same way). The runtime is scratch and single-process, so this is
+    # container-namespaced root, not host root.
     volumes:
       # Host source paths are passed in, never hardcoded here. /work is the read-only
       # git-state source; /var is delightd's writable state tree. Config is NOT mounted --
