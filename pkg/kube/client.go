@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	memory "k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -48,6 +49,29 @@ func FromKubeconfig(path string) (*Client, error) {
 		Dynamic: dyn,
 		Mapper:  restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc)),
 	}, nil
+}
+
+// RESTMapping resolves a GroupKind to its mapping, and on a no-match invalidates the
+// mapper's discovery cache once and retries -- the standard kubectl behavior. The daemon
+// holds one Client for its whole life, and the memory-cached discovery behind the deferred
+// mapper is fresh forever after first use; without the invalidation, a kind installed
+// after first discovery (a CRD landing out-of-band during bring-up) stays NoKindMatch
+// until restart. Exactly one invalidation per miss, and only on a miss -- an unknown kind
+// costs one re-discovery, a known kind costs nothing, so there is no busy re-discovery on
+// the hot path.
+func (c *Client) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	mapping, err := c.Mapper.RESTMapping(gk, versions...)
+	if err == nil || !meta.IsNoMatchError(err) {
+		return mapping, err
+	}
+	// Only a resettable mapper (the deferred discovery mapper is; the tests' static
+	// mappers are not) can refresh -- otherwise the miss is final.
+	resettable, ok := c.Mapper.(meta.ResettableRESTMapper)
+	if !ok {
+		return mapping, err
+	}
+	resettable.Reset()
+	return c.Mapper.RESTMapping(gk, versions...)
 }
 
 // LazyClient returns a provider that builds a *Client on first call from the standard

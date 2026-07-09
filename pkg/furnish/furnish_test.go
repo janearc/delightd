@@ -366,6 +366,68 @@ func TestUpDown_UnresolvableKindErrors(t *testing.T) {
 	}
 }
 
+// lateKindMapper models the discovery cache going stale: it answers NoKindMatch until
+// Reset (the CRD "appears" on re-discovery), then delegates to the real mapper. It counts
+// resets so a test can pin the invalidation to exactly one.
+type lateKindMapper struct {
+	meta.RESTMapper
+	resets     int
+	alwaysMiss bool // a kind that never appears, even after re-discovery
+}
+
+func (m *lateKindMapper) Reset() { m.resets++ }
+
+func (m *lateKindMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	if m.resets == 0 || m.alwaysMiss {
+		return nil, &meta.NoKindMatchError{GroupKind: gk, SearchedVersions: versions}
+	}
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
+// TestUp_LateKindResolvesAfterOneInvalidation: a kind unknown to the first discovery (a
+// CRD installed out-of-band after the daemon's mapper cached) must trigger exactly one
+// mapper invalidation + retry, after which furnish succeeds -- no restart, no busy
+// re-discovery.
+func TestUp_LateKindResolvesAfterOneInvalidation(t *testing.T) {
+	c := fakeClient()
+	m := &lateKindMapper{RESTMapper: staticMapper()}
+	c.Mapper = m
+	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
+	var applied []string
+	fdc.PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		pa := a.(k8stesting.PatchActionImpl)
+		applied = append(applied, pa.Name)
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(deploymentGVK)
+		u.SetName(pa.Name)
+		u.SetNamespace(pa.Namespace)
+		return true, u, nil
+	})
+	if err := Up(context.Background(), c, writePiece(t)); err != nil {
+		t.Fatalf("up after a late-appearing kind: %v", err)
+	}
+	if m.resets != 1 {
+		t.Errorf("mapper invalidations = %d, want exactly 1", m.resets)
+	}
+	if len(applied) != 1 || applied[0] != "delightd" {
+		t.Errorf("applied = %v, want [delightd]", applied)
+	}
+}
+
+// TestUp_MissAfterInvalidationIsFinal: a kind still unknown after re-discovery fails with
+// the no-match surfaced -- one retry, never a loop.
+func TestUp_MissAfterInvalidationIsFinal(t *testing.T) {
+	c := fakeClient()
+	m := &lateKindMapper{RESTMapper: staticMapper(), alwaysMiss: true}
+	c.Mapper = m
+	if err := Up(context.Background(), c, writePiece(t)); err == nil {
+		t.Error("a kind absent even after re-discovery must still error")
+	}
+	if m.resets != 1 {
+		t.Errorf("mapper invalidations = %d, want exactly 1 (retry once, never loop)", m.resets)
+	}
+}
+
 // TestDown removes the declared object and treats an already-absent object as success.
 func TestDown(t *testing.T) {
 	dir := writePiece(t)

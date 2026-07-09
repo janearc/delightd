@@ -133,10 +133,12 @@ func buildPiece(dir string) ([]*unstructured.Unstructured, error) {
 }
 
 // resourceFor resolves an object to its dynamic resource client, namespaced or not per the
-// RESTMapper (a Deployment is namespaced; a ClusterRole is not).
+// RESTMapper (a Deployment is namespaced; a ClusterRole is not). Resolution goes through
+// kube.Client.RESTMapping, which invalidates the discovery cache once on a no-match, so a
+// kind installed after the daemon's first discovery still resolves.
 func resourceFor(c *kube.Client, u *unstructured.Unstructured) (dynamic.ResourceInterface, error) {
 	gvk := u.GroupVersionKind()
-	mapping, err := c.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	mapping, err := c.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		return nil, fmt.Errorf("furnish: resolve %s: %w", gvk.Kind, err)
 	}
