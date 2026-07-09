@@ -5,69 +5,112 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 )
 
-// paramRe matches a {name} path parameter in a handler URL. delightd's own tools use
-// these so an agent can name a piece or project and have it land in the route path
-// (e.g. /furnish/{piece}/up), which is what an operator surface needs.
-var paramRe = regexp.MustCompile(`\{(\w+)\}`)
+// urlTemplate is a handler URL parsed into literal runs and {name} path parameters, so it
+// can be rendered from named arguments (MCP) or positional ones (the generated CLI)
+// without rescanning the string on every call.
+type urlTemplate struct {
+	segs []segment
+}
 
-// urlParams returns the distinct {name} parameters in a URL template, in first-seen order
-// -- the order the generated CLI wrapper maps positional args onto.
-func urlParams(tmpl string) []string {
+// segment is one piece of a parsed template: a literal run, or a {param} placeholder (in
+// which case literal is empty).
+type segment struct {
+	literal string
+	param   string
+}
+
+// parseURLTemplate splits raw into literal and {name} segments by scanning for braces. An
+// unmatched brace is treated as a literal.
+func parseURLTemplate(raw string) urlTemplate {
+	var segs []segment
+	for len(raw) > 0 {
+		open := strings.IndexByte(raw, '{')
+		if open < 0 {
+			segs = append(segs, segment{literal: raw})
+			break
+		}
+		end := strings.IndexByte(raw[open:], '}')
+		if end < 0 {
+			segs = append(segs, segment{literal: raw})
+			break
+		}
+		end += open
+		if open > 0 {
+			segs = append(segs, segment{literal: raw[:open]})
+		}
+		segs = append(segs, segment{param: raw[open+1 : end]})
+		raw = raw[end+1:]
+	}
+	return urlTemplate{segs: segs}
+}
+
+// params returns the distinct parameter names in first-seen order -- the order the
+// generated CLI maps positional args onto.
+func (t urlTemplate) params() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, m := range paramRe.FindAllStringSubmatch(tmpl, -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			out = append(out, m[1])
+	for _, s := range t.segs {
+		if s.param != "" && !seen[s.param] {
+			seen[s.param] = true
+			out = append(out, s.param)
 		}
 	}
 	return out
 }
 
-// renderURL substitutes each {name} in the template with the (path-escaped) named
-// argument, for the MCP dispatch path where arguments arrive as a map. A missing required
-// parameter is an error, not a silently malformed URL.
-func renderURL(tmpl string, args map[string]any) (string, error) {
-	var missing []string
-	out := paramRe.ReplaceAllStringFunc(tmpl, func(tok string) string {
-		key := tok[1 : len(tok)-1]
-		v, ok := args[key]
-		if !ok {
-			missing = append(missing, key)
-			return tok
+// render substitutes each parameter with resolve(name); an error from resolve (e.g. a
+// missing argument) stops rendering and is returned.
+func (t urlTemplate) render(resolve func(name string) (string, error)) (string, error) {
+	var b strings.Builder
+	for _, s := range t.segs {
+		if s.param == "" {
+			b.WriteString(s.literal)
+			continue
 		}
-		return url.PathEscape(fmt.Sprint(v))
-	})
-	if len(missing) > 0 {
-		return "", fmt.Errorf("missing required argument(s): %s", strings.Join(missing, ", "))
+		v, err := resolve(s.param)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(v)
 	}
-	return out, nil
+	return b.String(), nil
 }
 
-// doHTTP issues one request to a rendered URL and returns the response body as text. A
-// non-2xx status is folded into the returned text with the status, so an agent sees the
-// daemon's own error (e.g. a 503 furnish health ladder) rather than a bare failure.
-func doHTTP(method, rawURL string) string {
+// renderArgs fills the template from named MCP arguments, path-escaping each value. A
+// missing required parameter is an error, never a silently malformed URL.
+func (t urlTemplate) renderArgs(args map[string]any) (string, error) {
+	return t.render(func(name string) (string, error) {
+		v, ok := args[name]
+		if !ok {
+			return "", fmt.Errorf("missing required argument %q", name)
+		}
+		return url.PathEscape(fmt.Sprint(v)), nil
+	})
+}
+
+// doHTTP issues one request to a rendered URL and returns the response body. A non-2xx
+// status is a non-nil error, mirroring the success path (body, nil); the body is returned
+// in both cases so the daemon's own answer -- e.g. a 503 health ladder -- is never lost.
+func doHTTP(method, rawURL string) (string, error) {
 	if method == "" {
 		method = http.MethodGet
 	}
 	req, err := http.NewRequest(method, rawURL, nil)
 	if err != nil {
-		return "bad request: " + err.Error()
+		return "", err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "request failed: " + err.Error()
+		return "", err
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	body := strings.TrimSpace(string(b))
 	if resp.StatusCode/100 != 2 {
-		return fmt.Sprintf("%s: %s", resp.Status, body)
+		return body, fmt.Errorf("control port returned %s", resp.Status)
 	}
-	return body
+	return body, nil
 }

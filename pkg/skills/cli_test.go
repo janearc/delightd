@@ -12,7 +12,7 @@ func TestGenerateCLIWrapper(t *testing.T) {
 
 	tools := []Tool{
 		{
-			Name:        "odysseus_check_health",
+			Name:        "example_check_health",
 			Description: "test desc",
 			Handler: HandlerDef{
 				Type:   "http",
@@ -58,7 +58,7 @@ func TestGenerateCLIWrapper(t *testing.T) {
 	if !strings.Contains(content, "curl -s -X POST \"http://localhost:8088/projects/$1/backup\"") {
 		t.Errorf("missing internal backup handler")
 	}
-	if !strings.Contains(content, "delight odysseus check_health") {
+	if !strings.Contains(content, "delight example check_health") {
 		t.Errorf("missing usage generation")
 	}
 }

@@ -10,7 +10,7 @@ func TestAggregatorScan(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Setup mock project with mcp.json
-	projDir := filepath.Join(tmpDir, "odysseus")
+	projDir := filepath.Join(tmpDir, "example")
 	os.MkdirAll(projDir, 0755)
 
 	mcpJSON := `{
@@ -41,21 +41,21 @@ func TestAggregatorScan(t *testing.T) {
 	agg := NewAggregator(tmpDir)
 	agg.SetSelfManifest(selfManifest)
 
-	err := agg.ScanProjects([]string{"odysseus", "broken", "nonexistent"})
+	err := agg.ScanProjects([]string{"example", "broken", "nonexistent"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	tools := agg.GetTools()
-	// Should have odysseus_check_health and delightd_trigger_backup (from the self-manifest)
+	// Should have example_check_health and delightd_trigger_backup (from the self-manifest)
 	if len(tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(tools))
 	}
 
 	// Verify namespacing
-	tool, exists := agg.GetTool("odysseus_check_health")
+	tool, exists := agg.GetTool("example_check_health")
 	if !exists {
-		t.Errorf("expected odysseus_check_health to be registered")
+		t.Errorf("expected example_check_health to be registered")
 	}
 	if tool.Handler.Type != "http" {
 		t.Errorf("expected http handler, got %s", tool.Handler.Type)

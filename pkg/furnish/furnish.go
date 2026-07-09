@@ -1,8 +1,8 @@
 // Package furnish converges the meubilair pieces -- the no-code kube deployments that
 // live one directory per piece under a kube/ aggregator -- onto a cluster via client-go
-// and the kustomize library, with no kubectl or kustomize binary. It is delightd's
-// operator action over a *kube.Client, shared by the daemon's /furnish HTTP surface and
-// the CLI so there is one implementation and one health taxonomy.
+// and the kustomize library. It is delightd's operator action over a *kube.Client, shared
+// by the daemon's /furnish HTTP surface and the CLI so there is one implementation and one
+// health taxonomy.
 //
 // The taxonomy is deliberate: an object is GREEN when observed ready (or present, for
 // non-workload kinds), RED when observed unhealthy or declared-but-absent, and
@@ -85,38 +85,37 @@ type Item struct {
 func PieceHealth(items []Item) (bool, []map[string]any) {
 	healthy := true
 	var results []map[string]any
-	for _, it := range items {
+	for _, item := range items {
 		state := "GREEN"
 		detail := "present"
 		switch {
-		case it.Indeterminate:
+		case item.Indeterminate:
 			state = "INDETERMINATE"
-			detail = it.Reason
+			detail = item.Reason
 			healthy = false
-		case it.Absent:
+		case item.Absent:
 			state = "RED"
 			detail = "declared but absent"
 			healthy = false
-		case it.Kind == "Deployment" || it.Kind == "StatefulSet":
+		case item.Kind == "Deployment" || item.Kind == "StatefulSet":
 			want := int32(1)
-			if it.Replicas != nil {
-				want = *it.Replicas
+			if item.Replicas != nil {
+				want = *item.Replicas
 			}
-			if it.ReadyReplicas < want {
+			if item.ReadyReplicas < want {
 				state = "RED"
 				healthy = false
 			}
-			detail = fmt.Sprintf("%d/%d ready", it.ReadyReplicas, want)
+			detail = fmt.Sprintf("%d/%d ready", item.ReadyReplicas, want)
 		}
 		results = append(results, map[string]any{
-			"kind": it.Kind, "name": it.Name, "state": state, "detail": detail,
+			"kind": item.Kind, "name": item.Name, "state": state, "detail": detail,
 		})
 	}
 	return healthy, results
 }
 
-// buildPiece renders a piece's kustomization in-process (no kubectl, no kustomize binary)
-// into the objects it declares.
+// buildPiece renders a piece's kustomization in-process into the objects it declares.
 func buildPiece(dir string) ([]*unstructured.Unstructured, error) {
 	m, err := krusty.MakeKustomizer(krusty.MakeDefaultOptions()).Run(filesys.MakeFsOnDisk(), dir)
 	if err != nil {
@@ -209,30 +208,30 @@ func Health(ctx context.Context, c *kube.Client, pieceDir string) ([]Item, error
 // read failure becomes an INDETERMINATE item carrying the cause, so the caller can keep
 // reading the rest of the piece instead of losing every other object's state to one.
 func liveItem(ctx context.Context, c *kube.Client, u *unstructured.Unstructured) Item {
-	it := Item{Kind: u.GetKind(), Name: u.GetName()}
+	item := Item{Kind: u.GetKind(), Name: u.GetName()}
 
 	ri, err := resourceFor(c, u)
 	if err != nil {
-		it.Indeterminate = true
-		it.Reason = err.Error()
-		return it
+		item.Indeterminate = true
+		item.Reason = err.Error()
+		return item
 	}
 	live, err := ri.Get(ctx, u.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		it.Absent = true
-		return it
+		item.Absent = true
+		return item
 	}
 	if err != nil {
-		it.Indeterminate = true
-		it.Reason = fmt.Sprintf("get %s/%s: %v", u.GetKind(), u.GetName(), err)
-		return it
+		item.Indeterminate = true
+		item.Reason = fmt.Sprintf("get %s/%s: %v", u.GetKind(), u.GetName(), err)
+		return item
 	}
 	if r, found, _ := unstructured.NestedInt64(live.Object, "spec", "replicas"); found {
 		v := int32(r)
-		it.Replicas = &v
+		item.Replicas = &v
 	}
 	if rr, found, _ := unstructured.NestedInt64(live.Object, "status", "readyReplicas"); found {
-		it.ReadyReplicas = int32(rr)
+		item.ReadyReplicas = int32(rr)
 	}
-	return it
+	return item
 }

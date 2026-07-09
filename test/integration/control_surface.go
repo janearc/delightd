@@ -1,15 +1,14 @@
 //go:build integration
 
-// Shared drive of delightd's full documented control surface (docs/api.md). Both the
-// bare-binary e2e (daemon_test.go) and the container e2e (image_test.go) point this at
-// a running daemon's base URL, so "the whole API works" is verified once, against both
-// deployment shapes. Every route in docs/api.md's table gets a subtest here; when a
-// route is added to the docs, it is added here.
+// verifyControlSurface drives delightd's documented control surface (docs/api.md) against
+// a running daemon: one subtest per route. It takes the daemon's base URL and a
+// surfaceExpect, so any deployment shape can reuse it; the container e2e (image_test.go)
+// points it at the containerized daemon. Add a route to the docs, add its subtest here.
 //
-// The daemon under test is assumed to run the synthetic config this package builds:
-// two managed projects, "fake-clean" (essential, kube deploy block, clean tree) and
-// "fake-dirty" (non-essential, one un-pushed commit, dirty tree). Whether agent_skills
-// (the /mcp surface) is on is per-deployment (surfaceExpect.skillsEnabled).
+// It assumes the daemon runs the synthetic config this package builds: two managed
+// projects -- "fake-clean" (essential, kube deploy block, clean tree) and "fake-dirty"
+// (non-essential, one un-pushed commit, dirty tree). Whether the /mcp surface is on is
+// per-deployment (surfaceExpect.skillsEnabled).
 package integration
 
 import (

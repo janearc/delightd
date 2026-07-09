@@ -74,12 +74,18 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 		case "http":
 			// Render {name} path params from the call arguments, then hit the control
 			// port (or any URL the tool names). This is how delightd's own tools -- and
-			// any fleet tool with a parameterized route -- actually dispatch.
-			rendered, err := renderURL(tool.Handler.URL, params.Arguments)
+			// any fleet tool with a parameterized route -- dispatch. The daemon's body is
+			// the tool output; a non-2xx that carries a body (e.g. a 503 health ladder) is
+			// still returned, and a bodiless failure surfaces its error.
+			rendered, err := parseURLTemplate(tool.Handler.URL).renderArgs(params.Arguments)
 			if err != nil {
 				output = err.Error()
-			} else {
-				output = doHTTP(tool.Handler.Method, rendered)
+				break
+			}
+			resp, err := doHTTP(tool.Handler.Method, rendered)
+			output = resp
+			if err != nil && resp == "" {
+				output = err.Error()
 			}
 		default:
 			output = "unsupported handler type: " + tool.Handler.Type

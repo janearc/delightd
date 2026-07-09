@@ -391,10 +391,9 @@ func (s *Server) checkClusterReady(ctx context.Context) readinessCheck {
 }
 
 // clusterReadyProbe is the production cluster probe: it pings the apiserver's own
-// /readyz endpoint via client-go (no kubectl binary), bounded by a short timeout so a
-// dead apiserver fails the check fast instead of hanging the request. The kubeconfig is
-// resolved by the standard rules at call time, matching furnish, so startup never
-// depends on one being present.
+// /readyz endpoint via client-go, bounded by a short timeout so a dead apiserver fails the
+// check fast instead of hanging the request. The kubeconfig is resolved by the standard
+// rules at call time, so startup never depends on one being present.
 func clusterReadyProbe(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
