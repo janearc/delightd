@@ -343,7 +343,10 @@ func TestHealth_UnrenderablePieceIsFatal(t *testing.T) {
 
 // TestUp converges a piece via server-side apply. The fake dynamic client does not
 // implement SSA's create-on-apply, so we assert Up resolves the declared object and issues
-// an apply (an ApplyPatchType patch) for it. The SSA merge itself is the apiserver's job.
+// an apply (an ApplyPatchType patch) for it, carrying the field manager and Force=true a
+// real apiserver requires -- SSA without a field manager 422s, and without Force it
+// refuses to steal conflicting fields delightd owns. The SSA merge itself is the
+// apiserver's job.
 func TestUp(t *testing.T) {
 	c := fakeClient()
 	fdc := c.Dynamic.(*dynamicfake.FakeDynamicClient)
@@ -352,6 +355,13 @@ func TestUp(t *testing.T) {
 		pa := a.(k8stesting.PatchActionImpl)
 		if pa.GetPatchType() != types.ApplyPatchType {
 			t.Errorf("patch type = %v, want server-side apply", pa.GetPatchType())
+		}
+		opts := pa.GetPatchOptions()
+		if opts.FieldManager != fieldManager {
+			t.Errorf("field manager = %q, want %q -- a real apiserver 422s an apply with none", opts.FieldManager, fieldManager)
+		}
+		if opts.Force == nil || !*opts.Force {
+			t.Errorf("force = %v, want true -- without it the apiserver refuses conflicting fields delightd owns", opts.Force)
 		}
 		applied = append(applied, pa.Name)
 		u := &unstructured.Unstructured{}
