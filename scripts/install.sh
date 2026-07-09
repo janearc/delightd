@@ -8,10 +8,24 @@
 # no prompts, no sudo, no curl-pipe-to-shell. Only git and the image build touch the wire.
 set -euo pipefail
 
-# Where the checkout lives; override with DELIGHTD_SRC.
+# Where the checkout lives; override with DELIGHTD_SRC. BIN_DIR is overridable only for
+# tests (DELIGHTD_BIN_DIR) -- a real install always wants the standard bin surface.
 SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
 REMOTE="git@github.com:janearc/delightd.git"
-BIN_DIR="$HOME/var/bin"
+BIN_DIR="${DELIGHTD_BIN_DIR:-$HOME/var/bin}"
+
+# The image builds its own Go/buf toolchain inside the builder stage, so the host needs
+# only docker (build + runtime) and git -- not task/buf/go. colima provides docker on
+# macOS; the build below needs it up, and the wrapper starts it on `delightd start`.
+# Check prerequisites BEFORE touching the network or the checkout: git itself is one of
+# the prerequisites, so checking after the clone/pull is too late to matter, and a
+# missing docker should fail immediately rather than after a clone has already run.
+for tool in docker git; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "install: missing required tool: $tool" >&2
+    exit 1
+  fi
+done
 
 # Clone if absent; otherwise fast-forward the existing checkout.
 if [ -d "$SRC/.git" ]; then
@@ -22,19 +36,38 @@ else
   git clone "$REMOTE" "$SRC"
 fi
 
-# The image builds its own Go/buf toolchain inside the builder stage, so the host needs
-# only docker (build + runtime) and git -- not task/buf/go. colima provides docker on
-# macOS; the build below needs it up, and the wrapper starts it on `delightd start`.
-for tool in docker git; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "install: missing required tool: $tool" >&2
-    exit 1
-  fi
-done
 if command -v colima >/dev/null 2>&1 && ! colima status >/dev/null 2>&1; then
   echo "install: starting colima (the container runtime)..."
   colima start
 fi
+
+# Per-workstation config (mount roots, the 1Password vault reference) lives in a
+# gitignored .env; docker-compose.yml guards the required vars with ${VAR:?} and compose
+# interpolates the whole file before ANY subcommand, including build. A clean-machine
+# first run has no .env yet -- bootstrap it from .env.example and stop: the template's
+# paths are placeholders (wrong for this machine), so we refuse to build against them
+# rather than silently mounting garbage on a later `delightd start`.
+if [ ! -f "$SRC/.env" ]; then
+  if [ ! -f "$SRC/.env.example" ]; then
+    echo "install: $SRC/.env.example is missing; checkout looks incomplete" >&2
+    exit 1
+  fi
+  cp "$SRC/.env.example" "$SRC/.env"
+  echo "install: created $SRC/.env from .env.example -- it is NOT ready yet." >&2
+  echo "install: edit it and set, for this machine:" >&2
+  echo "  DELIGHT_MONITOR_ROOT_HOST, DELIGHT_DAEMON_ROOT_HOST (container mount roots)" >&2
+  echo "  DELIGHT_TOKEN_ITEM                                  (1Password vault reference)" >&2
+  echo "  DELIGHT_APISERVER, DELIGHT_CA_SOURCE                (cluster access, once k3d is up)" >&2
+  echo "install: then rerun install.sh" >&2
+  exit 1
+fi
+
+# Source .env the same way the `delightd` wrapper does, so the build sees the same vars
+# a later `delightd start` would.
+set -a
+# shellcheck source=/dev/null
+. "$SRC/.env"
+set +a
 
 # Build the image, commit-stamped exactly as the wrapper stamps it on `start` (the
 # Dockerfile requires GIT_SHA and fails loud without it).
