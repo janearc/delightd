@@ -102,19 +102,71 @@ nothing else belongs on ring0. A consequence, and an intended one: there is no r
 `kubectl` from a shell, ever -- the apiserver is unreachable except through delightd, and
 the runbook uses `delightd furnish` and the control port for everything.
 
-**Bring-up sequence (and the one-time bootstrap):**
+### Bootstrap: the concrete steps
 
-1. `k3d cluster create ... --network ring0` -- the apiserver comes up on ring0.
-2. *One time:* with k3d's admin kubeconfig (host-side, at creation), apply
-   `deploy/delightd-operator-rbac.yaml` (the scoped ServiceAccount + ClusterRole + a
-   long-lived token Secret), read the token out of that Secret, and store it in 1Password.
-   The ClusterRole is delightd's deliberate blast radius -- manage the meubilair's workload
-   and config kinds, no Secret reads, no exec, no RBAC-bind (no escalation).
-3. `delightd start`: the wrapper reads k3d's CA and server, reads the token from 1Password,
-   assembles the credential-less kubeconfig + token as read-only mounts, and brings the
-   container up on ring0.
-4. delightd's `FromKubeconfig` loads the mounted kubeconfig by the standard rules; client-go
-   reads the token file per request. `/readyz` goes green once it reaches the apiserver.
+This is what a human runs once, with cluster admin, to stand up delightd's credential --
+the out-of-band step the bootstrap loop forces. It is not automated.
+
+**0. 1Password, one time.** Enable the desktop-app CLI integration so `op read` prompts
+Touch ID: 1Password app -> Settings -> Developer -> *Integrate with 1Password CLI*, and
+Settings -> Security -> *Unlock using Touch ID*.
+
+**1. The cluster on ring0.** Either create it there:
+
+```
+k3d cluster create fleet --network ring0
+```
+
+or, for an existing cluster, attach its apiserver proxy to ring0 (non-destructive):
+
+```
+docker network create ring0
+docker network connect ring0 k3d-fleet-serverlb
+```
+
+**2. The scoped identity.** With admin, apply the RBAC and confirm the token Secret filled:
+
+```
+kubectl apply -f deploy/delightd-operator-rbac.yaml
+kubectl -n delightd get secret delightd-operator-token -o jsonpath='{.data.token}' | wc -c   # non-zero
+```
+
+**3. The 1Password item.** Create it once, then load the real token into it. The token goes
+kubectl -> op in your shell; it never lands in a file or a script:
+
+```
+op item create --category "API Credential" --title delightd-k8s-token --vault Personal
+op item edit delightd-k8s-token \
+  credential="$(kubectl -n delightd get secret delightd-operator-token -o jsonpath='{.data.token}' | base64 -d)"
+```
+
+Point `.env` at it: `DELIGHT_TOKEN_ITEM=op://Personal/delightd-k8s-token/credential`.
+
+**4. The CA and address.** Extract the public cluster CA to the path `.env` names, and set the
+ring0-internal apiserver URL:
+
+```
+kubectl config view --raw --minify \
+  -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > ~/.kube/k3d-fleet-ca.crt
+```
+
+`.env`: `DELIGHT_APISERVER=https://k3d-fleet-serverlb:6443`, `DELIGHT_CA_SOURCE=~/.kube/k3d-fleet-ca.crt`.
+
+**5. Verify, then start.**
+
+```
+delightd creds     # Touch ID; the token byte count jumps from placeholder to the real JWT
+delightd start     # Touch ID; brings the container up on ring0 with the creds mounted
+delightd status    # readyz HTTP 200
+```
+
+Under the hood: delightd's `FromKubeconfig` loads the mounted kubeconfig by the standard
+rules, and client-go re-reads the token file per request, so `/readyz` goes green once it
+reaches the apiserver.
+
+**Rotating the token.** The SA token is long-lived. If you rotate the ServiceAccount, or the
+cluster is recreated (new CA), re-run step 3's `op item edit` and step 4's CA extract. Nothing
+else changes -- the wrapper re-reads op and the CA on the next `delightd start`.
 
 **Why not the alternatives** (each was considered):
 
