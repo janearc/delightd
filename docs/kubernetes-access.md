@@ -72,8 +72,10 @@ own output. The token is the only secret, and it never touches an image layer, a
 or argv.
 
 **The token is a scoped ServiceAccount, not admin.** It is bound by RBAC to exactly what
-`furnish` does -- server-side apply and reads on the meubilair namespaces -- so even the
-bootstrap key is least privilege. It lives in 1Password; the host `delightd` wrapper reads
+`furnish` does -- server-side apply and reads on the `fleet` namespace via a namespaced
+Role, plus the /readyz-style non-resource URLs, the only cluster-scoped rule the
+ClusterRole carries -- so even the bootstrap key is least privilege
+(deploy/delightd-operator-rbac.yaml). It lives in 1Password; the host `delightd` wrapper reads
 it (`op read`, authenticated host-side by your own 1Password, never in the container) and
 writes it to the transient token mount. The wrapper is delightd's local "IMDS": the
 trusted identity bridge, the role instance metadata plays on EKS.

@@ -16,6 +16,26 @@
 # out-of-band, never furnished), exec into pods, touch nodes, or bind RBAC (no privilege
 # escalation). Adding a kind to a piece that is not listed here is a reviewed change to this
 # file -- the friction is the point.
+#
+# SHAPE (fixed 2026-07-09, sprints#58 M8): the workload/config grants below are
+# NAMESPACED (Role + RoleBinding), not a ClusterRole + ClusterRoleBinding. Every meubilair
+# piece deploys into namespace `fleet` -- verified by reading every kube/*/kustomization.yaml
+# (surrealdb, kafka, zookeeper, schema-registry, elasticsearch, kibana, logstash, grafana all
+# declare `namespace: fleet`; none declares another namespace or a bare Namespace object) --
+# so the Role below is scoped to exactly that one namespace. Before this fix the same rules
+# lived in a ClusterRole bound cluster-wide: on a default k3d cluster (no Pod Security
+# admission), `create` on deployments/daemonsets/statefulsets/jobs in EVERY namespace,
+# including kube-system, is a standard privilege-escalation path (a DaemonSet with a
+# hostPath mount, or a pod template that mounts a privileged ServiceAccount). Nothing in
+# this codebase creates or reads a Namespace object -- furnish never declares one
+# (kube/kustomization.yaml: "the fleet Namespace is deliberately NOT owned here... Namespace
+# provisioning is a cold bring-up concern, tracked separately") -- so the old ClusterRole's
+# `namespaces` grant was unused privilege and is dropped, not relocated.
+#
+# What stays in the ClusterRole: only the /readyz-style non-resource URLs, which have no
+# namespace concept and so cannot be scoped any other way. That is the ENTIRE cluster-wide
+# grant this ServiceAccount holds -- a ClusterRole rule that names a Resource here is a
+# regression (test/kube/operator_rbac_test.go asserts this shape).
 ---
 apiVersion: v1
 kind: Namespace
@@ -44,13 +64,36 @@ kind: ClusterRole
 metadata:
   name: delightd-operator
 rules:
-  # The readiness probe pings the apiserver's own /readyz.
+  # The readiness probe pings the apiserver's own /readyz. Non-resource URLs are
+  # inherently cluster-scoped (there is no namespace to bind a Role to), so this is the
+  # one rule that must live here. No other rule belongs in this ClusterRole: every
+  # workload/config grant is namespaced below.
   - nonResourceURLs: ["/readyz", "/healthz", "/livez"]
     verbs: ["get"]
-  # Namespaces the meubilair declares (fleet, etc.).
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: delightd-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: delightd-operator
+subjects:
+  - kind: ServiceAccount
+    name: delightd-operator
+    namespace: delightd
+---
+# Namespaced authority: everything furnish actually converges, scoped to the one
+# namespace every kube/*/kustomization.yaml declares. Adding a piece that targets a
+# different namespace means adding another Role + RoleBinding pair here, named for that
+# namespace -- never widening this one or reverting to a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: delightd-operator
+  namespace: fleet
+rules:
   # Core workload-support objects the pieces declare. NOT secrets: those are injected
   # out-of-band (Kube Secrets, values via stdin), never furnished, so furnish has no read
   # on them.
@@ -72,12 +115,13 @@ rules:
     verbs: ["get", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: delightd-operator
+  namespace: fleet
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: delightd-operator
 subjects:
   - kind: ServiceAccount
