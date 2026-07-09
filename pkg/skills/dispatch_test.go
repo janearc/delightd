@@ -42,7 +42,7 @@ func TestDoHTTP_Non2xxIsError(t *testing.T) {
 		w.Write([]byte(`{"healthy":false}`))
 	}))
 	defer srv.Close()
-	body, err := doHTTP(http.MethodGet, srv.URL)
+	body, err := doHTTP(http.MethodGet, srv.URL, "")
 	if err == nil {
 		t.Error("doHTTP on a 503: want error")
 	}

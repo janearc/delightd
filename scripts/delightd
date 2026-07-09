@@ -35,6 +35,10 @@ NETWORK="dev-fleet"
 # host file holding the cluster CA that k3d writes. Finalized against the real cluster at
 # bring-up; override per-workstation.
 TOKEN_ITEM="${DELIGHT_TOKEN_ITEM:-op://Personal/delightd-k8s-token/credential}"
+# The control-port bearer: the daemon requires it on every mutating route (furnish up/down,
+# backup, reset, register, /mcp). Fetched host-side from 1Password like the k8s token and
+# delivered into the same read-only creds mount as /run/delightd/control-token.
+CONTROL_TOKEN_ITEM="${DELIGHT_CONTROL_TOKEN_ITEM:-op://Personal/delightd-control-token/credential}"
 APISERVER="${DELIGHT_APISERVER:-https://k3d-fleet-serverlb:6443}"
 CA_SOURCE="${DELIGHT_CA_SOURCE:-$HOME/.kube/k3d-fleet-ca.crt}"
 # Creds land here and mount read-only at /run/delightd. MUST be under $HOME: colima shares
@@ -113,6 +117,25 @@ resolve_creds() {
   fi
   mv -f "$tmp_token" "$CREDS_DIR/token"
 
+  # The control-port bearer, fetched and staged with the same atomic temp+rename + sanity
+  # pattern as the k8s token above: the mount is read-only in the running container, so a
+  # bare `op read > control-token` would blank the file for the Touch-ID-latency window and a
+  # re-run mid-flight could hand the daemon an empty bearer.
+  local tmp_ctl ctl_err
+  tmp_ctl=$(mktemp "$CREDS_DIR/.ctl.XXXXXX") || die "could not create a temp file in $CREDS_DIR for the atomic control-token write"
+  if ! ctl_err=$(op read "$CONTROL_TOKEN_ITEM" 2>&1 >"$tmp_ctl"); then
+    rm -f "$tmp_ctl"
+    die "could not read the control token from 1Password ($CONTROL_TOKEN_ITEM); is op authed?${ctl_err:+ ($ctl_err)}"
+  fi
+  chmod 600 "$tmp_ctl"
+  local ctl_bytes
+  ctl_bytes=$(wc -c <"$tmp_ctl" | tr -d ' ')
+  if [ "$ctl_bytes" -lt 8 ]; then
+    rm -f "$tmp_ctl"
+    die "control token from 1Password ($CONTROL_TOKEN_ITEM) is empty or implausibly short (${ctl_bytes} bytes) -- refusing to use it"
+  fi
+  mv -f "$tmp_ctl" "$CREDS_DIR/control-token"
+
   # The cluster CA is public, not a secret; k3d writes it and we copy it beside the token.
   local cp_err
   if ! cp_err=$(cp "$CA_SOURCE" "$CREDS_DIR/ca.crt" 2>&1); then
@@ -154,14 +177,14 @@ cmd_start() {
 }
 
 cmd_stop() {
-  # Trap-guaranteed: a killed/failed stop must not leave the token on disk. Cleared
-  # again below on the normal-completion path so it does not fire a second time and
-  # remove the token cmd_start just wrote (cmd_restart calls cmd_stop then cmd_start
-  # in the same process).
-  trap 'rm -f "$CREDS_DIR/token" 2>/dev/null || true' EXIT INT TERM
+  # Trap-guaranteed: a killed/failed stop must not leave the credentials on disk. Both the
+  # k8s token and the control-port bearer are secrets, so both go. Cleared again below on the
+  # normal-completion path so it does not fire a second time and remove what cmd_start just
+  # wrote (cmd_restart calls cmd_stop then cmd_start in the same process).
+  trap 'rm -f "$CREDS_DIR/token" "$CREDS_DIR/control-token" 2>/dev/null || true' EXIT INT TERM
   compose stop delightd
-  # The token is only needed while the container runs; take it off disk once it is down.
-  rm -f "$CREDS_DIR/token" 2>/dev/null || true
+  # The secrets are only needed while the container runs; take them off disk once it is down.
+  rm -f "$CREDS_DIR/token" "$CREDS_DIR/control-token" 2>/dev/null || true
   trap - EXIT INT TERM
 }
 
@@ -170,9 +193,11 @@ cmd_stop() {
 # can confirm the credential chain before `start`. Prints a summary, never the token itself.
 cmd_creds() {
   resolve_creds
-  local bytes
+  local bytes ctl_bytes
   bytes=$(wc -c <"$CREDS_DIR/token" | tr -d ' ')
+  ctl_bytes=$(wc -c <"$CREDS_DIR/control-token" | tr -d ' ')
   echo "token:      ${bytes} bytes from ${TOKEN_ITEM}"
+  echo "control:    ${ctl_bytes} bytes from ${CONTROL_TOKEN_ITEM}"
   echo "ca:         ${CREDS_DIR}/ca.crt (from ${CA_SOURCE})"
   echo "kubeconfig: ${CREDS_DIR}/kubeconfig -> ${APISERVER}"
   echo "mount:      ${CREDS_DIR} -> /run/delightd (read-only)"
@@ -203,16 +228,39 @@ cmd_status() {
   return "$rc"
 }
 
+# control_config writes a one-shot curl config file carrying the Authorization: Bearer header
+# and echoes its path. The token is read from the read-only creds mount and placed in a 0600
+# config file (not on curl's argv, so it never lands in `ps` or a log), then passed with
+# `curl -K`. printf is a shell builtin, so the token is not exposed as a separate process's
+# argv either. The caller removes the file (a RETURN trap) once the request is done. A missing
+# or empty token file fails loud with the fix, rather than sending an unauthenticated mutation
+# the daemon will reject with 401.
+control_config() {
+  local tokfile cfg
+  tokfile="$CREDS_DIR/control-token"
+  [ -s "$tokfile" ] || die "control token not provisioned at $tokfile -- run 'delightd creds' (or 'delightd start') to fetch it from 1Password ($CONTROL_TOKEN_ITEM)"
+  cfg=$(mktemp "$CREDS_DIR/.curlcfg.XXXXXX") || die "could not create a temp curl config in $CREDS_DIR"
+  chmod 600 "$cfg"
+  # printf is a builtin: the token is not a process argument anywhere.
+  printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokfile")" >"$cfg"
+  printf '%s' "$cfg"
+}
+
 # furnish forwards the operator surface to the control port -- delightd holds the cluster
-# connection, this is a thin client. health maps the daemon's 503 (a RED/INDETERMINATE
-# piece) to a non-zero exit so the runbook and any monitor gate on it.
+# connection, this is a thin client. up/down are mutations, so they carry the control-port
+# bearer (control_config); list/health are reads and need none. health maps the daemon's 503
+# (a RED/INDETERMINATE piece) to a non-zero exit so the runbook and any monitor gate on it.
 cmd_furnish() {
   local sub="${1:-}"
   [ $# -gt 0 ] && shift || true
+  # Any curl config this function stages carries the bearer; remove it on return, whatever
+  # exit path (set -e, curl failure, or success) the case lands on.
+  local cfg=""
+  trap '[ -n "$cfg" ] && rm -f "$cfg"; trap - RETURN' RETURN
   case "$sub" in
     list) curl -fsS "$CTRL/furnish/pieces" && echo ;;
-    up) [ $# -ge 1 ] || die "usage: delightd furnish up <piece>"; curl -fsS -X POST "$CTRL/furnish/$1/up" && echo ;;
-    down) [ $# -ge 1 ] || die "usage: delightd furnish down <piece>"; curl -fsS -X POST "$CTRL/furnish/$1/down" && echo ;;
+    up) [ $# -ge 1 ] || die "usage: delightd furnish up <piece>"; cfg=$(control_config); curl -fsS -K "$cfg" -X POST "$CTRL/furnish/$1/up" && echo ;;
+    down) [ $# -ge 1 ] || die "usage: delightd furnish down <piece>"; cfg=$(control_config); curl -fsS -K "$cfg" -X POST "$CTRL/furnish/$1/down" && echo ;;
     health)
       local out status
       out=$(curl -s -w $'\n%{http_code}' "$CTRL/furnish/health${1:+/$1}") || out=$'\n000'

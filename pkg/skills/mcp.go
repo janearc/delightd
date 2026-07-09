@@ -82,7 +82,16 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 				output = err.Error()
 				break
 			}
-			resp, err := doHTTP(tool.Handler.Method, rendered)
+			// Attach the control-port bearer only for a mutation aimed at the loopback control
+			// port (the bearer-gated routes). Never send delightd's secret to a foreign host a
+			// tool names, and a read needs no credential.
+			var bearer string
+			if isMutatingMethod(tool.Handler.Method) && isLoopbackURL(rendered) {
+				a.mu.RLock()
+				bearer = a.controlToken
+				a.mu.RUnlock()
+			}
+			resp, err := doHTTP(tool.Handler.Method, rendered, bearer)
 			output = resp
 			if err != nil && resp == "" {
 				output = err.Error()

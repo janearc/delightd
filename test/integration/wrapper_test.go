@@ -67,9 +67,15 @@ func TestWrapperForwarding(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	// DELIGHTD_SRC to a throwaway so the wrapper does not source the real checkout's .env.
+	// A control-token in the creds dir lets the mutating verb (furnish up) authenticate.
+	credsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(credsDir, "control-token"), []byte("bearer-under-test-000000"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	env := []string{
 		"DELIGHT_CONTROL_ADDR=" + strings.TrimPrefix(srv.URL, "http://"),
 		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
 	}
 
 	// status: readyz 503 -> non-zero exit, and it reports the status.
@@ -274,7 +280,8 @@ func TestWrapperCredsAtomicWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() == "token" || e.Name() == "ca.crt" || e.Name() == "kubeconfig" {
+		switch e.Name() {
+		case "token", "control-token", "ca.crt", "kubeconfig":
 			continue
 		}
 		t.Errorf("unexpected leftover in creds dir: %s", e.Name())
@@ -385,6 +392,65 @@ func writeStub(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestWrapperFurnishUpSendsBearer: a mutating verb (furnish up) must carry the control-port
+// bearer read from $CREDS_DIR/control-token, since the daemon gates the route. The stub daemon
+// records the Authorization header; the token must reach it and must NOT appear on curl's argv.
+func TestWrapperFurnishUpSendsBearer(t *testing.T) {
+	var mu sync.Mutex
+	var gotAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/furnish/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Write([]byte(`{"ok":true}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	credsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(credsDir, "control-token"), []byte("bearer-under-test-000000"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"DELIGHT_CONTROL_ADDR=" + strings.TrimPrefix(srv.URL, "http://"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + credsDir,
+	}
+	if out, code := runWrapper(t, env, "furnish", "up", "surrealdb"); code != 0 {
+		t.Fatalf("furnish up: code=%d out=%q, want 0", code, out)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAuth != "Bearer bearer-under-test-000000" {
+		t.Errorf("furnish up Authorization = %q, want the control-port bearer", gotAuth)
+	}
+	// The one-shot curl config must not linger in the creds dir.
+	entries, _ := os.ReadDir(credsDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".curlcfg.") {
+			t.Errorf("leftover curl config in creds dir: %s", e.Name())
+		}
+	}
+}
+
+// TestWrapperFurnishUpNoTokenFailsLoud: with no control-token on disk, a mutating verb must
+// fail loud with an actionable message rather than send an unauthenticated (401-bound) request.
+func TestWrapperFurnishUpNoTokenFailsLoud(t *testing.T) {
+	env := []string{
+		"DELIGHT_CONTROL_ADDR=127.0.0.1:1", // never reached: the token check fails first
+		"DELIGHTD_SRC=" + t.TempDir(),
+		"DELIGHT_CREDS_DIR=" + t.TempDir(), // empty: no control-token
+	}
+	out, code := runWrapper(t, env, "furnish", "up", "surrealdb")
+	if code == 0 {
+		t.Errorf("furnish up without a control token: want non-zero exit, got 0 (%q)", out)
+	}
+	if !strings.Contains(out, "control token not provisioned") {
+		t.Errorf("furnish up without a control token: want an actionable message, got %q", out)
 	}
 }
 

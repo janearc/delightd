@@ -83,6 +83,50 @@ func TestHandleMCPCallTool_HTTPTemplating(t *testing.T) {
 	}
 }
 
+// TestHandleMCPCallTool_MutatingSendsBearer: a mutating self-tool dispatched to the loopback
+// control port carries the wired control-port bearer, so the daemon's own MCP surface can drive
+// its bearer-gated mutations. httptest binds 127.0.0.1, the loopback the bearer is scoped to.
+func TestHandleMCPCallTool_MutatingSendsBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"applied":true}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.UseControlToken("s3cr3t")
+	agg.tools["delightd_furnish_up"] = Tool{
+		Name:    "delightd_furnish_up",
+		Handler: HandlerDef{Type: "http", Method: "POST", URL: srv.URL + "/furnish/{piece}/up"},
+	}
+	mcpCallText(t, agg, "delightd_furnish_up", `{"piece":"surrealdb"}`)
+	if gotAuth != "Bearer s3cr3t" {
+		t.Errorf("mutating dispatch Authorization = %q, want %q", gotAuth, "Bearer s3cr3t")
+	}
+}
+
+// TestHandleMCPCallTool_ReadSendsNoBearer: a read dispatch never carries the bearer.
+func TestHandleMCPCallTool_ReadSendsNoBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"pieces":[]}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.UseControlToken("s3cr3t")
+	agg.tools["delightd_furnish_list"] = Tool{
+		Name:    "delightd_furnish_list",
+		Handler: HandlerDef{Type: "http", Method: "GET", URL: srv.URL + "/furnish/pieces"},
+	}
+	mcpCallText(t, agg, "delightd_furnish_list", `{}`)
+	if gotAuth != "" {
+		t.Errorf("read dispatch sent Authorization = %q, want none", gotAuth)
+	}
+}
+
 // TestHandleMCPCallTool_MissingArg: a required path param that is not supplied is reported,
 // never dispatched as a malformed URL.
 func TestHandleMCPCallTool_MissingArg(t *testing.T) {

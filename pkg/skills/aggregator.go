@@ -14,6 +14,10 @@ type Aggregator struct {
 	workDir      string
 	selfManifest string
 	tools        map[string]Tool
+	// controlToken is delightd's own control-port bearer, wired by main via UseControlToken. A
+	// mutating tool that dispatches to the loopback control port carries it (the port is
+	// bearer-gated); it is never sent to any other host, and never logged.
+	controlToken string
 }
 
 // NewAggregator creates a new thread-safe skill aggregator
@@ -22,6 +26,15 @@ func NewAggregator(workDir string) *Aggregator {
 		workDir: workDir,
 		tools:   make(map[string]Tool),
 	}
+}
+
+// UseControlToken wires the control-port bearer used when the MCP surface dispatches a mutating
+// self-tool back to the (bearer-gated) control port. An empty token means the gate will 503 the
+// dispatch just as it would any unauthenticated mutation.
+func (a *Aggregator) UseControlToken(tok string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.controlToken = tok
 }
 
 // SetSelfManifest points the aggregator at delightd's OWN mcp.json (baked into the image

@@ -71,7 +71,11 @@ func main() {
 // the wrapper delivers into the creds mount. KUBECONFIG points at that mount
 // (/run/delightd/kubeconfig in the container), so the token sits at its sibling
 // control-token. With KUBECONFIG unset it falls back to the mount's canonical path.
+// DELIGHT_CONTROL_TOKEN_PATH overrides both (a non-standard layout, and tests).
 func controlTokenPath() string {
+	if p := os.Getenv("DELIGHT_CONTROL_TOKEN_PATH"); p != "" {
+		return p
+	}
 	if kc := os.Getenv("KUBECONFIG"); kc != "" {
 		return filepath.Join(filepath.Dir(kc), "control-token")
 	}
@@ -424,6 +428,9 @@ func runDaemon(dryRun, immediate bool) error {
 	tokenPath := controlTokenPath()
 	controlToken := loadControlToken(tokenPath)
 	api.UseControlToken(controlToken)
+	// The MCP surface dispatches delightd's own mutating self-tools (furnish up/down, backup,
+	// reset) back to the bearer-gated control port, so it needs the same token to authenticate.
+	skillAggregator.UseControlToken(string(controlToken))
 	mux := api.Mux()
 
 	// Lease lifecycle (additive): a registration is held by a lease the frood's heartbeat
