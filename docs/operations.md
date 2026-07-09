@@ -124,12 +124,13 @@ These govern where generated wrappers, shims, and the registry live:
 
 ## Kubernetes deployment
 
-delightd's environment is declared, not hand-assembled. Every piece runs from a
-manifest under **`kube/`**, one directory per piece: delightd's own workload in
-**`kube/delightd/`** (`deployment.yaml`, `service.yaml`, `kustomization.yaml`),
-namespace **`fleet`**, with the third-party furniture it depends on moving in
-under its own directory as it lands (see `meubilair.yaml`). A top-level
-`kube/kustomization.yaml` aggregates them.
+delightd's environment is declared, not hand-assembled. Every furnished piece
+runs from a manifest under **`kube/`**, one directory per piece (surrealdb,
+kafka, the rest of the furniture), namespace **`fleet`**. A top-level
+`kube/kustomization.yaml` aggregates them. delightd itself is deliberately
+**not** a piece: it is the operator, a host-level container (see Build and the
+wrapper), never a pod, never supervised by the fleet it operates. There are no
+in-cluster delightd manifests to render or deploy.
 
 Converging a cluster onto what these manifests declare is delightd's own job,
 through the `furnish` command: `delightd furnish list` names the declared
@@ -149,8 +150,8 @@ To check that the manifests build — no cluster, no API server contact — rend
 them locally with kustomize:
 
 ```bash
-kubectl kustomize kube/           # the whole environment
-kubectl kustomize kube/delightd/  # just the daemon
+kubectl kustomize kube/            # the whole environment
+kubectl kustomize kube/surrealdb/  # one piece in isolation
 ```
 
 When the machine itself has just come back — a reboot, an OS upgrade, a power
@@ -178,11 +179,14 @@ Backups land on `/var`, never under the read-only `/work`.
 
 ### Other deployment facts
 
-- **Port.** Container port `control` = `8088`; the `Service` (ClusterIP) exposes
-  the same. In-cluster consumers (fleet-svc) address delightd by Service name;
-  edge traffic reaches it through traefik, not a NodePort.
-- **Probes.** Readiness and liveness both `httpGet /health` on the `control`
-  port.
+- **Port.** Container port `control` = `8088`; `docker-compose.yml` publishes
+  it as `127.0.0.1:8088` on the host, and the container is reachable on its
+  container networks (`dev-fleet`, `ring0`) and through the traefik edge route.
+  There is no Kubernetes Service for delightd -- it is not a pod.
+- **Probes.** The image carries a Dockerfile `HEALTHCHECK` running
+  `delightd healthcheck` (an exec-form self-probe of `GET /readyz`; the
+  scratch image has no shell or curl). Green means the roots are mounted and
+  the apiserver is reachable, not merely that a process exists.
 - **User.** The container runs as root (no `user:` override in
   `docker-compose.yml`). On colima's virtiofs share, a non-root container UID
   does not map onto the host engineer's ownership of the `/var` write mount,
@@ -244,7 +248,7 @@ build against them rather than silently mounting garbage on a later
 
 | Removed | Replacement |
 |---------|-------------|
-| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | `kube/delightd/` manifests (namespace `fleet`, `:8088`, live) |
+| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | the host-level operator container behind the wrapper (`:8088`, live); `kube/` holds only the furnished pieces, never delightd |
 | `envoy.yaml` (abandoned proxy path) | traefik is the single edge; no Envoy |
 
 Both were deleted in this docs rewrite. The Envoy/"dual proxy profile"
