@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# delightd -- host wrapper and SRE front door for the delightd operator container.
+#
+# delightd runs as a host-level container: it operates the cluster (kubectl/client-go), so
+# it lives outside the fleet it drives, supervised at the host layer. This wrapper
+# reconciles "everything is a container" with the 03:20 reflex -- `which delightd`,
+# `delightd status`, `delightd logs`. Lifecycle verbs (start/stop/restart/logs/status) are
+# owned here and drive colima (the container runtime) plus docker compose (the container
+# definition); every other verb is forwarded to the daemon's control port. It is a
+# deliberate, bounded exception: delightd is the operator/front door, and nothing it
+# manages gets a wrapper like this.
+#
+# Env: DELIGHT_CONTROL_ADDR (default 127.0.0.1:8088), DELIGHTD_SRC (the checkout that holds
+# docker-compose.yml; default $HOME/work/delightd).
+set -euo pipefail
+
+CTRL="http://${DELIGHT_CONTROL_ADDR:-127.0.0.1:8088}"
+SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+NETWORK="dev-fleet"
+
+log() { printf 'delightd: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+
+compose() {
+  docker compose --project-directory "$SRC" -f "$SRC/docker-compose.yml" "$@"
+}
+
+# git_sha stamps the image the way the Dockerfile requires (short SHA, -dirty on an unclean
+# tree). It is REQUIRED by the build, so a bad checkout fails loud here, not mid-build.
+git_sha() {
+  local sha
+  sha=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null) || die "not a delightd checkout: $SRC (set DELIGHTD_SRC)"
+  if [ -n "$(git -C "$SRC" status --porcelain 2>/dev/null)" ]; then
+    sha="${sha}-dirty"
+  fi
+  printf '%s' "$sha"
+}
+
+ensure_colima() {
+  if ! colima status >/dev/null 2>&1; then
+    log "starting colima (the container runtime)..."
+    colima start
+  fi
+}
+
+cmd_start() {
+  ensure_colima
+  docker network create "$NETWORK" >/dev/null 2>&1 || true
+  local sha
+  sha="$(git_sha)"
+  GIT_SHA="$sha" compose up -d --build delightd
+  log "started (image stamp $sha); check: delightd status"
+}
+
+cmd_stop() { compose stop delightd; }
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+# logs streams the container's structured JSON logs; extra args pass through to compose
+# (e.g. `delightd logs -f`, `delightd logs --since 5m`).
+cmd_logs() { compose logs "$@" delightd; }
+
+# status is the one-glance health read: the runtime, the container, and the daemon's own
+# provable readiness. Its exit code is /readyz -- 0 only when delightd can actually do its
+# job -- so a monitor or a human gates on `delightd status` alone.
+cmd_status() {
+  local rc=0
+  if colima status >/dev/null 2>&1; then echo "colima:    up"; else echo "colima:    DOWN"; rc=1; fi
+  if [ -n "$(compose ps -q delightd 2>/dev/null)" ]; then echo "container: running"; else echo "container: not running"; fi
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$CTRL/readyz" 2>/dev/null || echo 000)
+  echo "readyz:    HTTP $code"
+  curl -s "$CTRL/readyz" 2>/dev/null && echo || true
+  [ "$code" = "200" ] || rc=1
+  return "$rc"
+}
+
+# furnish forwards the operator surface to the control port -- delightd holds the cluster
+# connection, this is a thin client. health maps the daemon's 503 (a RED/INDETERMINATE
+# piece) to a non-zero exit so the runbook and any monitor gate on it.
+cmd_furnish() {
+  local sub="${1:-}"
+  [ $# -gt 0 ] && shift || true
+  case "$sub" in
+    list) curl -fsS "$CTRL/furnish/pieces" && echo ;;
+    up) [ $# -ge 1 ] || die "usage: delightd furnish up <piece>"; curl -fsS -X POST "$CTRL/furnish/$1/up" && echo ;;
+    down) [ $# -ge 1 ] || die "usage: delightd furnish down <piece>"; curl -fsS -X POST "$CTRL/furnish/$1/down" && echo ;;
+    health)
+      local out status
+      out=$(curl -s -w $'\n%{http_code}' "$CTRL/furnish/health${1:+/$1}")
+      status="${out##*$'\n'}"
+      printf '%s\n' "${out%$'\n'*}"
+      [ "$status" = "200" ]
+      ;;
+    *) die "usage: delightd furnish {list | health [piece] | up <piece> | down <piece>}" ;;
+  esac
+}
+
+usage() {
+  cat >&2 <<'EOF'
+delightd -- operator container control (SRE front door)
+
+  delightd start          bring the container up (colima + compose; builds if needed)
+  delightd stop           stop the container
+  delightd restart        stop then start
+  delightd logs [args]    stream the container's logs (args pass through to compose logs)
+  delightd status         runtime + container + readyz; non-zero exit unless fully ready
+  delightd furnish ...    converge the meubilair (list | health [piece] | up <piece> | down <piece>)
+  delightd <path>         forward a GET to the control port (e.g. delightd git, delightd health)
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift || true
+  case "$cmd" in
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    logs) cmd_logs "$@" ;;
+    status) cmd_status ;;
+    furnish) cmd_furnish "$@" ;;
+    "" | -h | --help | help) usage ;;
+    *)
+      # An unknown verb is forwarded as a GET query on the control port: delightd git -> /git.
+      if ! curl -fsS "$CTRL/$cmd"; then
+        log "query '$cmd' failed (unknown command, or the daemon returned an error / is down)"
+        exit 2
+      fi
+      echo
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,210 @@
+//go:build integration
+
+// Exercises the `delightd` host wrapper (scripts/delightd) -- the SRE front door. Its
+// HTTP-forwarding verbs (status/health/furnish/passthrough) are driven against a stub
+// daemon and, for status/health, against the real container image; its lifecycle dispatch
+// (start -> colima + docker compose) is driven with those binaries stubbed on PATH. The
+// runbook is written against these verbs, so testing them here keeps it from drifting
+// into a lie.
+package integration
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func wrapperPath() string { return filepath.Join(repoRoot(), "scripts", "delightd") }
+
+// runWrapper runs the wrapper with extra env, returning combined output and exit code.
+func runWrapper(t *testing.T, env []string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(wrapperPath(), args...)
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return string(out), 0
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		return string(out), ee.ExitCode()
+	}
+	t.Fatalf("run wrapper %v: %v", args, err)
+	return "", -1
+}
+
+func TestWrapperSyntax(t *testing.T) {
+	if out, err := exec.Command("bash", "-n", wrapperPath()).CombinedOutput(); err != nil {
+		t.Fatalf("wrapper is not valid bash: %v\n%s", err, out)
+	}
+}
+
+// TestWrapperForwarding drives the HTTP verbs against a stub daemon: the wrapper must hit
+// the right routes and map the daemon's status onto its own exit code.
+func TestWrapperForwarding(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	record := func(r *http.Request) { mu.Lock(); seen = append(seen, r.Method+" "+r.URL.Path); mu.Unlock() }
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"ready":false}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"status":"ok"}`)) })
+	mux.HandleFunc("/furnish/pieces", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"pieces":["delightd"]}`)) })
+	mux.HandleFunc("/furnish/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable) // a RED/INDETERMINATE piece
+		w.Write([]byte(`{"healthy":false}`))
+	})
+	mux.HandleFunc("/furnish/", func(w http.ResponseWriter, r *http.Request) { record(r); w.Write([]byte(`{"ok":true}`)) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	env := []string{"DELIGHT_CONTROL_ADDR=" + strings.TrimPrefix(srv.URL, "http://")}
+
+	// status: readyz 503 -> non-zero exit, and it reports the status.
+	if out, code := runWrapper(t, env, "status"); code == 0 || !strings.Contains(out, "HTTP 503") {
+		t.Errorf("status: code=%d out=%q, want non-zero + 'HTTP 503'", code, out)
+	}
+	// health (generic passthrough -> GET /health): 200 -> exit 0.
+	if out, code := runWrapper(t, env, "health"); code != 0 || !strings.Contains(out, "ok") {
+		t.Errorf("health passthrough: code=%d out=%q, want 0 + ok", code, out)
+	}
+	// furnish list -> GET /furnish/pieces.
+	if out, code := runWrapper(t, env, "furnish", "list"); code != 0 || !strings.Contains(out, "delightd") {
+		t.Errorf("furnish list: code=%d out=%q", code, out)
+	}
+	// furnish up <piece> -> POST /furnish/<piece>/up.
+	if _, code := runWrapper(t, env, "furnish", "up", "surrealdb"); code != 0 {
+		t.Errorf("furnish up: code=%d, want 0", code)
+	}
+	// furnish health -> 503 -> non-zero exit (gate on it).
+	if _, code := runWrapper(t, env, "furnish", "health"); code == 0 {
+		t.Error("furnish health against a 503 daemon: want non-zero exit")
+	}
+	mu.Lock()
+	joined := strings.Join(seen, ",")
+	mu.Unlock()
+	if !strings.Contains(joined, "POST /furnish/surrealdb/up") {
+		t.Errorf("furnish up did not hit POST /furnish/surrealdb/up: %s", joined)
+	}
+}
+
+// TestWrapperStartDispatch stubs colima, docker, and git on PATH and asserts `start`
+// ensures the runtime and brings the container up through docker compose.
+func TestWrapperStartDispatch(t *testing.T) {
+	binDir := t.TempDir()
+	dockerLog := filepath.Join(t.TempDir(), "docker.log")
+	// colima status -> up (so start does not try to boot it); git -> a clean stamp;
+	// docker -> record args (and answer `compose ps -q` empty).
+	writeStub(t, filepath.Join(binDir, "colima"), `#!/usr/bin/env bash
+exit 0
+`)
+	writeStub(t, filepath.Join(binDir, "git"), `#!/usr/bin/env bash
+case "$*" in
+  *rev-parse*) echo testsha ;;
+  *status*) echo "" ;;
+esac
+exit 0
+`)
+	writeStub(t, filepath.Join(binDir, "docker"), fmt.Sprintf(`#!/usr/bin/env bash
+echo "docker $*" >> %q
+exit 0
+`, dockerLog))
+
+	env := []string{
+		"PATH=" + binDir + ":" + os.Getenv("PATH"),
+		"DELIGHTD_SRC=" + t.TempDir(),
+	}
+	if out, code := runWrapper(t, env, "start"); code != 0 {
+		t.Fatalf("start: code=%d out=%q", code, out)
+	}
+	log, _ := os.ReadFile(dockerLog)
+	got := string(log)
+	if !strings.Contains(got, "up -d --build delightd") {
+		t.Errorf("start did not bring the container up via compose; docker calls:\n%s", got)
+	}
+	if !strings.Contains(got, "network create dev-fleet") {
+		t.Errorf("start did not ensure the fleet network; docker calls:\n%s", got)
+	}
+}
+
+func writeStub(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWrapperStatusRealContainer runs status and health against the real container image,
+// so the two verbs the runbook leans on are proven against reality, not only a stub.
+func TestWrapperStatusRealContainer(t *testing.T) {
+	requireDocker(t)
+	addr := startMinimalContainer(t)
+	env := []string{"DELIGHT_CONTROL_ADDR=" + addr, "DELIGHTD_SRC=" + t.TempDir()}
+
+	// The container has no kubeconfig, so /readyz is red -> status exits non-zero and
+	// names the HTTP status. (colima/docker are absent under DELIGHTD_SRC=tmp, reported
+	// but not fatal to the readyz-driven exit.)
+	out, code := runWrapper(t, env, "status")
+	if code == 0 {
+		t.Errorf("status against a not-fully-ready container should exit non-zero: %q", out)
+	}
+	if !strings.Contains(out, "readyz:") {
+		t.Errorf("status should report readyz: %q", out)
+	}
+	// /health is liveness -> the passthrough returns 200 and exits 0.
+	if out, code := runWrapper(t, env, "health"); code != 0 || !strings.Contains(out, "\"status\"") {
+		t.Errorf("health against the real container: code=%d out=%q", code, out)
+	}
+}
+
+// startMinimalContainer builds the image and runs delightd with empty roots and no
+// projects -- enough to answer /health and /readyz. Returns the control-port address.
+func startMinimalContainer(t *testing.T) string {
+	t.Helper()
+	const sha = "wraptest0"
+	tag := "delightd:wraptest-" + sha
+	build := exec.Command("docker", "build", "--build-arg", "GIT_SHA="+sha, "-t", tag, repoRoot())
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("docker build: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rmi", "-f", tag).Run() })
+
+	root := hostSharedTempDir(t)
+	for _, d := range []string{"work", "var", "etc"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o777); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := "system:\n  monitor_root: /work\n  daemon_root: /var\n  backups_root: /var/backups\n  config_root: /etc/delightd\n  daemon:\n    control_port: 8088\n  agent_skills:\n    enabled: false\nprojects: []\n"
+	if err := os.WriteFile(filepath.Join(root, "etc", "delight.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	name := "delightd-wraptest-" + sha
+	_ = exec.Command("docker", "rm", "-f", name).Run()
+	port := freePort(t)
+	run := exec.Command("docker", "run", "-d", "--name", name,
+		"-e", "DELIGHT_MONITOR_ROOT=/work", "-e", "DELIGHT_DAEMON_ROOT=/var",
+		"-e", "DELIGHT_BACKUPS_ROOT=/var/backups", "-e", "DELIGHT_CONFIG_ROOT=/etc/delightd",
+		"-v", filepath.Join(root, "work")+":/work:ro",
+		"-v", filepath.Join(root, "etc")+":/etc/delightd:ro",
+		"-v", filepath.Join(root, "var")+":/var:rw",
+		"-p", fmt.Sprintf("127.0.0.1:%d:8088", port),
+		tag, "--immediate")
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("docker run: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForHealth(t, base, 30*time.Second)
+	return fmt.Sprintf("127.0.0.1:%d", port)
+}

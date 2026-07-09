@@ -8,6 +8,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # REQUIRED, no default: the Dockerfile bakes a commit-stamped config tree and
+        # fails the build without it, so an unstamped orchestrator image is never
+        # produced. The `delightd` host wrapper sets this (git rev-parse --short HEAD,
+        # plus -dirty on an unclean tree); a bare `docker compose build` must pass it too.
+        GIT_SHA: ${GIT_SHA:?set GIT_SHA (the delightd wrapper does this; or export it)}
     # FLEET STANDARD: Bind the container's execution user to the host engineer's ID.
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
