@@ -4,7 +4,13 @@
 # daemon's TLS paths. Pinning the patch here fixes it for the shipped binary; the local
 # dev toolchain bump is tracked separately (sprints). Bump deliberately, like the other
 # pins in this stage.
-FROM golang:1.26.5-alpine AS builder
+#
+# Pinned by digest, not just tag: a tag is mutable (golang:1.26.5-alpine can be
+# repointed upstream to a different image), a digest is not -- this build reproduces the
+# same base bytes every time until the digest is deliberately bumped alongside the tag.
+# Resolved via `docker pull golang:1.26.5-alpine && docker inspect --format='{{index
+# .RepoDigests 0}}' golang:1.26.5-alpine`; re-resolve the same way on every version bump.
+FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 # Ensure we have git to pull module dependencies if needed
 RUN apk add --no-cache git
@@ -51,7 +57,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o delightd ./cmd/de
 # because the scratch runtime stage has no shell to run ln/mkdir; a relative symlink survives
 # the COPY into scratch.
 ARG GIT_SHA
+# Shape-checked, not just non-empty: a typo'd or hand-crafted GIT_SHA (spaces, a path, an
+# injection attempt into the mkdir/cp lines below) is worth catching here rather than baking
+# a directory name that lies about being a commit stamp. The wrapper produces `git rev-parse
+# --short HEAD`, optionally `-dirty` on an unclean tree (scripts/delightd's git_sha) -- lower
+# hex, 4-40 chars (short SHAs vary in length; 40 covers a full SHA too), with an optional
+# `-dirty` suffix.
 RUN test -n "$GIT_SHA" || { echo "ERROR: GIT_SHA build-arg is required (--build-arg GIT_SHA=\$(git rev-parse --short HEAD))" >&2; exit 1; } \
+ && echo "$GIT_SHA" | grep -Eq '^[0-9a-f]{4,40}(-dirty)?$' || { echo "ERROR: GIT_SHA=\"$GIT_SHA\" is not a short-hex commit stamp (want e.g. a1b2c3d or a1b2c3d-dirty)" >&2; exit 1; } \
  && mkdir -p /out/etc/delightd/kube-${GIT_SHA} \
  && cp meubilair.yaml /out/etc/delightd/kube-${GIT_SHA}/meubilair.yaml \
  && cp -r kube /out/etc/delightd/kube-${GIT_SHA}/kube \
@@ -67,12 +80,19 @@ FROM scratch
 COPY --from=builder /src/delightd /usr/local/bin/delightd
 
 # delightd's baked config: the commit-stamped kube universe (symlink included) plus the
-# roster. Read-only by virtue of the image; the host filesystem does not shadow it once
-# the runtime stops mounting ~/etc over /etc/delightd (compose change, follow-up diff).
+# roster. Read-only by virtue of the image; docker-compose.yml does not mount anything
+# over /etc/delightd, so nothing on the host shadows it.
 COPY --from=builder /out/etc/delightd /etc/delightd
 
 # Expose the daemon's control port (matches config.DefaultControlPort, compose, and kube).
 EXPOSE 8088
+
+# Self-probe: the runtime is scratch (no shell, no curl), so the exec-form check runs the
+# delightd binary against itself -- `delightd healthcheck` is GET /readyz on the loopback
+# control port, mapped to exit 0/1 (cmd/delightd/healthcheck.go). --start-period gives the
+# daemon room to reach the apiserver on cold start before a slow first check counts against it.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD ["/usr/local/bin/delightd", "healthcheck"]
 
 # Execute the binary
 ENTRYPOINT ["/usr/local/bin/delightd"]

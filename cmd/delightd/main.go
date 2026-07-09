@@ -119,6 +119,7 @@ func rootCmd() *cobra.Command {
 	cmd.AddCommand(lintCmd())
 	cmd.AddCommand(modelCmd())
 	cmd.AddCommand(furnishCmd())
+	cmd.AddCommand(healthcheckCmd())
 	return cmd
 }
 
