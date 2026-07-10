@@ -481,7 +481,7 @@ func TestWrapperStatusRealContainer(t *testing.T) {
 // projects -- enough to answer /health and /readyz. Returns the control-port address.
 func startMinimalContainer(t *testing.T) string {
 	t.Helper()
-	const sha = "wraptest0"
+	const sha = "3a97e570" // short-hex: must pass the Dockerfile's GIT_SHA shape check
 	tag := "delightd:wraptest-" + sha
 	build := exec.Command("docker", "build", "--build-arg", "GIT_SHA="+sha, "-t", tag, repoRoot())
 	if out, err := build.CombinedOutput(); err != nil {

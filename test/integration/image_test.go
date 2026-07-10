@@ -41,7 +41,7 @@ import (
 func TestContainerImageComesUp(t *testing.T) {
 	requireDocker(t)
 
-	const sha = "itest0000"
+	const sha = "17e57000" // short-hex: must pass the Dockerfile's GIT_SHA shape check
 	tag := "delightd:itest-" + sha
 
 	build := exec.Command("docker", "build", "--build-arg", "GIT_SHA="+sha, "-t", tag, repoRoot())

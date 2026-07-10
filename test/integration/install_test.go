@@ -35,20 +35,36 @@ func runInstall(t *testing.T, env []string) (string, int) {
 	return "", -1
 }
 
-// pathWithoutTool returns the current PATH with every directory that contains an
-// executable named `name` removed -- used to simulate a missing prerequisite without
-// otherwise disturbing the host PATH (so /usr/bin/env, bash, coreutils, etc. still
-// resolve normally).
-func pathWithoutTool(name string) string {
+// pathWithoutTool returns a PATH on which no directory carries an executable named
+// `name`, used to simulate a missing prerequisite. A directory that contains the tool
+// is not dropped -- on CI runners docker shares /usr/bin with bash and coreutils, so
+// dropping it would break /usr/bin/env bash -- it is replaced by a symlink replica of
+// itself minus the tool, so everything else still resolves.
+func pathWithoutTool(t *testing.T, name string) string {
+	t.Helper()
 	var kept []string
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			kept = append(kept, dir)
 			continue
 		}
-		kept = append(kept, dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read %s to replicate it without %s: %v", dir, name, err)
+		}
+		replica := t.TempDir()
+		for _, e := range entries {
+			if e.Name() == name {
+				continue
+			}
+			if err := os.Symlink(filepath.Join(dir, e.Name()), filepath.Join(replica, e.Name())); err != nil {
+				t.Fatalf("symlink %s into replica of %s: %v", e.Name(), dir, err)
+			}
+		}
+		kept = append(kept, replica)
 	}
 	return strings.Join(kept, string(os.PathListSeparator))
 }
@@ -72,7 +88,7 @@ func TestInstallChecksPrereqsBeforeClone(t *testing.T) {
 	env := []string{
 		"HOME=" + t.TempDir(),
 		"DELIGHTD_SRC=" + src,
-		"PATH=" + binDir + ":" + pathWithoutTool("docker"),
+		"PATH=" + binDir + ":" + pathWithoutTool(t, "docker"),
 	}
 	out, code := runInstall(t, env)
 	if code == 0 {
