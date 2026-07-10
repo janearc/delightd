@@ -7,9 +7,8 @@ an emergency, because nothing is an emergency — the daemon fails closed and
 the state on disk keeps.
 
 Scope: bringing THIS machine's fleet back to serving. Cold bring-up of a new
-machine is a different document (the install script exists at
-`scripts/install.sh`; validating a true cold start is deferred until there is
-hardware to be cold on).
+machine follows `scripts/install.sh`, validated 2026-07-10 (findings in the
+table below); its full prerequisite set is listed under known gaps.
 
 The one rule, learned the hard way: **a thing listed is not a thing alive.**
 Ask the serving surface, not the inventory.
@@ -78,10 +77,11 @@ curl -s http://127.0.0.1:8088/health
 # {"status":"ok","active_projects":N,"dry_run":false,"degraded":false}
 ```
 
-Connection refused means delightd is down — and, known gap, **nothing
-restarts delightd today**; a reboot silently takes it out until a human
-notices. Bring it back through the wrapper, never by hand-running the
-container's internals:
+Connection refused means delightd is down. Docker restarts a *crashed*
+daemon on its own (`restart: unless-stopped`), but a reboot takes colima
+with it and nothing brings colima back — so after a boot, delightd is down
+until a human runs the wrapper. Bring it back through the wrapper, never by
+hand-running the container's internals:
 
 ```bash
 delightd start
@@ -98,13 +98,9 @@ status` folds runtime + container + `/readyz` into one exit code — 0 only
 when all three are up — so it is the one command to gate recovery on, here
 and everywhere else in this document.
 
-**This container-based restart path is UNTESTED against a real machine
-recovery as of this writing** — the `nohup`-a-binary instruction above it
-replaced was written for the pre-containerized daemon and had been exercised
-live (see the 2026-07-05 table below); this section has not yet had its own
-live bounce. Treat `delightd start` here as the documented procedure, not a
-proven one, until it has run against an actual cold daemon and this note is
-removed.
+This restart path had its live bounce 2026-07-10: `stop`/`start` through the
+wrapper, readyz 200 with both checks green on return (the capstone table
+below). Proven procedure now, not just a documented one.
 
 `degraded: true` in the health body means the config half-loaded; the
 `warnings` field says why. The daemon serves anyway — read the warnings, fix
