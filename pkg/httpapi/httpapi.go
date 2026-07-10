@@ -299,12 +299,12 @@ func (s *Server) Mux() *http.ServeMux {
 	s.register(mux, "POST /projects/{name}/backup", s.handleBackup)     // manually trigger a checkpoint
 	s.register(mux, "POST /projects/{name}/reset", s.handleReset)       // clear a stuck error state
 
-	s.register(mux, "GET /projects", s.handleProjectsAll)        // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
-	s.register(mux, "GET /registrations", s.handleRegistrations) // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
+	s.register(mux, "GET /projects", s.handleProjectsAll)           // authoritative roster (name/path/essential/deploy/remote_url) for all managed projects
+	s.register(mux, "GET /registrations", s.handleRegistrations)    // live frood registrations (registry.v1.RegistrationSet); additive, alongside the roster
 	s.registerCitizenRoute(mux, "POST /register", s.handleRegister) // frood announce: open by ruling (see registerCitizenRoute)
-	s.register(mux, "GET /state", s.handleStateAll)              // enablement home: every project's effective state (absent reads disabled)
-	s.register(mux, "GET /state/{name}", s.handleStateGet)       // one project's enablement (NOT the backup diagnostics at /projects/{name}/state)
-	s.register(mux, "PUT /state/{name}", s.handleStatePut)       // idempotent enable/disable; roster-bound, reason required on disable
+	s.register(mux, "GET /state", s.handleStateAll)                 // enablement home: every project's effective state (absent reads disabled)
+	s.register(mux, "GET /state/{name}", s.handleStateGet)          // one project's enablement (NOT the backup diagnostics at /projects/{name}/state)
+	s.register(mux, "PUT /state/{name}", s.handleStatePut)          // idempotent enable/disable; roster-bound, reason required on disable
 
 	s.register(mux, "GET /git", s.handleGitAll)                     // live git state (branch/dirty/unpushed) for all managed projects
 	s.register(mux, "GET /projects/{name}/git", s.handleProjectGit) // live git state for one managed project
