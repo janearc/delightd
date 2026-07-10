@@ -7,9 +7,11 @@ an emergency, because nothing is an emergency — the daemon fails closed and
 the state on disk keeps.
 
 Scope: bringing THIS machine's fleet back to serving. Cold bring-up of a new
-machine is a different document (the install script exists at
-`scripts/install.sh`; validating a true cold start is deferred until there is
-hardware to be cold on).
+machine follows `scripts/install.sh`, validated live 2026-07-10. Its full
+prerequisite set, stated here because install.sh checks only some of it:
+docker+git on PATH, a machine-true `.env`, and two 1Password items --
+`delightd-k8s-token` and `delightd-control-token` (each an `op item create
+--category "API Credential"` per docs/kubernetes-access.md).
 
 The one rule, learned the hard way: **a thing listed is not a thing alive.**
 Ask the serving surface, not the inventory.
@@ -78,10 +80,11 @@ curl -s http://127.0.0.1:8088/health
 # {"status":"ok","active_projects":N,"dry_run":false,"degraded":false}
 ```
 
-Connection refused means delightd is down — and, known gap, **nothing
-restarts delightd today**; a reboot silently takes it out until a human
-notices. Bring it back through the wrapper, never by hand-running the
-container's internals:
+Connection refused means delightd is down. Docker restarts a *crashed*
+daemon on its own (`restart: unless-stopped`), but a reboot takes colima
+with it and nothing brings colima back — so after a boot, delightd is down
+until a human runs the wrapper. Bring it back through the wrapper, never by
+hand-running the container's internals:
 
 ```bash
 delightd start
@@ -98,13 +101,15 @@ status` folds runtime + container + `/readyz` into one exit code — 0 only
 when all three are up — so it is the one command to gate recovery on, here
 and everywhere else in this document.
 
-**This container-based restart path is UNTESTED against a real machine
-recovery as of this writing** — the `nohup`-a-binary instruction above it
-replaced was written for the pre-containerized daemon and had been exercised
-live (see the 2026-07-05 table below); this section has not yet had its own
-live bounce. Treat `delightd start` here as the documented procedure, not a
-proven one, until it has run against an actual cold daemon and this note is
-removed.
+This restart path had its live bounce 2026-07-10 (the sprint-15 capstone
+run): `stop`/`start` through the wrapper, readyz 200 with both checks green
+on return. Proven procedure, not just a documented one.
+
+Seen in the field: after 1Password self-updates, the still-running app
+serves no CLI socket and every `op read` dies with "couldn't connect to the
+desktop app" — even though the app looks fine and unlocks fine. The tell is
+`--just-updated --should-restart` on the 1Password process. Quit the app
+fully (Cmd+Q, not the window), relaunch, re-run `delightd start`.
 
 `degraded: true` in the health body means the config half-loaded; the
 `warnings` field says why. The daemon serves anyway — read the warnings, fix
@@ -146,10 +151,21 @@ re-converge means the piece's manifests or image are broken, not the
 reconcile — read the pod events and go to that piece's directory under
 `kube/`.
 
-Furniture whose manifests still live in other repos (kafka, the elk stack)
-is inventoried in `meubilair.yaml` at the repo root. That file is a
-declarative index — nothing executes its probes yet — so turning an entry
-into a live check is on you, and the recipe is mechanical:
+Two more failure modes seen in the field (2026-07-10):
+
+- `furnish health` can abort the whole estate report on one piece's error
+  (issue 96 is the taxonomy fix); `delightd furnish health <piece>` still
+  answers for every other piece, so interrogate piece-by-piece when the
+  full report blanks.
+- A pod stuck `ImagePullBackOff` on an image that was only ever built
+  locally (the `good-citizen-dummy` class) is not broken manifests: the
+  node cache dropped the image and the cluster has no registry to re-pull
+  from. `k3d image import <image>:<tag> -c fleet` restores it.
+
+Every piece's manifests live here under `kube/` (relocated from kafka-svc
+and obs-svc). `meubilair.yaml` at the repo root is the declarative probe
+index for the furniture — nothing executes its probes yet — so turning an
+entry into a live check is on you, and the recipe is mechanical:
 
 - an `httpGet` probe: port-forward the service, curl the path —
 
@@ -178,24 +194,3 @@ Pods here that neither surface names (today: good-citizen-dummy,
 obs-svc-agg, paling-sidecar) are workloads deployed from their own repos;
 Running status in this listing is their recovery check, and anything deeper
 belongs to those repos' docs.
-
-## What happened when we were last there (2026-07-05, macOS 26 -> 27)
-
-| Found | Fix | Time cost |
-|-------|-----|-----------|
-| colima VM present but Stopped | one `colima start`, no re-provision | seconds |
-| k3d containers up, API answering EOF | `k3d cluster stop/start fleet` | ~1 min |
-| delightd not running, nothing noticed | detached restart (step 4) | minutes |
-| `task` eaten by the upgrade; reinstall grabbed Taskwarrior | `brew uninstall task && brew install go-task` | minutes |
-| `~/go/bin` dropped from PATH; plugins intact | per-command override during the recovery; the permanent rc line (step 1) is still pending | minutes |
-
-## Known gaps, named
-
-- **No supervision**: delightd has no launchd/kube-managed lifecycle on this
-  machine; step 4 is manual until that lands. The enablement state home
-  (`/state`) exists precisely so the fleet can record intent that survives
-  these gaps.
-- **Cold bring-up is unvalidated**: this document recovers a machine that
-  was already configured. A from-nothing machine follows
-  `scripts/install.sh`, which has not yet been executed on truly cold
-  hardware.
