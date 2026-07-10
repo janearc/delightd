@@ -2,10 +2,15 @@ package skills
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os/exec"
 )
+
+// maxMCPBodyBytes bounds a POST /mcp request body. There is no legitimate call whose JSON-RPC
+// envelope (a tool name plus its arguments) approaches this size; without a cap an
+// unauthenticated-until-the-bearer-check-runs -- reads are open on this route -- caller could
+// hand the decoder an unbounded body and exhaust memory before the request is ever rejected.
+const maxMCPBodyBytes = 1 << 20 // 1MB
 
 // HandleMCP provides a simple JSON-RPC 2.0 endpoint for the Model Context Protocol
 func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
@@ -13,6 +18,8 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPBodyBytes)
 
 	var req struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -61,29 +68,78 @@ func (a *Aggregator) HandleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Execute the tool based on handler type
-		// For a real production MCP server, we'd capture output streams properly.
+		// Execute the tool based on handler type. isErr tracks a failed backing execution so
+		// the tool result carries isError=true: an agent must not read a failure (a 503 health
+		// ladder, a command that exited non-zero) as a successful tool call. The body is
+		// preserved as the error content either way.
 		var output string
-		if tool.Handler.Type == "command" {
-			cmd := exec.Command(tool.Handler.Command, tool.Handler.Args...)
+		var isErr bool
+		switch tool.Handler.Type {
+		case "command":
+			// Render each declared arg's {name} placeholders from the call arguments (the
+			// same substitution renderURL does for an http tool's path), so a parameterized
+			// command tool actually receives its parameters instead of running arg-less. Each
+			// rendered value stays its own argv element -- exec.Command never goes through a
+			// shell, so there is no join-into-one-string step for an argument to inject through.
+			renderedArgs, err := renderArgs(tool.Handler.Args, params.Arguments)
+			if err != nil {
+				output = err.Error()
+				isErr = true
+				break
+			}
+			cmd := exec.Command(tool.Handler.Command, renderedArgs...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				output = err.Error() + ": " + string(out)
+				isErr = true
 			} else {
 				output = string(out)
 			}
-		} else if tool.Handler.Type == "internal" && tool.Handler.Method == "backup" {
-			// Dogfooding triggers backup. In a real scenario we'd call the control port or internal func
-			output = "Backup triggered for " + fmt.Sprintf("%v", params.Arguments["project"])
-		} else {
-			output = "Unsupported handler type"
+		case "http":
+			// Render {name} path params from the call arguments, then hit the control
+			// port (or any URL the tool names). This is how delightd's own tools -- and
+			// any fleet tool with a parameterized route -- dispatch. The daemon's body is
+			// the tool output; a non-2xx that carries a body (e.g. a 503 health ladder) is
+			// still returned as the error content, with isError set.
+			rendered, err := renderURL(tool.Handler.URL, params.Arguments)
+			if err != nil {
+				output = err.Error()
+				isErr = true
+				break
+			}
+			// Attach the control-port bearer only for a mutation aimed at the loopback control
+			// port (the bearer-gated routes). Never send delightd's secret to a foreign host a
+			// tool names, and a read needs no credential.
+			var bearer string
+			if isMutatingMethod(tool.Handler.Method) && isLoopbackURL(rendered) {
+				a.mu.RLock()
+				bearer = a.controlToken
+				a.mu.RUnlock()
+			}
+			resp, err := doHTTP(tool.Handler.Method, rendered, bearer)
+			output = resp
+			if err != nil {
+				// A non-2xx (or transport failure) is a tool error; keep the daemon's body when
+				// it carried one, otherwise surface the transport error.
+				isErr = true
+				if resp == "" {
+					output = err.Error()
+				}
+			}
+		default:
+			output = "unsupported handler type: " + tool.Handler.Type
+			isErr = true
 		}
 
-		sendResponse(map[string]interface{}{
+		result := map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": output},
 			},
-		}, nil)
+		}
+		if isErr {
+			result["isError"] = true
+		}
+		sendResponse(result, nil)
 
 	default:
 		sendResponse(nil, map[string]interface{}{"code": -32601, "message": "Method not found"})

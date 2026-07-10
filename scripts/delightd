@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# delightd -- host wrapper and SRE front door for the delightd operator container.
+#
+# delightd runs as a host-level container: it operates the cluster (kubectl/client-go), so
+# it lives outside the fleet it drives, supervised at the host layer. This wrapper
+# reconciles "everything is a container" with the 03:20 reflex -- `which delightd`,
+# `delightd status`, `delightd logs`. Lifecycle verbs (start/stop/restart/logs/status) are
+# owned here and drive colima (the container runtime) plus docker compose (the container
+# definition); every other verb is forwarded to the daemon's control port. It is a
+# deliberate, bounded exception: delightd is the operator/front door, and nothing it
+# manages gets a wrapper like this.
+#
+# Env: DELIGHT_CONTROL_ADDR (default 127.0.0.1:8088), DELIGHTD_SRC (the checkout that holds
+# docker-compose.yml; default $HOME/work/delightd).
+set -euo pipefail
+
+SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+
+# Per-workstation config lives in a gitignored .env in the checkout (the 1Password
+# credential reference, the apiserver URL, the CA path, the mount roots), so you set it
+# once instead of exporting on every call. Committed defaults stay neutral conventions; your
+# .env is where the real vault name and cluster address go. See .env.example.
+if [ -f "$SRC/.env" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$SRC/.env"
+  set +a
+fi
+
+CTRL="http://${DELIGHT_CONTROL_ADDR:-127.0.0.1:8088}"
+NETWORK="dev-fleet"
+
+# Credential resolution (the light fake-EKS model -- see docs/kubernetes-access.md). These
+# name where the scoped token lives (1Password), the ring0-internal apiserver URL, and the
+# host file holding the cluster CA that k3d writes. Finalized against the real cluster at
+# bring-up; override per-workstation.
+TOKEN_ITEM="${DELIGHT_TOKEN_ITEM:-op://Personal/delightd-k8s-token/credential}"
+# The control-port bearer: the daemon requires it on every mutating route (furnish up/down,
+# backup, reset, register, /mcp). Fetched host-side from 1Password like the k8s token and
+# delivered into the same read-only creds mount as /run/delightd/control-token.
+CONTROL_TOKEN_ITEM="${DELIGHT_CONTROL_TOKEN_ITEM:-op://Personal/delightd-control-token/credential}"
+APISERVER="${DELIGHT_APISERVER:-https://k3d-fleet-serverlb:6443}"
+CA_SOURCE="${DELIGHT_CA_SOURCE:-$HOME/.kube/k3d-fleet-ca.crt}"
+# Creds land here and mount read-only at /run/delightd. MUST be under $HOME: colima shares
+# /Users with its VM, not /tmp, so a mount of /tmp lands empty in the container.
+CREDS_DIR="${DELIGHT_CREDS_DIR:-$HOME/.delightd/creds}"
+
+# compose interpolates DELIGHT_CREDS_DIR and GIT_SHA (a build arg) for EVERY subcommand, not
+# just `up`, so export them here -- otherwise status/logs/stop error on the required-var
+# guards and misreport. start recomputes the stamped GIT_SHA for the actual build.
+export DELIGHT_CREDS_DIR="$CREDS_DIR"
+export GIT_SHA="${GIT_SHA:-$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unset)}"
+
+log() { printf 'delightd: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+
+compose() {
+  docker compose --project-directory "$SRC" -f "$SRC/docker-compose.yml" "$@"
+}
+
+# git_sha stamps the image the way the Dockerfile requires (short SHA, -dirty on an unclean
+# tree). It is REQUIRED by the build, so a bad checkout fails loud here, not mid-build.
+git_sha() {
+  local sha
+  sha=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null) || die "not a delightd checkout: $SRC (set DELIGHTD_SRC)"
+  if [ -n "$(git -C "$SRC" status --porcelain 2>/dev/null)" ]; then
+    sha="${sha}-dirty"
+  fi
+  printf '%s' "$sha"
+}
+
+ensure_colima() {
+  if ! colima status >/dev/null 2>&1; then
+    log "starting colima (the container runtime)..."
+    colima start
+  fi
+}
+
+# resolve_creds is delightd's local IMDS: it reads the scoped ServiceAccount token from
+# 1Password host-side (never in the container), and writes a credential-less kubeconfig
+# (server + CA + tokenFile -- no secret in the file) plus the token into CREDS_DIR, which
+# mounts read-only at /run/delightd. See docs/kubernetes-access.md.
+#
+# `op read` goes through the 1Password desktop-app integration, so it prompts for Touch ID:
+# a human authorizes each credential fetch, and delightd cannot get cluster access without a
+# live biometric. Do NOT set OP_SERVICE_ACCOUNT_TOKEN here -- that path is silent and would
+# bypass the biometric gate (and it is the container-egress model we rejected).
+resolve_creds() {
+  mkdir -p "$CREDS_DIR"
+  chmod 700 "$CREDS_DIR"
+
+  # A stray OP_SERVICE_ACCOUNT_TOKEN (inherited from .env or the shell) makes `op read`
+  # non-interactive and silently skips the Touch ID prompt -- refuse to inherit one.
+  unset OP_SERVICE_ACCOUNT_TOKEN
+
+  # Write to a temp file in CREDS_DIR, then atomic-rename over the live token. CREDS_DIR
+  # is bind-mounted read-only into the running container: a bare `op read > token` would
+  # truncate the file to 0 bytes for the duration of the (Touch-ID-latency) write, and a
+  # re-run while the container is up can hand client-go a momentarily empty token.
+  local tmp_token op_err
+  tmp_token=$(mktemp "$CREDS_DIR/.token.XXXXXX") || die "could not create a temp file in $CREDS_DIR for the atomic token write"
+  if ! op_err=$(op read "$TOKEN_ITEM" 2>&1 >"$tmp_token"); then
+    rm -f "$tmp_token"
+    die "could not read the k8s token from 1Password ($TOKEN_ITEM); is op authed?${op_err:+ ($op_err)}"
+  fi
+  chmod 600 "$tmp_token"
+
+  # Sanity-check the token before it goes live: a defined-but-empty `op read` is worth
+  # catching here instead of handing it to client-go and finding out via a 401. This is a
+  # byte count (wc -c), so it catches empty or truncated, not whitespace-only -- a token that
+  # is all whitespace still passes at >= 8 bytes and fails downstream at the apiserver instead.
+  # 8 bytes is a low bar (real ServiceAccount JWTs run to hundreds of bytes) -- it exists to
+  # catch "empty", not to validate JWT shape.
+  local token_bytes
+  token_bytes=$(wc -c <"$tmp_token" | tr -d ' ')
+  if [ "$token_bytes" -lt 8 ]; then
+    rm -f "$tmp_token"
+    die "token from 1Password ($TOKEN_ITEM) is empty or implausibly short (${token_bytes} bytes) -- refusing to use it"
+  fi
+  mv -f "$tmp_token" "$CREDS_DIR/token"
+
+  # The control-port bearer, fetched and staged with the same atomic temp+rename + sanity
+  # pattern as the k8s token above: the mount is read-only in the running container, so a
+  # bare `op read > control-token` would blank the file for the Touch-ID-latency window and a
+  # re-run mid-flight could hand the daemon an empty bearer.
+  local tmp_ctl ctl_err
+  tmp_ctl=$(mktemp "$CREDS_DIR/.ctl.XXXXXX") || die "could not create a temp file in $CREDS_DIR for the atomic control-token write"
+  if ! ctl_err=$(op read "$CONTROL_TOKEN_ITEM" 2>&1 >"$tmp_ctl"); then
+    rm -f "$tmp_ctl"
+    die "could not read the control token from 1Password ($CONTROL_TOKEN_ITEM); is op authed?${ctl_err:+ ($ctl_err)}"
+  fi
+  chmod 600 "$tmp_ctl"
+  local ctl_bytes
+  ctl_bytes=$(wc -c <"$tmp_ctl" | tr -d ' ')
+  if [ "$ctl_bytes" -lt 8 ]; then
+    rm -f "$tmp_ctl"
+    die "control token from 1Password ($CONTROL_TOKEN_ITEM) is empty or implausibly short (${ctl_bytes} bytes) -- refusing to use it"
+  fi
+  mv -f "$tmp_ctl" "$CREDS_DIR/control-token"
+
+  # The cluster CA is public, not a secret; k3d writes it and we copy it beside the token.
+  local cp_err
+  if ! cp_err=$(cp "$CA_SOURCE" "$CREDS_DIR/ca.crt" 2>&1); then
+    die "could not read the cluster CA ($CA_SOURCE); is k3d up?${cp_err:+ ($cp_err)}"
+  fi
+
+  cat >"$CREDS_DIR/kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+  - name: fleet
+    cluster:
+      server: ${APISERVER}
+      certificate-authority: /run/delightd/ca.crt
+contexts:
+  - name: fleet
+    context: { cluster: fleet, user: delightd }
+current-context: fleet
+users:
+  - name: delightd
+    user:
+      tokenFile: /run/delightd/token
+EOF
+}
+
+cmd_start() {
+  ensure_colima
+  docker network create "$NETWORK" >/dev/null 2>&1 || true
+  # ring0 is k3d's network, not ours (see docker-compose.yml): created by
+  # `k3d cluster create --network ring0`. Do NOT create it here -- a delightd-created
+  # ring0 would not have the apiserver on it, and the failure downstream would be
+  # cryptic. Fail loud now instead.
+  docker network inspect ring0 >/dev/null 2>&1 || die "network 'ring0' does not exist -- it is created by the k3d bring-up (k3d cluster create --network ring0), not by this wrapper. Bring up k3d first, then retry."
+  resolve_creds
+  local sha
+  sha="$(git_sha)"
+  GIT_SHA="$sha" compose up -d --build delightd
+  log "started (image stamp $sha); check: delightd status"
+}
+
+cmd_stop() {
+  # Trap-guaranteed: a killed/failed stop must not leave the credentials on disk. Both the
+  # k8s token and the control-port bearer are secrets, so both go. Cleared again below on the
+  # normal-completion path so it does not fire a second time and remove what cmd_start just
+  # wrote (cmd_restart calls cmd_stop then cmd_start in the same process).
+  trap 'rm -f "$CREDS_DIR/token" "$CREDS_DIR/control-token" 2>/dev/null || true' EXIT INT TERM
+  compose stop delightd
+  # The secrets are only needed while the container runs; take them off disk once it is down.
+  rm -f "$CREDS_DIR/token" "$CREDS_DIR/control-token" 2>/dev/null || true
+  trap - EXIT INT TERM
+}
+
+# creds resolves the credentials without starting anything -- so the op path (and its Touch
+# ID prompt) can be exercised in isolation before a full bring-up, and so the 03:20 runbook
+# can confirm the credential chain before `start`. Prints a summary, never the token itself.
+cmd_creds() {
+  resolve_creds
+  local bytes ctl_bytes
+  bytes=$(wc -c <"$CREDS_DIR/token" | tr -d ' ')
+  ctl_bytes=$(wc -c <"$CREDS_DIR/control-token" | tr -d ' ')
+  echo "token:      ${bytes} bytes from ${TOKEN_ITEM}"
+  echo "control:    ${ctl_bytes} bytes from ${CONTROL_TOKEN_ITEM}"
+  echo "ca:         ${CREDS_DIR}/ca.crt (from ${CA_SOURCE})"
+  echo "kubeconfig: ${CREDS_DIR}/kubeconfig -> ${APISERVER}"
+  echo "mount:      ${CREDS_DIR} -> /run/delightd (read-only)"
+  echo "ok: credentials resolve; 'delightd start' will use them"
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+# logs streams the container's structured JSON logs; extra args pass through to compose
+# (e.g. `delightd logs -f`, `delightd logs --since 5m`).
+cmd_logs() { compose logs "$@" delightd; }
+
+# status is the one-glance health read: the runtime, the container, and the daemon's own
+# provable readiness. Its exit code is /readyz -- 0 only when delightd can actually do its
+# job -- so a monitor or a human gates on `delightd status` alone.
+cmd_status() {
+  local rc=0
+  if colima status >/dev/null 2>&1; then echo "colima:    up"; else echo "colima:    DOWN"; rc=1; fi
+  if [ -n "$(compose ps -q delightd 2>/dev/null)" ]; then echo "container: running"; else echo "container: not running"; fi
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$CTRL/readyz" 2>/dev/null || echo 000)
+  echo "readyz:    HTTP $code"
+  curl -s "$CTRL/readyz" 2>/dev/null && echo || true
+  [ "$code" = "200" ] || rc=1
+  return "$rc"
+}
+
+# control_config writes a one-shot curl config file carrying the Authorization: Bearer header
+# and echoes its path. The token is read from the read-only creds mount and placed in a 0600
+# config file (not on curl's argv, so it never lands in `ps` or a log), then passed with
+# `curl -K`. printf is a shell builtin, so the token is not exposed as a separate process's
+# argv either. The caller removes the file (a RETURN trap) once the request is done. A missing
+# or empty token file fails loud with the fix, rather than sending an unauthenticated mutation
+# the daemon will reject with 401.
+control_config() {
+  local tokfile cfg
+  tokfile="$CREDS_DIR/control-token"
+  [ -s "$tokfile" ] || die "control token not provisioned at $tokfile -- run 'delightd creds' (or 'delightd start') to fetch it from 1Password ($CONTROL_TOKEN_ITEM)"
+  cfg=$(mktemp "$CREDS_DIR/.curlcfg.XXXXXX") || die "could not create a temp curl config in $CREDS_DIR"
+  chmod 600 "$cfg"
+  # printf is a builtin: the token is not a process argument anywhere.
+  printf 'header = "Authorization: Bearer %s"\n' "$(cat "$tokfile")" >"$cfg"
+  printf '%s' "$cfg"
+}
+
+# furnish forwards the operator surface to the control port -- delightd holds the cluster
+# connection, this is a thin client. up/down are mutations, so they carry the control-port
+# bearer (control_config); list/health are reads and need none. health maps the daemon's 503
+# (a RED/INDETERMINATE piece) to a non-zero exit so the runbook and any monitor gate on it.
+cmd_furnish() {
+  local sub="${1:-}"
+  [ $# -gt 0 ] && shift || true
+  # Any curl config this function stages carries the bearer; remove it on return, whatever
+  # exit path (set -e, curl failure, or success) the case lands on.
+  local cfg=""
+  trap '[ -n "$cfg" ] && rm -f "$cfg"; trap - RETURN' RETURN
+  case "$sub" in
+    list) curl -fsS "$CTRL/furnish/pieces" && echo ;;
+    up) [ $# -ge 1 ] || die "usage: delightd furnish up <piece>"; cfg=$(control_config); curl -fsS -K "$cfg" -X POST "$CTRL/furnish/$1/up" && echo ;;
+    down) [ $# -ge 1 ] || die "usage: delightd furnish down <piece>"; cfg=$(control_config); curl -fsS -K "$cfg" -X POST "$CTRL/furnish/$1/down" && echo ;;
+    health)
+      local out status
+      out=$(curl -s -w $'\n%{http_code}' "$CTRL/furnish/health${1:+/$1}") || out=$'\n000'
+      status="${out##*$'\n'}"
+      if [ "$status" = "000" ]; then
+        die "daemon not reachable at $CTRL (is delightd running? try: delightd status)"
+      fi
+      printf '%s\n' "${out%$'\n'*}"
+      [ "$status" = "200" ]
+      ;;
+    *) die "usage: delightd furnish {list | health [piece] | up <piece> | down <piece>}" ;;
+  esac
+}
+
+usage() {
+  cat >&2 <<'EOF'
+delightd -- operator container control (SRE front door)
+
+  delightd start          bring the container up (colima + compose; builds if needed)
+  delightd stop           stop the container
+  delightd restart        stop then start
+  delightd logs [args]    stream the container's logs (args pass through to compose logs)
+  delightd status         runtime + container + readyz; non-zero exit unless fully ready
+  delightd creds          resolve credentials from 1Password (Touch ID) without starting; verify the chain
+  delightd furnish ...    converge the meubilair (list | health [piece] | up <piece> | down <piece>)
+  delightd <path>         forward a GET to the control port (e.g. delightd git, delightd health)
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift || true
+  case "$cmd" in
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    logs) cmd_logs "$@" ;;
+    status) cmd_status ;;
+    creds) cmd_creds ;;
+    furnish) cmd_furnish "$@" ;;
+    "" | -h | --help | help) usage ;;
+    *)
+      # An unknown verb is forwarded as a GET query on the control port: delightd git -> /git.
+      if ! curl -fsS "$CTRL/$cmd"; then
+        log "query '$cmd' failed (unknown command, or the daemon returned an error / is down)"
+        exit 2
+      fi
+      echo
+      ;;
+  esac
+}
+
+main "$@"

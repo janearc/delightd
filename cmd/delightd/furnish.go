@@ -1,248 +1,94 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
+
+	"delightd/config"
 )
 
-// kubectl-by-subprocess is a ruled decision, not a shortcut (sprint 11
-// Phase A, issue 77): the programmatic stack (client-go + the kustomize
-// library) drags k8s.io/* to v0.36 and google.golang.org/protobuf off its
-// v1.36.11 pin -- the dep the generated contract code shares. kubectl is a
-// runtime requirement instead, checked fail-loud before any verb touches the
-// cluster.
-
-// furnishRunner is the seam between the furnish verbs and kubectl: production
-// runs the real binary, tests substitute a recorder. Arguments arrive without
-// the program name ("apply", "-k", <dir>).
-type furnishRunner func(ctx context.Context, args ...string) ([]byte, error)
-
-// kubectlRunner is the production runner. KUBECONFIG is deliberately left
-// alone -- furnish converges whatever cluster the operator's environment
-// points at (locally, the k3d cluster).
-func kubectlRunner(ctx context.Context, args ...string) ([]byte, error) {
-	if _, err := exec.LookPath("kubectl"); err != nil {
-		return nil, fmt.Errorf("kubectl not found on PATH; furnish requires it at runtime: %w", err)
-	}
-	out, err := exec.CommandContext(ctx, "kubectl", args...).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("kubectl %s: %w\n%s", strings.Join(args, " "), err, out)
-	}
-	return out, nil
-}
-
-// aggregator is the part of kube/kustomization.yaml furnish reads: the
-// resources list. A directory under kube/ is a piece only if it is named
-// there -- the declaration, not the filesystem, says what exists.
-type aggregator struct {
-	Resources []string `yaml:"resources"`
-}
-
-// pieces returns the declared pieces under kubeDir, in declaration order.
-func pieces(kubeDir string) ([]string, error) {
-	path := filepath.Join(kubeDir, "kustomization.yaml")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("furnish: no aggregator at %s (run from a checkout, or point --kube at one): %w", path, err)
-	}
-	var agg aggregator
-	if err := yaml.Unmarshal(b, &agg); err != nil {
-		return nil, fmt.Errorf("furnish: %s does not parse: %w", path, err)
-	}
-	if len(agg.Resources) == 0 {
-		return nil, fmt.Errorf("furnish: %s declares no resources", path)
-	}
-	return agg.Resources, nil
-}
-
-// kubeItem is the minimal slice of `kubectl get -o json` that health reads:
-// enough to judge a Deployment's or StatefulSet's readiness and to name
-// everything else (both expose spec.replicas + status.readyReplicas).
-type kubeItem struct {
-	Kind     string `json:"kind"`
-	Metadata struct {
-		Name string `json:"name"`
-	} `json:"metadata"`
-	Spec struct {
-		Replicas *int32 `json:"replicas"`
-	} `json:"spec"`
-	Status struct {
-		ReadyReplicas int32 `json:"readyReplicas"`
-	} `json:"status"`
-}
-
-// pieceHealth walks one piece's rendered objects and reports a ladder:
-// a Deployment or StatefulSet is GREEN when readyReplicas meets spec.replicas
-// (unset means 1, kube's own default), RED otherwise; any other kind that
-// exists is GREEN by existence. The piece is healthy only if nothing is RED.
-// StatefulSet matters here because the relocated bus/store pieces (kafka,
-// zookeeper, elasticsearch) are StatefulSets: without this a CrashLooping
-// kafka-0 would report GREEN by mere existence and furnish health would lie.
-func pieceHealth(items []kubeItem) (bool, []map[string]any) {
-	healthy := true
-	// results is the per-object ladder rendered into the health JSON.
-	var results []map[string]any
-	for _, it := range items {
-		state := "GREEN"
-		detail := "present"
-		if it.Kind == "Deployment" || it.Kind == "StatefulSet" {
-			want := int32(1)
-			if it.Spec.Replicas != nil {
-				want = *it.Spec.Replicas
-			}
-			if it.Status.ReadyReplicas < want {
-				state = "RED"
-				healthy = false
-			}
-			detail = fmt.Sprintf("%d/%d ready", it.Status.ReadyReplicas, want)
-		}
-		results = append(results, map[string]any{
-			"kind": it.Kind, "name": it.Metadata.Name, "state": state, "detail": detail,
-		})
-	}
-	return healthy, results
-}
-
-// furnishCmd is delightd's interface to the meubilair set: the no-code kube
-// deployments that live one directory per piece under kube/ (delightd itself
-// today; kafka, searxng, chromadb, redis, surrealdb as they move in). Same
-// agent-first, CLI-is-the-contract shape as model: cobra, JSON by default,
-// idempotent verbs -- an agent drives it the same way.
+// furnishCmd drives delightd's operator surface -- converging the meubilair pieces -- over
+// the control port. delightd holds the single cluster connection (client-go + the baked
+// manifests); the CLI is a thin client, so there is one path to the cluster: the daemon.
+// It dials 127.0.0.1:8088 by default (the loopback address of the control port; the port
+// itself binds all interfaces and its mutations require the control-port bearer). Same
+// agent-first, CLI-is-the-contract shape as model: cobra, JSON relayed verbatim, the
+// daemon's status mapped to the exit code so an agent or the wrapper can gate on it.
 func furnishCmd() *cobra.Command {
-	return newFurnishCmd(kubectlRunner)
-}
-
-// newFurnishCmd builds the command tree over an injectable runner; tests pass
-// a recorder here, the same pattern as the events publisher's produce seam.
-func newFurnishCmd(run furnishRunner) *cobra.Command {
-	var kubeDir string
+	var addr string
 	cmd := &cobra.Command{
 		Use:          "furnish",
-		Short:        "converge the meubilair pieces declared under kube/ (list, up, down, health)",
+		Short:        "converge the meubilair pieces via the daemon (list, up, down, health)",
 		SilenceUsage: true,
 	}
-	cmd.PersistentFlags().StringVar(&kubeDir, "kube", "kube",
-		"per-piece manifest root (a checkout's kube/ directory)")
-
-	// withPiece is the shared load-and-resolve: the name must be declared in
-	// the aggregator, and fn gets the piece's directory. New per-piece verbs
-	// reuse it instead of repeating the lookup + unknown-name error.
-	withPiece := func(name string, fn func(dir string) error) error {
-		ps, err := pieces(kubeDir)
-		if err != nil {
-			return err
-		}
-		for _, p := range ps {
-			if p == name {
-				return fn(filepath.Join(kubeDir, name))
-			}
-		}
-		return fmt.Errorf("unknown piece %q (declared: %s)", name, strings.Join(ps, ", "))
-	}
+	cmd.PersistentFlags().StringVar(&addr, "control", fmt.Sprintf("127.0.0.1:%d", config.DefaultControlPort),
+		"delightd control-port address")
 
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "list the declared pieces (JSON)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			ps, err := pieces(kubeDir)
-			if err != nil {
-				return err
-			}
-			return printJSON(map[string]any{"command": "furnish.list", "kube": kubeDir, "pieces": ps})
+			return furnishDo(http.MethodGet, addr, "/furnish/pieces")
 		},
 	}
-
-	up := &cobra.Command{
-		Use:   "up <piece>",
-		Short: "converge one piece onto its manifests (kubectl apply -k; idempotent)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			return withPiece(args[0], func(dir string) error {
-				out, err := run(c.Context(), "apply", "-k", dir)
-				if err != nil {
-					return err
-				}
-				return printJSON(map[string]any{
-					"command": "furnish.up", "piece": args[0],
-					"applied": strings.Split(strings.TrimSpace(string(out)), "\n"),
-				})
-			})
-		},
-	}
-
-	down := &cobra.Command{
-		Use:   "down <piece>",
-		Short: "remove one piece's objects (kubectl delete -k; absent is success)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			return withPiece(args[0], func(dir string) error {
-				out, err := run(c.Context(), "delete", "-k", dir, "--ignore-not-found=true")
-				if err != nil {
-					return err
-				}
-				return printJSON(map[string]any{
-					"command": "furnish.down", "piece": args[0],
-					"removed": strings.Split(strings.TrimSpace(string(out)), "\n"),
-				})
-			})
-		},
-	}
-
 	health := &cobra.Command{
 		Use:   "health [piece]",
-		Short: "report the health ladder for piece(s); non-zero exit if any is RED",
+		Short: "report the health ladder; non-zero exit if any piece is RED or INDETERMINATE",
 		Args:  cobra.MaximumNArgs(1),
-		RunE: func(c *cobra.Command, args []string) error {
-			ps, err := pieces(kubeDir)
-			if err != nil {
-				return err
-			}
+		RunE: func(_ *cobra.Command, args []string) error {
+			path := "/furnish/health"
 			if len(args) == 1 {
-				if err := withPiece(args[0], func(string) error { return nil }); err != nil {
-					return err
-				}
-				ps = args[:1]
+				path += "/" + args[0]
 			}
-			healthy := true
-			// reports collects the per-piece ladders for the health JSON.
-			reports := map[string]any{}
-			for _, p := range ps {
-				out, err := run(c.Context(), "get", "-k", filepath.Join(kubeDir, p), "-o", "json")
-				if err != nil {
-					return err
-				}
-				var got struct {
-					Items []kubeItem `json:"items"`
-				}
-				if err := json.Unmarshal(out, &got); err != nil {
-					return fmt.Errorf("furnish health %s: kubectl output does not parse: %w", p, err)
-				}
-				ok, ladder := pieceHealth(got.Items)
-				if !ok {
-					healthy = false
-				}
-				reports[p] = ladder
-			}
-			if err := printJSON(map[string]any{
-				"command": "furnish.health", "healthy": healthy, "results": reports,
-			}); err != nil {
-				return err
-			}
-			if !healthy {
-				return fmt.Errorf("one or more pieces unhealthy")
-			}
-			return nil
+			return furnishDo(http.MethodGet, addr, path)
+		},
+	}
+	up := &cobra.Command{
+		Use:   "up <piece>",
+		Short: "converge one piece onto its manifests (server-side apply; idempotent)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return furnishDo(http.MethodPost, addr, "/furnish/"+args[0]+"/up")
+		},
+	}
+	down := &cobra.Command{
+		Use:   "down <piece>",
+		Short: "remove one piece's objects (absent is success)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return furnishDo(http.MethodPost, addr, "/furnish/"+args[0]+"/down")
 		},
 	}
 
 	cmd.AddCommand(list, up, down, health)
 	return cmd
+}
+
+// furnishDo issues one request to the control port, relays the daemon's JSON body to
+// stdout verbatim (it is the contract), and maps the status to the exit: a health 503
+// (RED or INDETERMINATE) or any other non-2xx becomes a non-zero exit. A connection
+// failure names the likely cause -- the daemon is not up.
+func furnishDo(method, addr, path string) error {
+	req, err := http.NewRequest(method, "http://"+addr+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("furnish: cannot reach delightd at %s (is the daemon up? try 'delightd status'): %w", addr, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if b := strings.TrimSpace(string(body)); b != "" {
+		fmt.Fprintln(os.Stdout, b)
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("furnish: %s %s -> %s", method, path, resp.Status)
+	}
+	return nil
 }

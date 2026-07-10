@@ -2,7 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 # Aggregates the per-piece kustomizations under kube/. Each subdirectory
-# (kube/delightd, and others as they are added) is a self-contained kustomization
+# (kube/surrealdb, and others as they are added) is a self-contained kustomization
 # for one workload; listing its directory name below includes it in a
 # whole-environment build. Each subdir owns its own namespace and labels.
 #   kubectl kustomize kube/            renders every piece
@@ -18,9 +18,15 @@ kind: Kustomization
 # that piece cascade-delete the whole fleet, and out-of-order `furnish up` of
 # another piece fail for want of the namespace. Namespace provisioning is a
 # cold-bring-up concern (runbook / tier0 work), tracked separately.
+#
+# delightd is deliberately NOT a piece. It is the operator: a host-level
+# container outside the fleet, never a pod, never supervised by the thing it
+# operates. Listing it here would make the default `furnish health` RED by
+# construction (the operator never exists in-cluster) and `furnish up delightd`
+# would stand up the in-cluster second delightd that docs/kubernetes-access.md
+# records as rejected.
 
 resources:
-  - delightd
   - surrealdb
   - kafka
   - zookeeper

@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
@@ -220,5 +222,101 @@ func TestPublishBackup_NilIsNoOp(t *testing.T) {
 	var p *Publisher
 	if err := p.PublishBackup(context.Background(), &delightv1.BackupEvent{ProjectName: "paling"}); err != nil {
 		t.Errorf("nil PublishBackup returned %v, want nil", err)
+	}
+}
+
+// TestNew_EmptyBrokers: no brokers configured is a clear config error, not a nil client
+// that fails later.
+func TestNew_EmptyBrokers(t *testing.T) {
+	if _, err := New(context.Background(), nil, "http://sr", "delight.events", `syntax = "proto3";`); err == nil {
+		t.Fatal("New with no brokers: want error, got nil")
+	}
+}
+
+// TestNew_UnreachableBroker: New pings at construction, so an unreachable broker fails
+// fast (and closes the client it opened) rather than returning a publisher that only
+// errors on first produce.
+func TestNew_UnreachableBroker(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	p, err := New(ctx, []string{"127.0.0.1:1"}, "http://sr", "delight.events", `syntax = "proto3";`)
+	if err == nil {
+		p.Close()
+		t.Fatal("New against an unreachable broker: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unreachable") {
+		t.Errorf("error = %q, want it to name the broker unreachable", err)
+	}
+}
+
+// TestClose_NilAndClient: Close is nil-safe and tears down a real client. kgo.NewClient
+// does not dial until first use, so this needs no broker.
+func TestClose_NilAndClient(t *testing.T) {
+	var nilp *Publisher
+	nilp.Close() // must not panic
+
+	cl, err := kgo.NewClient(kgo.SeedBrokers("127.0.0.1:1"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	(&Publisher{client: cl}).Close()
+}
+
+// TestPublishBackup_ProduceError: a produce failure is returned to the caller (to be
+// logged), never panicked or swallowed.
+func TestPublishBackup_ProduceError(t *testing.T) {
+	var reg int32
+	var seen srCapture
+	sr := srServer(t, 1, &reg, &seen)
+	defer sr.Close()
+	p := &Publisher{
+		cfg:        config{schemaRegistryURL: sr.URL, topic: "delight.events"},
+		http:       sr.Client(),
+		schemaText: `syntax = "proto3";`,
+		produce:    func(context.Context, *kgo.Record) error { return fmt.Errorf("broker down") },
+	}
+	err := p.PublishBackup(context.Background(), &delightv1.BackupEvent{ProjectName: "paling"})
+	if err == nil || !strings.Contains(err.Error(), "broker down") {
+		t.Fatalf("PublishBackup produce error = %v, want it surfaced", err)
+	}
+}
+
+// TestPublishBackup_RegistryError: a schema-registry failure surfaces as a registration
+// error, does not publish an unframed record, and leaves the publisher unregistered so
+// the next call retries (the self-heal contract, not sync.Once).
+func TestPublishBackup_RegistryError(t *testing.T) {
+	sr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer sr.Close()
+	produced := false
+	p := &Publisher{
+		cfg:        config{schemaRegistryURL: sr.URL, topic: "delight.events"},
+		http:       sr.Client(),
+		schemaText: `syntax = "proto3";`,
+		produce:    func(context.Context, *kgo.Record) error { produced = true; return nil },
+	}
+	err := p.PublishBackup(context.Background(), &delightv1.BackupEvent{ProjectName: "paling"})
+	if err == nil || !strings.Contains(err.Error(), "registration") {
+		t.Fatalf("PublishBackup with a failing registry = %v, want a registration error", err)
+	}
+	if produced {
+		t.Error("published despite a failed registration; must not emit an unframed record")
+	}
+	if p.registered {
+		t.Error("registered flag set after a failed registration; the next call must retry")
+	}
+}
+
+// TestRegisterSchema_Unreachable: an unreachable registry surfaces the transport error.
+func TestRegisterSchema_Unreachable(t *testing.T) {
+	p := &Publisher{
+		cfg:        config{schemaRegistryURL: "http://127.0.0.1:1", topic: "delight.events"},
+		http:       &http.Client{Timeout: time.Second},
+		schemaText: `syntax = "proto3";`,
+	}
+	if _, err := p.registerSchema(context.Background()); err == nil {
+		t.Fatal("registerSchema against an unreachable registry: want error, got nil")
 	}
 }

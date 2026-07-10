@@ -28,9 +28,12 @@ each sync the aggregator (`pkg/skills`) scans every managed project for an
 - **Namespacing.** Each tool is registered as `<project>_<tool>` to avoid
   collisions across projects. A `paling` project declaring `train` becomes
   `paling_train`.
-- **Dogfood tool.** The aggregator always injects `delightd_trigger_backup`
-  (input `{ "project": "<name>" }`) so the daemon's own backup trigger is part of
-  the same surface it serves for everyone else.
+- **delightd's own tools.** delightd dogfoods the same contract: its agent tools
+  (`furnish_list` / `furnish_health` / `furnish_up` / `furnish_down` /
+  `trigger_backup` / `reset`) are declared in delightd's own `mcp.json`, baked into
+  the image at `<ConfigRoot>/mcp.json` and registered under the `delightd_`
+  namespace like any fleet project — not hardcoded. An agent drives delightd the
+  same way whether it runs on disk or in a container.
 
 A project's `mcp.json` is the single integration contract for its agent tools.
 Nothing else is scanned — there is no `swagger.json` or OpenAPI requirement.
@@ -53,8 +56,12 @@ Nothing else is scanned — there is no `swagger.json` or OpenAPI requirement.
 | `handler.type` | Dispatch |
 |----------------|----------|
 | `command` | exec `command` with `args` (+ caller args in the CLI) |
-| `http` | `curl -X <method> <url>` |
-| `internal` | daemon-internal (e.g. the `backup` method) |
+| `http` | request `<method> <url>`; `{name}` path params in the URL are filled from the call arguments (MCP) or positional args (generated CLI), so a parameterized route like `/furnish/{piece}/up` works. A non-2xx status is returned to the caller with its body (e.g. a 503 health ladder). |
+| `internal` | generated-CLI-only (not dispatched over MCP); today only `method: "backup"` is implemented, and it posts to the daemon's own `/projects/<arg>/backup`, carrying the control-port bearer (`cli.go`'s `internal` case). |
+
+`{name}` templating is what lets an operator surface with path parameters —
+delightd's own furnish routes — be driven by name through both the MCP tool and
+the generated `delight` CLI.
 
 ## MCP server (`POST /mcp`)
 

@@ -1,0 +1,53 @@
+# Docker build-context excludes (M10, sprints#58).
+#
+# Dockerfile:31 (`COPY . .`, ahead of `buf generate` regenerating gen/go and `go build
+# ./cmd/delightd`) had no .dockerignore behind it: the full .git history and the live
+# .env (gitignored, not dockerignored -- two different exclude lists) both landed in the
+# builder layer and the BuildKit cache.
+#
+# The image build needs: go.mod/go.sum, cmd/, pkg/, proto/ + buf.gen.go.yaml + buf.yaml
+# (buf generate's inputs), kube/, delight.yaml, mcp.json, meubilair.yaml (the config
+# templates baked into /etc/delightd -- see Dockerfile's ARG GIT_SHA stage), and
+# scripts/ (the host wrapper; kept in the context even though this Dockerfile does not
+# read it today, so adding a stage that does never needs a dockerignore review first).
+# Everything below is excluded because no Dockerfile stage reads it. Anchored to the
+# context root (leading /) -- no bare/glob patterns matching at arbitrary depth, except
+# the one deliberate env-overlay wildcard below.
+
+# Secrets / per-workstation config -- never in a layer or the BuildKit cache. .env is
+# gitignored already; dockerignore is the separate list docker actually consults.
+/.env
+/.env.*
+!/.env.example
+
+# Full history: the image never needs a single commit, and .git is a moving target that
+# would bust the COPY layer cache on every commit even when no tracked file changed.
+/.git/
+
+# Agent tooling -- never shipped in any artifact.
+/.claude/
+
+# Build/test/runtime artifacts that land in the repo root by accident, not by design
+# (already gitignored; dockerignored here too since gitignore and dockerignore are
+# independent lists).
+/bin/
+/coverage.out
+/coverage.out.tmp
+/traefik.json
+
+# Regenerated in-image by `buf generate --template buf.gen.go.yaml` (Dockerfile). A
+# stale local gen/go would be silently overwritten at best, or leave orphaned files at
+# worst if a message was removed since the last local `task generate`. gen/rust (the
+# committed serde crate) is Rust-only and unused by this Go build.
+/gen/
+
+# Test source and fixtures: `go build ./cmd/delightd` never compiles these, only
+# `go test` does, and that runs outside the image (see the M10/M11 gates in
+# sprints#58: go test ./... and -tags=integration ./test/integration/... both run on
+# the host, against the built binary or a running container, never inside a build).
+/test/
+/tests/
+
+# CI/dev tooling with no runtime role in the image.
+/.github/
+/.githooks/

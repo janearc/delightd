@@ -80,21 +80,31 @@ curl -s http://127.0.0.1:8088/health
 
 Connection refused means delightd is down — and, known gap, **nothing
 restarts delightd today**; a reboot silently takes it out until a human
-notices. Bring it back:
+notices. Bring it back through the wrapper, never by hand-running the
+container's internals:
 
 ```bash
-cd ~/work/delightd
-task build
-nohup ~/work/delightd/bin/delightd >> ~/var/delightd-nohup.log 2>&1 &
-disown
+delightd start
+delightd status
 curl -s http://127.0.0.1:8088/health   # ok, degraded:false
 ```
 
-`task build` regenerates the proto bindings first, and buf's plugins resolve
-off PATH — step 1's PATH fix is a prerequisite here. A
-`protoc-gen-go: executable file not found` error at this step is step 1
-unfinished, not a build bug. A `nohup`'d daemon inherits PATH from the shell
-that launched it, not from an rc file you have not sourced.
+`delightd start` is `colima start` (if needed) + resolving credentials from
+1Password (Touch ID) + `docker compose build` (image, commit-stamped) +
+`docker compose up -d` — see `scripts/delightd`. There is no separate build
+step and no on-disk `bin/delightd` to `nohup`: the daemon runs as a container,
+and the wrapper is the only front door the runbook should use. `delightd
+status` folds runtime + container + `/readyz` into one exit code — 0 only
+when all three are up — so it is the one command to gate recovery on, here
+and everywhere else in this document.
+
+**This container-based restart path is UNTESTED against a real machine
+recovery as of this writing** — the `nohup`-a-binary instruction above it
+replaced was written for the pre-containerized daemon and had been exercised
+live (see the 2026-07-05 table below); this section has not yet had its own
+live bounce. Treat `delightd start` here as the documented procedure, not a
+proven one, until it has run against an actual cold daemon and this note is
+removed.
 
 `degraded: true` in the health body means the config half-loaded; the
 `warnings` field says why. The daemon serves anyway — read the warnings, fix
@@ -118,9 +128,8 @@ Reads fail closed, so interpret exactly:
 ## 6. Furnishings
 
 ```bash
-cd ~/work/delightd
-./bin/delightd furnish list     # the declared pieces
-./bin/delightd furnish health   # ladder; non-zero exit if anything is RED
+delightd furnish list     # the declared pieces
+delightd furnish health   # ladder; non-zero exit if anything is RED
 ```
 
 A RED deployment right after cluster start is usually an image pull still in
@@ -131,7 +140,7 @@ kubectl get pods -n fleet
 kubectl get events -n fleet --sort-by=.lastTimestamp | tail
 ```
 
-A piece that stays RED after the pull settles: `furnish up <piece>`
+A piece that stays RED after the pull settles: `delightd furnish up <piece>`
 re-converges it (idempotent; a no-op on a healthy piece). Still RED after a
 re-converge means the piece's manifests or image are broken, not the
 reconcile — read the pod events and go to that piece's directory under

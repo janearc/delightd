@@ -1,0 +1,120 @@
+
+services:
+  # --------------------------------------------------------
+  # THE CORE DAEMON (Agnostic backend, pure static binary)
+  # --------------------------------------------------------
+  delightd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # REQUIRED, no default: the Dockerfile bakes a commit-stamped config tree and
+        # fails the build without it, so an unstamped orchestrator image is never
+        # produced. The `delightd` host wrapper sets this (git rev-parse --short HEAD,
+        # plus -dirty on an unclean tree); a bare `docker compose build` must pass it too.
+        GIT_SHA: ${GIT_SHA:?set GIT_SHA (the delightd wrapper does this; or export it)}
+    # No `user:` override -- the container runs as root. On colima's virtiofs share a
+    # non-root container uid does not map onto the host engineer's ownership of the /var
+    # write mount, so writes fail; root is the reliable execution user (the integration
+    # test runs the same way). The runtime is scratch and single-process, so this is
+    # container-namespaced root, not host root.
+    volumes:
+      # Host source paths are passed in, never hardcoded here. /work is the read-only
+      # git-state source; /var is delightd's writable state tree. Config is NOT mounted --
+      # it is baked into the image (delight.yaml, mcp.json, the kube/ manifest tree),
+      # commit-stamped, so a running orchestrator is pinned to its image, not the host
+      # filesystem. The one thing delivered at runtime is credentials: the wrapper writes
+      # the credential-less kubeconfig and the scoped token into DELIGHT_CREDS_DIR and
+      # mounts it read-only at /run/delightd (see docs/kubernetes-access.md, the light
+      # fake-EKS model). Nothing kube-credential is baked.
+      - ${DELIGHT_MONITOR_ROOT_HOST:?host path for /work}:/work:ro
+      - ${DELIGHT_DAEMON_ROOT_HOST:?host path for /var}:/var:rw
+      - ${DELIGHT_CREDS_DIR:?the delightd wrapper provides this (kubeconfig + token)}:/run/delightd:ro
+    # Compensating hardening for the root-namespaced container above (M11, sprints#58).
+    # read_only locks the image's own layers (the scratch runtime plus the baked
+    # /etc/delightd tree, which was already read-only "by virtue of the image" per the
+    # comment above -- this makes that guarantee load-bearing instead of incidental) and
+    # anything else NOT named in `volumes:`. The three explicit mounts above keep their
+    # own mode regardless: /work and /run/delightd stay :ro as declared, and /var stays
+    # :rw, which is every writable path the daemon actually uses -- checked via
+    # pkg/exports/sync.go, pkg/registry/registry.go, pkg/enablement/enablement.go, and
+    # pkg/backup/backup.go, all of which resolve under DaemonRoot (/var) or one of its
+    # env-configured subpaths (DELIGHT_EXPORTS_BIN, DELIGHT_EXPORTS_STATE,
+    # DELIGHT_EXPORTS_ARCHIVE, all under /var). No tmpfs is added: there is no other
+    # write path to cover. (pkg/traefik/dynamic.go's SyncLLMRoutes joins os.UserHomeDir()
+    # with "var/traefik/dynamic"; no $HOME is set in this image, so UserHomeDir()
+    # resolves empty and the join lands relative to the container's WORKDIR, "/" --
+    # i.e. /var/traefik/dynamic, still under the /var mount. Confirmed live: --read-only
+    # + --cap-drop=ALL + --security-opt no-new-privileges:true and llms.yml still landed
+    # on the host side of the /var mount.)
+    read_only: true
+    # A Go daemon speaking HTTP + the k8s API needs no Linux capability at all -- no raw
+    # sockets, no chown, no bind on a privileged port (8088 is unprivileged). Drop
+    # everything rather than pare the default set down by name.
+    cap_drop:
+      - ALL
+    # Blocks a setuid/setgid binary in the image from gaining privileges beyond the
+    # invoking process. delightd execs nothing (it is a single static binary with no
+    # subprocess calls), so this has no functional cost.
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8088:8088"
+    environment:
+      # The four roots, mapped onto this container's mounts (see volumes above):
+      #   MONITOR_ROOT /work  -- the read-only ~/work bind: the git-state source.
+      #   DAEMON_ROOT  /var   -- the ~/var:/var write mount: delightd's state tree.
+      #   BACKUPS_ROOT /var/backups -- backup destination on the /var write mount;
+      #     daemon writes archives here directly (no appended "/backups"). Set
+      #     explicitly rather than relying on the ${DAEMON_ROOT}/backups default so
+      #     it is visible in the deployment. Resolves to ~/var/backups on the host.
+      #   CONFIG_ROOT  /etc/delightd -- the baked config tree (not a mount).
+      # KUBECONFIG points at the wrapper-delivered, credential-less kubeconfig on the
+      # /run/delightd mount; its tokenFile resolves the scoped token beside it.
+      - DELIGHT_MONITOR_ROOT=/work
+      - DELIGHT_DAEMON_ROOT=/var
+      - DELIGHT_BACKUPS_ROOT=/var/backups
+      - DELIGHT_CONFIG_ROOT=/etc/delightd
+      - KUBECONFIG=/run/delightd/kubeconfig
+      - DELIGHT_EXPORTS_BIN=/var/bin
+      - DELIGHT_EXPORTS_STATE=/var/runtime/delightd/exports
+      - DELIGHT_EXPORTS_ARCHIVE=/var/archive/delightd/exports
+    command: ["--immediate"]
+    restart: unless-stopped
+    # Dynamic labeling for Traefik discovery
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.delightd.rule=Host(`delightd.local`)"
+      - "traefik.http.services.delightd.loadbalancer.server.port=8088"
+    networks:
+      # dev-fleet: the ingress side (traefik routes to delightd). ring0: the control-plane
+      # side -- the network holding only the apiserver and delightd, delightd the sole
+      # ingress. See docs/kubernetes-access.md. ring0 is created by the k3d bring-up
+      # (k3d cluster create --network ring0), so it is external here.
+      - dev-fleet
+      - ring0
+
+  # --------------------------------------------------------
+  # TRAEFIK PROFILE (Dynamic Reverse Proxy + Endpoint Registry)
+  # --------------------------------------------------------
+  traefik:
+    image: traefik:v2.10
+    profiles: ["traefik"]
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:8081:8080" # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+networks:
+  dev-fleet:
+    external: true
+  # ring0 holds only the k3d apiserver and delightd; delightd is the sole ingress. Created
+  # by the k3d bring-up (k3d cluster create --network ring0), so external here.
+  ring0:
+    external: true

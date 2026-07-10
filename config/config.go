@@ -264,7 +264,13 @@ func Load(ctx context.Context) (*DelightConfig, error) {
 	viper.SetConfigName("delight")
 	viper.SetConfigType("yaml")
 
-	// Agnostic resolution paths
+	// Agnostic resolution paths. DELIGHT_CONFIG_ROOT is searched first when set: it is
+	// the env-driven config root (the container passes /etc/delightd), and without it a
+	// containerized daemon running under a numeric --user with no $HOME could not locate
+	// its config file at all -- only its value was bound, never its search path.
+	if cr := os.Getenv("DELIGHT_CONFIG_ROOT"); cr != "" {
+		viper.AddConfigPath(cr)
+	}
 	viper.AddConfigPath("$HOME/etc/delightd")
 	viper.AddConfigPath(".")
 

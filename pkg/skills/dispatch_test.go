@@ -1,0 +1,84 @@
+package skills
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+// TestRenderURL checks named substitution, escaping, and the unfilled-placeholder error.
+func TestRenderURL(t *testing.T) {
+	out, err := renderURL("http://h/furnish/{piece}/up", map[string]any{"piece": "surrealdb"})
+	if err != nil || out != "http://h/furnish/surrealdb/up" {
+		t.Errorf("renderURL = %q, %v", out, err)
+	}
+	out, _ = renderURL("http://h/p/{name}", map[string]any{"name": "a b/c"})
+	if out != "http://h/p/a%20b%2Fc" {
+		t.Errorf("renderURL escaping = %q", out)
+	}
+	if _, err := renderURL("http://h/{x}", map[string]any{}); err == nil {
+		t.Error("renderURL with a missing param: want error")
+	}
+}
+
+// TestRenderArgs checks named substitution across a command tool's declared argv, and that
+// it never joins the argv into one string (each element stays its own slice entry).
+func TestRenderArgs(t *testing.T) {
+	out, err := renderArgs([]string{"-c", "backup {project}"}, map[string]any{"project": "paling"})
+	if err != nil || len(out) != 2 || out[0] != "-c" || out[1] != "backup paling" {
+		t.Errorf("renderArgs = %v, %v", out, err)
+	}
+	if _, err := renderArgs([]string{"{x}"}, map[string]any{}); err == nil {
+		t.Error("renderArgs with a missing param: want error")
+	}
+	// A value containing shell metacharacters lands as one argv element verbatim -- there is
+	// no shell in the exec.Command path to interpret it, so this is not an injection vector.
+	out, _ = renderArgs([]string{"{project}"}, map[string]any{"project": "a; rm -rf /"})
+	if len(out) != 1 || out[0] != "a; rm -rf /" {
+		t.Errorf("renderArgs should pass the raw value through as one argv element, got %v", out)
+	}
+}
+
+// TestPositionalURL checks the CLI's {name} -> $N rewrite in order of appearance.
+func TestPositionalURL(t *testing.T) {
+	if got := positionalURL("http://h/furnish/{piece}/up"); got != "http://h/furnish/$1/up" {
+		t.Errorf("positionalURL = %q, want .../$1/up", got)
+	}
+	if got := positionalURL("http://h/x/{a}/{b}"); got != "http://h/x/$1/$2" {
+		t.Errorf("positionalURL two params = %q, want $1/$2", got)
+	}
+	if got := positionalURL("http://h/health"); got != "http://h/health" {
+		t.Errorf("positionalURL plain = %q, want unchanged", got)
+	}
+}
+
+// TestDispatchClientIsBounded: the dispatch client must carry a timeout (http.DefaultClient
+// has none -- a wedged control port would hang the tool silently), and the ceiling must sit
+// above the server-side furnish mutate deadline (60s) so the daemon's own loud timeout body
+// is relayed rather than clipped by the client.
+func TestDispatchClientIsBounded(t *testing.T) {
+	if dispatchClient.Timeout <= 0 {
+		t.Fatal("dispatchClient has no timeout: a wedged control port would hang forever")
+	}
+	if dispatchClient.Timeout <= 60*time.Second {
+		t.Errorf("dispatchClient timeout = %s, must exceed the 60s server-side furnish deadline", dispatchClient.Timeout)
+	}
+}
+
+// TestDoHTTP_Non2xxIsError checks that a non-2xx status is an error while still returning
+// the daemon's body (a monitor gates on the error; an agent still sees the ladder).
+func TestDoHTTP_Non2xxIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"healthy":false}`))
+	}))
+	defer srv.Close()
+	body, err := doHTTP(http.MethodGet, srv.URL, "")
+	if err == nil {
+		t.Error("doHTTP on a 503: want error")
+	}
+	if body != `{"healthy":false}` {
+		t.Errorf("doHTTP body = %q, want the daemon body", body)
+	}
+}

@@ -1,0 +1,18 @@
+# Go-only generation template for the container image build.
+#
+# The full buf.gen.yaml also runs protoc-gen-rust-serde, which emits the COMMITTED
+# gen/rust crate (the tiny-monitor widget's source of truth, regenerated only in dev
+# with the pinned blm plugin -- never here). The image compiles only the Go binary and
+# gen/go is gitignored, so the image must regenerate gen/go and must NOT run the Rust
+# plugin (its binary is not installed, and its output the Go build never imports). This
+# template is that Go-only subset; keep the managed block in sync with buf.gen.yaml.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: delightd/gen/go
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative

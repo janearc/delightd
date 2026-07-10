@@ -658,10 +658,13 @@ func TestMux_MCPEnabled(t *testing.T) {
 	cfg.System.AgentSkills.ExposeVia = []string{"mcp"}
 	agg := skills.NewAggregator(t.TempDir())
 	s := New(cfg, nil, fakeFragments{}, agg, false, nil)
+	s.UseControlToken([]byte("test-token")) // POST /mcp is bearer-gated; provision + present it
 	mux := s.Mux()
 
 	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"method":"tools/list"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	mux.ServeHTTP(rr, req)
 	if rr.Code == http.StatusNotFound {
 		t.Errorf("POST /mcp should be routed when MCP is enabled, got 404")
 	}

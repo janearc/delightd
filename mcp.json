@@ -1,0 +1,56 @@
+{
+  "tools": [
+    {
+      "name": "furnish_list",
+      "description": "List the declared meubilair pieces delightd converges.",
+      "inputSchema": { "type": "object", "properties": {} },
+      "handler": { "type": "http", "method": "GET", "url": "http://127.0.0.1:8088/furnish/pieces" }
+    },
+    {
+      "name": "furnish_health",
+      "description": "Report the meubilair health ladder. A 503 means a piece is RED (unhealthy or absent) or INDETERMINATE (unreadable).",
+      "inputSchema": { "type": "object", "properties": {} },
+      "handler": { "type": "http", "method": "GET", "url": "http://127.0.0.1:8088/furnish/health" }
+    },
+    {
+      "name": "furnish_up",
+      "description": "Converge one piece onto its manifests (server-side apply; idempotent).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "piece": { "type": "string", "description": "the piece to converge" } },
+        "required": ["piece"]
+      },
+      "handler": { "type": "http", "method": "POST", "url": "http://127.0.0.1:8088/furnish/{piece}/up" }
+    },
+    {
+      "name": "furnish_down",
+      "description": "Remove one piece's objects (an already-absent object is success).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "piece": { "type": "string", "description": "the piece to remove" } },
+        "required": ["piece"]
+      },
+      "handler": { "type": "http", "method": "POST", "url": "http://127.0.0.1:8088/furnish/{piece}/down" }
+    },
+    {
+      "name": "trigger_backup",
+      "description": "Trigger an immediate backup for a project.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "project": { "type": "string", "description": "the project to back up" } },
+        "required": ["project"]
+      },
+      "handler": { "type": "http", "method": "POST", "url": "http://127.0.0.1:8088/projects/{project}/backup" }
+    },
+    {
+      "name": "reset",
+      "description": "Clear a project's stuck backup error state.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "project": { "type": "string", "description": "the project to reset" } },
+        "required": ["project"]
+      },
+      "handler": { "type": "http", "method": "POST", "url": "http://127.0.0.1:8088/projects/{project}/reset" }
+    }
+  ]
+}

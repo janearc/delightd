@@ -58,8 +58,8 @@ func TestReadyzGreenWhenRootsAndClusterOK(t *testing.T) {
 	if c := findCheck(t, body, "roots_readable"); !c.OK {
 		t.Errorf("roots_readable should be ok: %+v", c)
 	}
-	if c := findCheck(t, body, "kubectl_reachable"); !c.OK {
-		t.Errorf("kubectl_reachable should be ok: %+v", c)
+	if c := findCheck(t, body, "apiserver_reachable"); !c.OK {
+		t.Errorf("apiserver_reachable should be ok: %+v", c)
 	}
 }
 
@@ -88,9 +88,9 @@ func TestReadyz503WhenClusterUnreachable(t *testing.T) {
 	if c := findCheck(t, body, "roots_readable"); !c.OK {
 		t.Errorf("roots_readable should stay ok when only the cluster is down: %+v", c)
 	}
-	c := findCheck(t, body, "kubectl_reachable")
+	c := findCheck(t, body, "apiserver_reachable")
 	if c.OK || !strings.Contains(c.Error, "apiserver unreachable") {
-		t.Errorf("kubectl_reachable should be red with the probe error: %+v", c)
+		t.Errorf("apiserver_reachable should be red with the probe error: %+v", c)
 	}
 }
 

@@ -30,6 +30,9 @@ func stateServer(t *testing.T, st enablementStore) *http.ServeMux {
 	t.Helper()
 	cfg := &config.DelightConfig{Projects: []config.ProjectConfig{{Name: "alpha"}}}
 	s := New(cfg, nil, fakeFragments{}, nil, true, nil)
+	// Provision the control token so the bearer-gated PUT /state/{name} reaches its handler;
+	// do() sends the matching header. Reads are open and ignore it.
+	s.UseControlToken([]byte("test-token"))
 	if st != nil {
 		s.UseEnablement(st)
 	}
@@ -39,7 +42,10 @@ func stateServer(t *testing.T, st enablementStore) *http.ServeMux {
 func do(t *testing.T, mux *http.ServeMux, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, httptest.NewRequest(method, path, strings.NewReader(body)))
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	// The mutating route (PUT /state/{name}) is bearer-gated; reads ignore the header.
+	req.Header.Set("Authorization", "Bearer test-token")
+	mux.ServeHTTP(rr, req)
 	return rr
 }
 

@@ -5,8 +5,151 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// mcpCallText drives a tools/call and returns the tool's text output.
+func mcpCallText(t *testing.T, agg *Aggregator, name string, args string) string {
+	t.Helper()
+	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	agg.HandleMCP(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("mcp call status = %d", w.Result().StatusCode)
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Result().Body).Decode(&resp)
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("no result object: %v", resp)
+	}
+	return result["content"].([]any)[0].(map[string]any)["text"].(string)
+}
+
+// mcpCallResult is mcpCallText plus the isError flag -- the M4 contract (sprints#58) is
+// that a failed backing execution reaches the agent as isError=true, never as a success.
+func mcpCallResult(t *testing.T, agg *Aggregator, name string, args string) (string, bool) {
+	t.Helper()
+	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	agg.HandleMCP(w, req)
+	var resp map[string]any
+	json.NewDecoder(w.Result().Body).Decode(&resp)
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("no result object: %v", resp)
+	}
+	isErr, _ := result["isError"].(bool)
+	return result["content"].([]any)[0].(map[string]any)["text"].(string), isErr
+}
+
+// TestHandleMCPCallTool_HTTPFailureIsError: a 503-with-body from the daemon must surface
+// as isError=true with the body preserved -- an agent calling furnish_health on a RED
+// piece must not receive a successful tool result.
+func TestHandleMCPCallTool_HTTPFailureIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"healthy":false,"pieces":{"kafka":"red"}}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.tools["delightd_furnish_health"] = Tool{
+		Name:    "delightd_furnish_health",
+		Handler: HandlerDef{Type: "http", Method: "GET", URL: srv.URL + "/furnish/health"},
+	}
+	text, isErr := mcpCallResult(t, agg, "delightd_furnish_health", `{}`)
+	if !isErr {
+		t.Error("503 from the daemon must set isError=true")
+	}
+	if text != `{"healthy":false,"pieces":{"kafka":"red"}}` {
+		t.Errorf("failure body not preserved as error content: %q", text)
+	}
+}
+
+// TestHandleMCPCallTool_SuccessNoIsError: a 2xx dispatch stays a plain success.
+func TestHandleMCPCallTool_SuccessNoIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"healthy":true}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.tools["delightd_furnish_health"] = Tool{
+		Name:    "delightd_furnish_health",
+		Handler: HandlerDef{Type: "http", Method: "GET", URL: srv.URL + "/furnish/health"},
+	}
+	if _, isErr := mcpCallResult(t, agg, "delightd_furnish_health", `{}`); isErr {
+		t.Error("2xx must not set isError")
+	}
+}
+
+// TestHandleMCPCallTool_CommandFailureIsError: a command tool whose process exits nonzero
+// is a tool error, not a success with sad text.
+func TestHandleMCPCallTool_CommandFailureIsError(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["example_fail"] = Tool{
+		Name:    "example_fail",
+		Handler: HandlerDef{Type: "command", Command: "sh", Args: []string{"-c", "echo doomed; exit 3"}},
+	}
+	text, isErr := mcpCallResult(t, agg, "example_fail", `{}`)
+	if !isErr {
+		t.Error("nonzero command exit must set isError=true")
+	}
+	if !strings.Contains(text, "doomed") {
+		t.Errorf("command output not preserved in error content: %q", text)
+	}
+}
+
+// TestHandleMCPCallTool_CommandArgsSubstituted: a command tool declaring an {name}
+// placeholder in its Args must receive the call argument on argv, not run arg-less (M-minor,
+// sprints#58: command dispatch previously ignored params.Arguments entirely).
+func TestHandleMCPCallTool_CommandArgsSubstituted(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["example_echo"] = Tool{
+		Name:    "example_echo",
+		Handler: HandlerDef{Type: "command", Command: "echo", Args: []string{"-n", "{project}"}},
+	}
+	text := mcpCallText(t, agg, "example_echo", `{"project":"paling"}`)
+	if text != "paling" {
+		t.Errorf("command output = %q, want the substituted argument %q", text, "paling")
+	}
+}
+
+// TestHandleMCPCallTool_CommandArgsUnfilledIsError: a missing required argument is reported,
+// never silently dropped or passed through as the literal "{project}".
+func TestHandleMCPCallTool_CommandArgsUnfilledIsError(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["example_echo"] = Tool{
+		Name:    "example_echo",
+		Handler: HandlerDef{Type: "command", Command: "echo", Args: []string{"{project}"}},
+	}
+	text, isErr := mcpCallResult(t, agg, "example_echo", `{}`)
+	if !isErr {
+		t.Error("an unfilled command argument must set isError=true")
+	}
+	if !strings.Contains(text, "unfilled command argument") {
+		t.Errorf("missing arg should report the unfilled placeholder, got: %s", text)
+	}
+}
+
+// TestHandleMCP_BodyTooLargeIsRejected: POST /mcp must cap the request body -- an
+// unauthenticated caller (reads are open on this route) must not be able to hand the JSON
+// decoder an unbounded body before any bearer check runs.
+func TestHandleMCP_BodyTooLargeIsRejected(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	oversized := bytes.Repeat([]byte(" "), maxMCPBodyBytes+1)
+	body := append([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":`), append(oversized, []byte(`}`)...)...)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	agg.HandleMCP(w, req)
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Errorf("oversized body: status = %d, want 400 (rejected before it is parsed as a tool call)", w.Result().StatusCode)
+	}
+}
 
 func TestHandleMCPListTools(t *testing.T) {
 	agg := NewAggregator("/tmp")
@@ -37,48 +180,87 @@ func TestHandleMCPListTools(t *testing.T) {
 	}
 }
 
-func TestHandleMCPCallTool(t *testing.T) {
+// TestHandleMCPCallTool_HTTPTemplating drives an http tool with a {piece} path param: the
+// arguments must land in the route path and the daemon's response body is the tool output.
+// This is how delightd's own furnish tools dispatch.
+func TestHandleMCPCallTool_HTTPTemplating(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.Write([]byte(`{"applied":true}`))
+	}))
+	defer srv.Close()
+
 	agg := NewAggregator("/tmp")
-	agg.tools["delightd_trigger_backup"] = Tool{
-		Name: "delightd_trigger_backup",
-		Handler: HandlerDef{
-			Type:   "internal",
-			Method: "backup",
-		},
+	agg.tools["delightd_furnish_up"] = Tool{
+		Name:    "delightd_furnish_up",
+		Handler: HandlerDef{Type: "http", Method: "POST", URL: srv.URL + "/furnish/{piece}/up"},
 	}
 
-	reqBody := []byte(`{
-		"jsonrpc": "2.0", 
-		"id": 2, 
-		"method": "tools/call", 
-		"params": {
-			"name": "delightd_trigger_backup",
-			"arguments": {"project": "odysseus"}
-		}
-	}`)
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
-	w := httptest.NewRecorder()
-
-	agg.HandleMCP(w, req)
-
-	res := w.Result()
-	if res.StatusCode != http.StatusOK {
-		t.Errorf("expected OK, got %d", res.StatusCode)
+	text := mcpCallText(t, agg, "delightd_furnish_up", `{"piece":"surrealdb"}`)
+	if gotMethod != http.MethodPost || gotPath != "/furnish/surrealdb/up" {
+		t.Errorf("dispatch hit %s %s, want POST /furnish/surrealdb/up", gotMethod, gotPath)
 	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(res.Body).Decode(&resp)
-
-	result, ok := resp["result"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected result object")
+	if text != `{"applied":true}` {
+		t.Errorf("tool output = %q, want the daemon body", text)
 	}
+}
 
-	content := result["content"].([]interface{})
-	text := content[0].(map[string]interface{})["text"].(string)
+// TestHandleMCPCallTool_MutatingSendsBearer: a mutating self-tool dispatched to the loopback
+// control port carries the wired control-port bearer, so the daemon's own MCP surface can drive
+// its bearer-gated mutations. httptest binds 127.0.0.1, the loopback the bearer is scoped to.
+func TestHandleMCPCallTool_MutatingSendsBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"applied":true}`))
+	}))
+	defer srv.Close()
 
-	if text != "Backup triggered for odysseus" {
-		t.Errorf("unexpected output: %s", text)
+	agg := NewAggregator("/tmp")
+	agg.UseControlToken("s3cr3t")
+	agg.tools["delightd_furnish_up"] = Tool{
+		Name:    "delightd_furnish_up",
+		Handler: HandlerDef{Type: "http", Method: "POST", URL: srv.URL + "/furnish/{piece}/up"},
+	}
+	mcpCallText(t, agg, "delightd_furnish_up", `{"piece":"surrealdb"}`)
+	if gotAuth != "Bearer s3cr3t" {
+		t.Errorf("mutating dispatch Authorization = %q, want %q", gotAuth, "Bearer s3cr3t")
+	}
+}
+
+// TestHandleMCPCallTool_ReadSendsNoBearer: a read dispatch never carries the bearer.
+func TestHandleMCPCallTool_ReadSendsNoBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"pieces":[]}`))
+	}))
+	defer srv.Close()
+
+	agg := NewAggregator("/tmp")
+	agg.UseControlToken("s3cr3t")
+	agg.tools["delightd_furnish_list"] = Tool{
+		Name:    "delightd_furnish_list",
+		Handler: HandlerDef{Type: "http", Method: "GET", URL: srv.URL + "/furnish/pieces"},
+	}
+	mcpCallText(t, agg, "delightd_furnish_list", `{}`)
+	if gotAuth != "" {
+		t.Errorf("read dispatch sent Authorization = %q, want none", gotAuth)
+	}
+}
+
+// TestHandleMCPCallTool_MissingArg: a required path param that is not supplied is reported,
+// never dispatched as a malformed URL.
+func TestHandleMCPCallTool_MissingArg(t *testing.T) {
+	agg := NewAggregator("/tmp")
+	agg.tools["delightd_furnish_up"] = Tool{
+		Name:    "delightd_furnish_up",
+		Handler: HandlerDef{Type: "http", Method: "POST", URL: "http://127.0.0.1:8088/furnish/{piece}/up"},
+	}
+	text := mcpCallText(t, agg, "delightd_furnish_up", `{}`)
+	if !strings.Contains(text, "unfilled path parameter") {
+		t.Errorf("missing piece should report the unfilled parameter, got: %s", text)
 	}
 }
 

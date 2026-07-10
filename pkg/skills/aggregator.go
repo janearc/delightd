@@ -10,9 +10,14 @@ import (
 
 // Aggregator manages the discovery and invocation of skills across the fleet.
 type Aggregator struct {
-	mu      sync.RWMutex
-	workDir string
-	tools   map[string]Tool
+	mu           sync.RWMutex
+	workDir      string
+	selfManifest string
+	tools        map[string]Tool
+	// controlToken is delightd's own control-port bearer, wired by main via UseControlToken. A
+	// mutating tool that dispatches to the loopback control port carries it (the port is
+	// bearer-gated); it is never sent to any other host, and never logged.
+	controlToken string
 }
 
 // NewAggregator creates a new thread-safe skill aggregator
@@ -23,7 +28,27 @@ func NewAggregator(workDir string) *Aggregator {
 	}
 }
 
-// ScanProjects searches all managed projects for mcp.json files and registers their tools
+// UseControlToken wires the control-port bearer used when the MCP surface dispatches a mutating
+// self-tool back to the (bearer-gated) control port. An empty token means the gate will 503 the
+// dispatch just as it would any unauthenticated mutation.
+func (a *Aggregator) UseControlToken(tok string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.controlToken = tok
+}
+
+// SetSelfManifest points the aggregator at delightd's OWN mcp.json (baked into the image
+// at <ConfigRoot>/mcp.json). delightd dogfoods the same skill contract it requires of every
+// fleet project: its tools (furnish, backup, reset) are declared there and registered under
+// the "delightd" namespace, not hardcoded. Empty path -> delightd contributes no self-tools.
+func (a *Aggregator) SetSelfManifest(path string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.selfManifest = path
+}
+
+// ScanProjects searches all managed projects for mcp.json files and registers their tools,
+// then loads delightd's own manifest (the self-manifest) under the "delightd" namespace.
 func (a *Aggregator) ScanProjects(projects []string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -32,43 +57,40 @@ func (a *Aggregator) ScanProjects(projects []string) error {
 	a.tools = make(map[string]Tool)
 
 	for _, proj := range projects {
-		mcpFile := filepath.Join(a.workDir, proj, "mcp.json")
-		b, err := os.ReadFile(mcpFile)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue // project doesn't have an mcp.json
-			}
-			slog.Warn("failed to read mcp.json", "project", proj, "error", err)
-			continue
-		}
-
-		var manifest Manifest
-		if err := json.Unmarshal(b, &manifest); err != nil {
-			slog.Warn("invalid mcp.json syntax", "project", proj, "error", err)
-			continue
-		}
-
-		for _, t := range manifest.Tools {
-			// Namespace the tool by project name to avoid collisions
-			toolName := proj + "_" + t.Name
-			t.Name = toolName
-			a.tools[toolName] = t
-			slog.Info("registered agent skill", "project", proj, "tool", toolName)
-		}
+		a.loadManifest(filepath.Join(a.workDir, proj, "mcp.json"), proj)
 	}
 
-	// Always inject the internal dogfooding tool: delightd_trigger_backup
-	a.tools["delightd_trigger_backup"] = Tool{
-		Name:        "delightd_trigger_backup",
-		Description: "Manually trigger an immediate backup for a specific project.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"project":{"type":"string","description":"Name of the project to backup"}},"required":["project"]}`),
-		Handler: HandlerDef{
-			Type:   "internal",
-			Method: "backup",
-		},
+	// delightd's own tools come from its baked mcp.json, dogfooding the fleet contract
+	// rather than a hardcoded injection. Absent path or file -> no self-tools (fail soft).
+	if a.selfManifest != "" {
+		a.loadManifest(a.selfManifest, "delightd")
 	}
 
 	return nil
+}
+
+// loadManifest reads one mcp.json and registers its tools under prefix (namespaced
+// prefix_tool). A missing file is silent; an unreadable or malformed one is logged and
+// skipped, so one bad manifest never breaks the aggregate. Caller holds a.mu.
+func (a *Aggregator) loadManifest(path, prefix string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("failed to read mcp.json", "source", prefix, "path", path, "error", err)
+		}
+		return
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		slog.Warn("invalid mcp.json syntax", "source", prefix, "path", path, "error", err)
+		return
+	}
+	for _, t := range manifest.Tools {
+		toolName := prefix + "_" + t.Name
+		t.Name = toolName
+		a.tools[toolName] = t
+		slog.Info("registered agent skill", "source", prefix, "tool", toolName)
+	}
 }
 
 // GetTools returns a copy of all registered tools

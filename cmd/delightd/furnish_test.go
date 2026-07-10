@@ -1,46 +1,17 @@
 package main
 
 import (
-	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"reflect"
+	"strings"
 	"testing"
 )
 
-// writeAggregator lays down a minimal kube/ fixture: an aggregator declaring
-// the given pieces. The piece directories themselves are not created --
-// furnish trusts the declaration and lets kubectl fail on a missing dir,
-// which is exactly the production contract.
-func writeAggregator(t *testing.T, pieces ...string) string {
-	t.Helper()
-	dir := t.TempDir()
-	body := "resources:\n"
-	for _, p := range pieces {
-		body += "  - " + p + "\n"
-	}
-	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(body), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	return dir
-}
-
-// recorder is the test-side furnishRunner: it captures every kubectl argv and
-// plays back a canned response, the same pattern as the events produce seam.
-type recorder struct {
-	calls [][]string
-	out   []byte
-	err   error
-}
-
-func (r *recorder) run(_ context.Context, args ...string) ([]byte, error) {
-	r.calls = append(r.calls, args)
-	return r.out, r.err
-}
-
-// execFurnish runs the furnish command tree against a recorder, silencing
-// the JSON that printJSON writes to stdout so test output stays readable.
-func execFurnish(t *testing.T, rec *recorder, args ...string) error {
+// execFurnish runs the furnish command tree with stdout silenced (the relayed JSON would
+// clutter test output) and returns the command error, which carries the exit semantics.
+func execFurnish(t *testing.T, args ...string) error {
 	t.Helper()
 	old := os.Stdout
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -50,92 +21,77 @@ func execFurnish(t *testing.T, rec *recorder, args ...string) error {
 	os.Stdout = devnull
 	defer func() { os.Stdout = old; devnull.Close() }()
 
-	cmd := newFurnishCmd(rec.run)
+	cmd := furnishCmd()
 	cmd.SetArgs(args)
 	return cmd.Execute()
 }
 
-func TestPiecesReadsTheDeclaration(t *testing.T) {
-	dir := writeAggregator(t, "alpha", "beta")
-	got, err := pieces(dir)
-	if err != nil {
-		t.Fatalf("pieces: %v", err)
-	}
-	if want := []string{"alpha", "beta"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("pieces = %v, want %v", got, want)
-	}
+// daemonStub stands in for the control port, recording the method+path it was hit with and
+// answering with a fixed status/body.
+func daemonStub(t *testing.T, status int, body string) (addr string, seen *struct{ method, path string }) {
+	t.Helper()
+	seen = &struct{ method, path string }{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.method, seen.path = r.Method, r.URL.Path
+		w.WriteHeader(status)
+		fmt.Fprintln(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://"), seen
+}
 
-	if _, err := pieces(t.TempDir()); err == nil {
-		t.Error("pieces on a dir with no aggregator: want error, got nil")
+func TestFurnishCLI_ListHitsPieces(t *testing.T) {
+	addr, seen := daemonStub(t, http.StatusOK, `{"pieces":["delightd"]}`)
+	if err := execFurnish(t, "--control", addr, "list"); err != nil {
+		t.Fatalf("list: %v", err)
 	}
-	if _, err := pieces(writeAggregator(t)); err == nil {
-		t.Error("pieces on an empty declaration: want error, got nil")
+	if seen.method != http.MethodGet || seen.path != "/furnish/pieces" {
+		t.Errorf("list hit %s %s, want GET /furnish/pieces", seen.method, seen.path)
 	}
 }
 
-func TestUpAppliesTheDeclaredPiece(t *testing.T) {
-	dir := writeAggregator(t, "surrealdb")
-	rec := &recorder{out: []byte("deployment.apps/surrealdb configured\n")}
-	if err := execFurnish(t, rec, "--kube", dir, "up", "surrealdb"); err != nil {
+func TestFurnishCLI_UpAndDownPost(t *testing.T) {
+	addr, seen := daemonStub(t, http.StatusOK, `{"applied":true}`)
+	if err := execFurnish(t, "--control", addr, "up", "surrealdb"); err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	want := []string{"apply", "-k", filepath.Join(dir, "surrealdb")}
-	if len(rec.calls) != 1 || !reflect.DeepEqual(rec.calls[0], want) {
-		t.Errorf("kubectl argv = %v, want [%v]", rec.calls, want)
+	if seen.method != http.MethodPost || seen.path != "/furnish/surrealdb/up" {
+		t.Errorf("up hit %s %s, want POST /furnish/surrealdb/up", seen.method, seen.path)
 	}
-}
-
-func TestDownDeletesIgnoringAbsent(t *testing.T) {
-	dir := writeAggregator(t, "surrealdb")
-	rec := &recorder{out: []byte("")}
-	if err := execFurnish(t, rec, "--kube", dir, "down", "surrealdb"); err != nil {
+	if err := execFurnish(t, "--control", addr, "down", "surrealdb"); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	want := []string{"delete", "-k", filepath.Join(dir, "surrealdb"), "--ignore-not-found=true"}
-	if len(rec.calls) != 1 || !reflect.DeepEqual(rec.calls[0], want) {
-		t.Errorf("kubectl argv = %v, want [%v]", rec.calls, want)
+	if seen.path != "/furnish/surrealdb/down" {
+		t.Errorf("down hit %s, want /furnish/surrealdb/down", seen.path)
 	}
 }
 
-func TestUnknownPieceIsRefusedBeforeKubectl(t *testing.T) {
-	dir := writeAggregator(t, "delightd")
-	rec := &recorder{}
-	if err := execFurnish(t, rec, "--kube", dir, "up", "ghost"); err == nil {
-		t.Fatal("up ghost: want error, got nil")
+func TestFurnishCLI_HealthPiecePath(t *testing.T) {
+	addr, seen := daemonStub(t, http.StatusOK, `{"healthy":true}`)
+	if err := execFurnish(t, "--control", addr, "health", "kafka"); err != nil {
+		t.Fatalf("health: %v", err)
 	}
-	if len(rec.calls) != 0 {
-		t.Errorf("kubectl was invoked for an undeclared piece: %v", rec.calls)
+	if seen.path != "/furnish/health/kafka" {
+		t.Errorf("health kafka hit %s, want /furnish/health/kafka", seen.path)
 	}
 }
 
-func TestHealthLadder(t *testing.T) {
-	dir := writeAggregator(t, "delightd")
-
-	ready := []byte(`{"items":[
-		{"kind":"Deployment","metadata":{"name":"delightd"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
-		{"kind":"Service","metadata":{"name":"delightd"}}]}`)
-	if err := execFurnish(t, &recorder{out: ready}, "--kube", dir, "health"); err != nil {
-		t.Errorf("health on a ready piece: %v", err)
+func TestFurnishCLI_UnhealthyExitsNonZero(t *testing.T) {
+	// A 503 (a RED or INDETERMINATE piece) must surface as a non-zero exit, so the
+	// wrapper or an agent gates on it -- the body is still relayed for the operator.
+	addr, _ := daemonStub(t, http.StatusServiceUnavailable, `{"healthy":false}`)
+	if err := execFurnish(t, "--control", addr, "health"); err == nil {
+		t.Error("health against a 503 daemon: want non-nil error (non-zero exit)")
 	}
+}
 
-	unready := []byte(`{"items":[
-		{"kind":"Deployment","metadata":{"name":"delightd"},"spec":{"replicas":2},"status":{"readyReplicas":0}}]}`)
-	if err := execFurnish(t, &recorder{out: unready}, "--kube", dir, "health"); err == nil {
-		t.Error("health on an unready piece: want non-nil error (RED exits non-zero)")
-	}
-
-	// StatefulSets are gated the same as Deployments: the relocated bus/store
-	// pieces (kafka, zookeeper, elasticsearch) are StatefulSets, so a not-ready
-	// one must go RED, not GREEN-by-existence.
-	stsUnready := []byte(`{"items":[
-		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":0}}]}`)
-	if err := execFurnish(t, &recorder{out: stsUnready}, "--kube", dir, "health"); err == nil {
-		t.Error("health on an unready StatefulSet: want non-nil error (RED exits non-zero)")
-	}
-
-	stsReady := []byte(`{"items":[
-		{"kind":"StatefulSet","metadata":{"name":"kafka"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}`)
-	if err := execFurnish(t, &recorder{out: stsReady}, "--kube", dir, "health"); err != nil {
-		t.Errorf("health on a ready StatefulSet: %v", err)
+func TestFurnishCLI_DaemonDownIsNamed(t *testing.T) {
+	// Nothing listening: the error names the likely cause rather than a bare dial error.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	err := execFurnish(t, "--control", addr, "list")
+	if err == nil || !strings.Contains(err.Error(), "delightd") {
+		t.Errorf("daemon-down error should name delightd: %v", err)
 	}
 }

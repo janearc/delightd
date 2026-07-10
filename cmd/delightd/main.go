@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,7 @@ import (
 	"delightd/pkg/events"
 	"delightd/pkg/exports"
 	"delightd/pkg/httpapi"
+	"delightd/pkg/kube"
 	"delightd/pkg/metrics"
 	"delightd/pkg/registry"
 	"delightd/pkg/skills"
@@ -65,6 +67,40 @@ func main() {
 	}
 }
 
+// controlTokenPath resolves where the control-port bearer is mounted: beside the kubeconfig
+// the wrapper delivers into the creds mount. KUBECONFIG points at that mount
+// (/run/delightd/kubeconfig in the container), so the token sits at its sibling
+// control-token. With KUBECONFIG unset it falls back to the mount's canonical path.
+// DELIGHT_CONTROL_TOKEN_PATH overrides both (a non-standard layout, and tests).
+func controlTokenPath() string {
+	if p := os.Getenv("DELIGHT_CONTROL_TOKEN_PATH"); p != "" {
+		return p
+	}
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		return filepath.Join(filepath.Dir(kc), "control-token")
+	}
+	return "/run/delightd/control-token"
+}
+
+// loadControlToken reads and trims the control-port bearer from path. A missing or empty file
+// is not fatal: it returns nil (the gated routes then serve 503) and logs one loud structured
+// error so a boot without the token is visible, never silent. The token value is never logged.
+func loadControlToken(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		slog.Error("control token not provisioned: bearer-gated routes (mutations, /mcp) will serve 503 until it is mounted; reads and readiness stay open",
+			"path", path, "error", err)
+		return nil
+	}
+	tok := bytes.TrimSpace(raw)
+	if len(tok) == 0 {
+		slog.Error("control token file is present but empty: bearer-gated routes (mutations, /mcp) will serve 503; reads and readiness stay open",
+			"path", path)
+		return nil
+	}
+	return tok
+}
+
 // rootCmd is the delightd command tree. The daemon is the default action; cobra
 // keeps subcommand and flag parsing declarative instead of hand-rolled. `lint` is
 // the first subcommand (`register`/`unregister` are the Phase 3 follow-up to #19).
@@ -83,6 +119,7 @@ func rootCmd() *cobra.Command {
 	cmd.AddCommand(lintCmd())
 	cmd.AddCommand(modelCmd())
 	cmd.AddCommand(furnishCmd())
+	cmd.AddCommand(healthcheckCmd())
 	return cmd
 }
 
@@ -130,6 +167,11 @@ func runDaemon(dryRun, immediate bool) error {
 	}
 
 	skillAggregator := skills.NewAggregator(monitorRoot)
+	// delightd dogfoods the skill contract: its own agent tools (furnish, backup, reset)
+	// are declared in the baked mcp.json under ConfigRoot, registered under the "delightd"
+	// namespace like any fleet project -- an agent drives delightd through the same MCP
+	// surface whether delightd runs on disk or in a container.
+	skillAggregator.SetSelfManifest(filepath.Join(cfg.System.ConfigRoot, "mcp.json"))
 
 	syncSkills := func() {
 		if !cfg.System.AgentSkills.Enabled {
@@ -373,6 +415,23 @@ func runDaemon(dryRun, immediate bool) error {
 	if emitPub != nil {
 		api.UseEvents(emitPub, cfg.System.Kafka.Topic, delightproto.NotRegisteredSchema)
 	}
+	// The /furnish operator surface: delightd converges the meubilair pieces in-process
+	// through one lazily-built, shared client-go handle (no client per request, no host
+	// binary). The manifest root is the baked kube/ aggregator under ConfigRoot; the
+	// client resolves the mounted kubeconfig on first use, so a missing one fails the
+	// routes loud (503) rather than the daemon at startup.
+	api.UseFurnish(filepath.Join(cfg.System.ConfigRoot, "kube", "kube"), kube.LazyClient())
+	// The control-port bearer: read once from the creds mount, beside the kubeconfig the
+	// wrapper delivers (KUBECONFIG points there; default /run/delightd/control-token). A
+	// missing or empty token does NOT stop startup -- the daemon comes up (availability
+	// mandate) and the bearer-gated routes serve 503 until it is provisioned. The value is
+	// never logged, only its path.
+	tokenPath := controlTokenPath()
+	controlToken := loadControlToken(tokenPath)
+	api.UseControlToken(controlToken)
+	// The MCP surface dispatches delightd's own mutating self-tools (furnish up/down, backup,
+	// reset) back to the bearer-gated control port, so it needs the same token to authenticate.
+	skillAggregator.UseControlToken(string(controlToken))
 	mux := api.Mux()
 
 	// Lease lifecycle (additive): a registration is held by a lease the frood's heartbeat
@@ -455,6 +514,14 @@ func runDaemon(dryRun, immediate bool) error {
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
+		// A client that connects and never finishes its headers must not hold a
+		// connection open forever; idle keep-alives are reaped on the same principle.
+		// Deliberately NO WriteTimeout: it starts counting at request read and would
+		// kill legitimately long responses -- a furnish up is allowed up to its 60s
+		// handler deadline (pkg/httpapi/furnish.go), which is the right bound: per
+		// operation, not per connection.
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

@@ -124,29 +124,34 @@ These govern where generated wrappers, shims, and the registry live:
 
 ## Kubernetes deployment
 
-delightd's environment is declared, not hand-assembled. Every piece runs from a
-manifest under **`kube/`**, one directory per piece: delightd's own workload in
-**`kube/delightd/`** (`deployment.yaml`, `service.yaml`, `kustomization.yaml`),
-namespace **`fleet`**, with the third-party furniture it depends on moving in
-under its own directory as it lands (see `meubilair.yaml`). A top-level
-`kube/kustomization.yaml` aggregates them.
+delightd's environment is declared, not hand-assembled. Every furnished piece
+runs from a manifest under **`kube/`**, one directory per piece (surrealdb,
+kafka, the rest of the furniture), namespace **`fleet`**. A top-level
+`kube/kustomization.yaml` aggregates them. delightd itself is deliberately
+**not** a piece: it is the operator, a host-level container (see Build and the
+wrapper), never a pod, never supervised by the fleet it operates. There are no
+in-cluster delightd manifests to render or deploy.
 
 Converging a cluster onto what these manifests declare is delightd's own job,
-through the `furnish` command: `furnish list` names the declared pieces (the
-aggregator's resources list is the declaration — a directory not listed there
-does not exist to furnish), `furnish up <piece>` converges one piece onto its
-manifests, `furnish down <piece>` removes it (absent is success), and
-`furnish health [piece]` walks the ladder and exits non-zero on RED. Output is
-JSON. You drive delightd; you do not hand-run `kubectl` against the cluster —
-though furnish itself does: `kubectl` is a runtime requirement, checked
-fail-loud before any verb touches the cluster.
+through the `furnish` command: `delightd furnish list` names the declared
+pieces (the aggregator's resources list is the declaration — a directory not
+listed there does not exist to furnish), `delightd furnish up <piece>`
+converges one piece onto its manifests, `delightd furnish down <piece>`
+removes it (absent is success), and `delightd furnish health [piece]` walks
+the ladder and exits non-zero when any object is RED (observed unhealthy, or
+declared-but-absent) or INDETERMINATE (could not be read at all — transport,
+RBAC, or timeout). The two are labelled distinctly so you can tell a broken
+piece from an unreachable one, and one unreadable object does not blind the
+rest of the piece. Output is JSON. You drive delightd; you do not hand-run
+`kubectl` against the cluster — and neither does furnish: it speaks to the
+apiserver through client-go, so no `kubectl` binary is required.
 
 To check that the manifests build — no cluster, no API server contact — render
 them locally with kustomize:
 
 ```bash
-kubectl kustomize kube/           # the whole environment
-kubectl kustomize kube/delightd/  # just the daemon
+kubectl kustomize kube/            # the whole environment
+kubectl kustomize kube/surrealdb/  # one piece in isolation
 ```
 
 When the machine itself has just come back — a reboot, an OS upgrade, a power
@@ -159,33 +164,45 @@ the commands above are useful until it has run.
 | Mount | Path in container | Mode | Why |
 |-------|-------------------|------|-----|
 | host `~/work` | `/work` | **read-only** | git-state source; delightd reads project trees, never writes them |
-| host `~/etc/delightd` | `/etc/delightd` | read-only | `delight.yaml` + registry |
 | host `~/var` | `/var` | read-write | the one write surface: backups, `/var/bin`, traefik dynamic |
+| creds dir (wrapper-managed, under `$HOME`) | `/run/delightd` | **read-only** | credentials delivered at runtime: the credential-less `kubeconfig`, the k8s `token` it points `tokenFile` at, and `control-token` (the control-port bearer). None of these are baked into the image or set as env/argv; the wrapper's `resolve_creds` writes them atomically and this is the only mount that carries a secret. |
 
-`/work` is **read-only by contract** — delightd observes git state, it does not
-own the working trees. The roots map onto the mounts: `DELIGHT_MONITOR_ROOT=/work`
+`delight.yaml`, the registry, and the `kube/` manifest tree are **not** a mount
+— they are baked into the image at build time (see Build below) so a running
+orchestrator is pinned to its image, not to a mutable host path. `/work` is
+**read-only by contract** — delightd observes git state, it does not own the
+working trees. The roots map onto the mounts: `DELIGHT_MONITOR_ROOT=/work`
 (read-only git-state source), `DELIGHT_DAEMON_ROOT=/var` and
 `DELIGHT_BACKUPS_ROOT=/var/backups` (the `/var` write surface),
-`DELIGHT_CONFIG_ROOT=/etc/delightd`. Backups land on `/var`, never under the
-read-only `/work`. (An earlier compose set a single `DELIGHT_SYSTEM_ROOT` that
-both overloaded the path and, on `/work/backups`, needed `/work` writable; the
-split roots remove both problems.)
+`DELIGHT_CONFIG_ROOT=/etc/delightd` (the baked config tree, not a mount).
+Backups land on `/var`, never under the read-only `/work`.
 
 ### Other deployment facts
 
-- **Port.** Container port `control` = `8088`; the `Service` (ClusterIP) exposes
-  the same. In-cluster consumers (fleet-svc) address delightd by Service name;
-  edge traffic reaches it through traefik, not a NodePort.
-- **Probes.** Readiness and liveness both `httpGet /health` on the `control`
-  port.
-- **User.** Runs as the host engineer's UID/GID (`1000`) so archives and shims it
-  writes under `/var` stay host-owned, never root.
-- **RBAC.** None. delightd does not call the Kubernetes API (no client-go); do
-  not grant it a ServiceAccount role.
-- **Image.** `delightd-delightd:latest` — the name this manifest deploys. The image
-  build is not on main right now: delightd currently runs as the host daemon (see
-  Build below), and containerization is being brought up separately. Do not expect to
-  build this image from main today.
+- **Port.** Container port `control` = `8088`; `docker-compose.yml` publishes
+  it as `127.0.0.1:8088` on the host, and the container is reachable on its
+  container networks (`dev-fleet`, `ring0`) and through the traefik edge route.
+  There is no Kubernetes Service for delightd -- it is not a pod.
+- **Probes.** The image carries a Dockerfile `HEALTHCHECK` running
+  `delightd healthcheck` (an exec-form self-probe of `GET /readyz`; the
+  scratch image has no shell or curl). Green means the roots are mounted and
+  the apiserver is reachable, not merely that a process exists.
+- **User.** The container runs as root (no `user:` override in
+  `docker-compose.yml`). On colima's virtiofs share, a non-root container UID
+  does not map onto the host engineer's ownership of the `/var` write mount,
+  so writes fail; root is the reliable execution user. This is
+  container-namespaced root, not host root, and it is compensated: the
+  container runs `read_only: true` (locks the image's own layers and
+  anything not named under `volumes:`), `cap_drop: [ALL]` (a Go daemon
+  speaking HTTP + the k8s API needs no Linux capability), and
+  `security_opt: [no-new-privileges:true]`. See `docker-compose.yml` for the
+  per-write-path accounting (every path the daemon writes resolves under the
+  `/var` mount) that justifies `read_only` costing nothing functional.
+- **API access.** delightd calls the Kubernetes API via client-go — `furnish`
+  converges the meubilair pieces with kustomize + server-side apply and reads their
+  health (see `docs/kubernetes-access.md`). It needs a kubeconfig whose identity can
+  read and apply the fleet's objects; as the host-level operator it uses the operator's
+  kubeconfig, not an in-cluster ServiceAccount.
 
 ## Build
 
@@ -202,26 +219,36 @@ task e2e-registration  # prove the magpie->delightd registration seam end to end
 
 ## Install from a checkout
 
+delightd runs as a host-level container now, not an on-disk Go binary.
 `scripts/install.sh` brings a checkout up to date (or clones it if absent),
-builds the daemon, and links the binary onto `$HOME/var/bin/delightd`. It is
-idempotent and takes no hand steps -- no prompts, no sudo, and nothing over the
-network but git. Override the checkout path with `DELIGHTD_SRC` (default
-`$HOME/work/delightd`).
+builds the container image, and symlinks the `delightd` wrapper
+(`scripts/delightd` — the SRE front door: `start`/`stop`/`logs`/`status`,
+everything else forwarded to the control port) onto `$HOME/var/bin/delightd`.
+It is idempotent and takes no hand steps — no prompts, no sudo, and nothing
+over the wire but git and the image build. Override the checkout path with
+`DELIGHTD_SRC` (default `$HOME/work/delightd`).
 
 ```bash
 scripts/install.sh
 ```
 
-It requires the `task` + `buf` toolchain (and Go) and fails loud naming
-whichever is missing: the Go bindings are generated at build time and never
-committed (see Proto ownership in [docs/events.md](events.md)), so there is no
-honest build path without the toolchain on a fresh clone.
+It requires **docker** and **git** on the host — nothing else. The image
+builds its own Go/buf toolchain inside the builder stage (see the
+[Dockerfile](../Dockerfile)), so there is no separate host toolchain to
+install or keep in sync.
+
+On a clean checkout there is no `.env` yet. `scripts/install.sh` bootstraps one from
+`.env.example`, prints what to fill in for this machine (the mount roots, the
+1Password vault reference, cluster access), and **stops** — `.env`'s
+placeholder paths are wrong for any real machine, and the install refuses to
+build against them rather than silently mounting garbage on a later
+`delightd start`. Fill in `.env` and rerun `scripts/install.sh` to complete the build.
 
 ## Removed and stale
 
 | Removed | Replacement |
 |---------|-------------|
-| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | `kube/delightd/` manifests (namespace `fleet`, `:8088`, live) |
+| `k8s/delightd.yaml` (namespace `dev-fleet`, old port, `--dry-run`) | the host-level operator container behind the wrapper (`:8088`, live); `kube/` holds only the furnished pieces, never delightd |
 | `envoy.yaml` (abandoned proxy path) | traefik is the single edge; no Envoy |
 
 Both were deleted in this docs rewrite. The Envoy/"dual proxy profile"
