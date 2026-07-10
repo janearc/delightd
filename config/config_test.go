@@ -44,7 +44,7 @@ func TestResolveRootsDefaults(t *testing.T) {
 	var s SystemConfig
 	s.ResolveRoots()
 
-	wantMonitor := filepath.Join(home, "work")
+	wantMonitor := filepath.Join(home, "mesh", "prod")
 	wantDaemon := filepath.Join(home, "var")
 	wantBackups := filepath.Join(home, "var", "backups")
 	wantConfig := filepath.Join(home, "etc")

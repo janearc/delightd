@@ -53,7 +53,7 @@ type SystemConfig struct {
 
 	// MonitorRoot is the tree delightd watches: the parent of the managed
 	// projects' git working trees (read-only in container deployments). yaml
-	// key system.monitor_root, env DELIGHT_MONITOR_ROOT, default ~/work.
+	// key system.monitor_root, env DELIGHT_MONITOR_ROOT, default ~/mesh/prod.
 	MonitorRoot string `mapstructure:"monitor_root"`
 	// DaemonRoot is delightd's own runtime/state tree (pid file, exports, the
 	// backups directory). yaml key system.daemon_root, env DELIGHT_DAEMON_ROOT,
@@ -79,7 +79,7 @@ type SystemConfig struct {
 // current user's home. They are package-level so tests and deployment docs can
 // reference the single source.
 const (
-	DefaultMonitorRoot = "~/work"
+	DefaultMonitorRoot = "~/mesh/prod"
 	DefaultDaemonRoot  = "~/var"
 	DefaultConfigRoot  = "~/etc"
 )
