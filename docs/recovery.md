@@ -179,6 +179,32 @@ obs-svc-agg, paling-sidecar) are workloads deployed from their own repos;
 Running status in this listing is their recovery check, and anything deeper
 belongs to those repos' docs.
 
+## What happened when we were last there (2026-07-10, first cold bring-up of the container)
+
+The sprint-15 capstone run: first `install.sh` on a machine that had never run
+the containerized delightd, then the recovery proof — bounce the operator,
+raise the canary from down, restart the datastore underneath it. The estate
+ended green across all eight pieces (29 resources). Everything below was found
+live; each is fixed or filed, nothing is pending silently.
+
+| Found | Fix | Time cost |
+|-------|-----|-----------|
+| 1Password had self-updated; the stale pre-update process serves no CLI socket, so every `op read` died at the handshake | quit and relaunch the app — `--just-updated --should-restart` on the running process is the tell | minutes |
+| `delightd-control-token` existed in code but not in the vault: B2 shipped the auth path and nobody cut the credential | `op item create --category "API Credential" --title delightd-control-token --vault Personal credential=<random>`; the missing docs passage is issue 116 | minutes |
+| `install.sh` died building the image: compose interpolates runtime mounts even for `build`, and the `:?` guard on `DELIGHT_CREDS_DIR` fired | export the wrapper's own default before the build (issue 114, PR 115) | minutes |
+| the canary (`good-citizen-dummy`) could not come back from zero replicas: its image lived only in the node's cache, the cache had let it go, and docker.io has never heard of it — ImagePullBackOff | `k3d image import good-citizen-dummy:v1 -c fleet`; the durable fix is a registry the cluster can actually pull from | minutes |
+| surrealdb had never been furnished on this cluster (no PVC), and `furnish health` aborted the whole estate report on that one error — issue 96, observed live | `delightd furnish up surrealdb` | seconds |
+| the roster is invisible from the wrapper; the only inspection path is curl against `:8088/projects` | filed as issue 117 | n/a |
+| the `~/var/bin/delightd` symlink vanished mid-session, cause unknown | re-linked; watch for a repeat | seconds |
+
+The proof itself, for the record: the operator container survives its own
+`stop`/`start` (readyz 200, both checks green on return); a canary scaled to
+zero comes back Running through the restarted operator; surrealdb keeps its PV
+identity and its rocksdb tree across a `rollout restart` and reports GREEN
+after. Writes to surrealdb are 403 today by design — no root user is
+configured, and write-path auth belongs to the schemaless-datastore work — so
+its durability proof is storage-level, not query-level.
+
 ## What happened when we were last there (2026-07-05, macOS 26 -> 27)
 
 | Found | Fix | Time cost |
@@ -191,11 +217,20 @@ belongs to those repos' docs.
 
 ## Known gaps, named
 
-- **No supervision**: delightd has no launchd/kube-managed lifecycle on this
-  machine; step 4 is manual until that lands. The enablement state home
-  (`/state`) exists precisely so the fleet can record intent that survives
-  these gaps.
-- **Cold bring-up is unvalidated**: this document recovers a machine that
-  was already configured. A from-nothing machine follows
-  `scripts/install.sh`, which has not yet been executed on truly cold
-  hardware.
+- **Supervision reaches the container, not the runtime**: docker restarts the
+  daemon container on its own (`restart: unless-stopped` in the compose file),
+  so a crashed delightd comes back without a human. What does not come back on
+  its own is colima after a reboot or logout — until colima has a startup
+  hook, the first `delightd start` after a boot is manual. The enablement
+  state home (`/state`) exists precisely so the fleet can record intent that
+  survives these gaps.
+- **Cold bring-up validated 2026-07-10**, findings tabled above. The full
+  prerequisite set for a from-nothing machine is `scripts/install.sh`, a
+  machine-true `.env`, and two 1Password items (`delightd-k8s-token`,
+  `delightd-control-token`). Issue 116 tracks getting the second item's
+  provisioning into the docs a fresh operator actually follows.
+- **Locally built images are unrecoverable by the cluster**: anything running
+  from an image that was only ever `k3d image import`-ed (today: the
+  good-citizen-dummy canary) cannot survive a reschedule once the node cache
+  drops it — the cluster has nowhere to pull from. Re-import is the recovery
+  move; a registry the cluster can reach is the fix.
