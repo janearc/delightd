@@ -41,6 +41,10 @@ func TestResolveRootsDefaults(t *testing.T) {
 		t.Fatalf("resolve home: %v", err)
 	}
 
+	// The install-root chain must not leak in from the invoking environment.
+	t.Setenv("DELIGHT_INSTALL_ROOT", "")
+	os.Unsetenv("DELIGHT_INSTALL_ROOT")
+
 	var s SystemConfig
 	s.ResolveRoots()
 
@@ -60,6 +64,27 @@ func TestResolveRootsDefaults(t *testing.T) {
 	}
 	if s.ConfigRoot != wantConfig {
 		t.Errorf("ConfigRoot: want %q, got %q", wantConfig, s.ConfigRoot)
+	}
+}
+
+// TestResolveRootsInstallRoot verifies the one-variable relocation contract:
+// with monitor_root unset in yaml/env, DELIGHT_INSTALL_ROOT alone moves the
+// monitored tree -- an /opt or /usr/local fleet never has to agree with the
+// compiled-in home layout. An explicit MonitorRoot still wins over it.
+func TestResolveRootsInstallRoot(t *testing.T) {
+	t.Setenv("DELIGHT_INSTALL_ROOT", "/opt/fleet")
+
+	var s SystemConfig
+	s.ResolveRoots()
+	if s.MonitorRoot != "/opt/fleet" {
+		t.Errorf("MonitorRoot from DELIGHT_INSTALL_ROOT: want %q, got %q", "/opt/fleet", s.MonitorRoot)
+	}
+
+	var explicit SystemConfig
+	explicit.MonitorRoot = "/srv/estate"
+	explicit.ResolveRoots()
+	if explicit.MonitorRoot != "/srv/estate" {
+		t.Errorf("explicit MonitorRoot must beat the install root: want %q, got %q", "/srv/estate", explicit.MonitorRoot)
 	}
 }
 

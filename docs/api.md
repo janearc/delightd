@@ -225,7 +225,7 @@ roster and fleet reads it instead of parsing `WorkstationConfig.yaml` (see
   "projects": [
     {
       "name": "paling",
-      "path": "~/work/paling",
+      "path": "~/mesh/prod/paling",
       "essential": false,
       "deploy": { "kind": "launchd", "command": ["uv", "run", "paling", "launchagent", "install"] },
       "remote_url": "git@github.com:janearc/paling.git"

@@ -47,13 +47,14 @@ type SystemConfig struct {
 	// tree the daemon monitors is not where it keeps its own runtime state, and
 	// where it writes backups is a single directory under that state tree, not the
 	// state tree itself. Each is independently configurable (env + yaml) like a
-	// ./configure --prefix; see DefaultMonitorRoot/DefaultDaemonRoot/
+	// ./configure --prefix; see DefaultInstallRoot/DefaultDaemonRoot/
 	// DefaultConfigRoot and ResolveRoots for the defaults and the BackupsRoot
 	// derivation.
 
 	// MonitorRoot is the tree delightd watches: the parent of the managed
 	// projects' git working trees (read-only in container deployments). yaml
-	// key system.monitor_root, env DELIGHT_MONITOR_ROOT, default ~/mesh/prod.
+	// key system.monitor_root, env DELIGHT_MONITOR_ROOT; when neither is set
+	// the default is DELIGHT_INSTALL_ROOT, else DefaultInstallRoot.
 	MonitorRoot string `mapstructure:"monitor_root"`
 	// DaemonRoot is delightd's own runtime/state tree (pid file, exports, the
 	// backups directory). yaml key system.daemon_root, env DELIGHT_DAEMON_ROOT,
@@ -78,8 +79,13 @@ type SystemConfig struct {
 // Default roots, expressed with a leading ~ which ResolveRoots expands to the
 // current user's home. They are package-level so tests and deployment docs can
 // reference the single source.
+//
+// DefaultInstallRoot seeds MonitorRoot when neither yaml nor DELIGHT_MONITOR_ROOT
+// set it -- and DELIGHT_INSTALL_ROOT overrides the constant, so an operator whose
+// fleet lives under /opt or /usr/local moves it with ONE variable instead of
+// agreeing with this file's idea of a home layout.
 const (
-	DefaultMonitorRoot = "~/mesh/prod"
+	DefaultInstallRoot = "~/mesh/prod"
 	DefaultDaemonRoot  = "~/var"
 	DefaultConfigRoot  = "~/etc"
 )
@@ -92,7 +98,11 @@ const (
 // resolved DaemonRoot, so DaemonRoot is settled first.
 func (s *SystemConfig) ResolveRoots() {
 	if s.MonitorRoot == "" {
-		s.MonitorRoot = DefaultMonitorRoot
+		if ir := os.Getenv("DELIGHT_INSTALL_ROOT"); ir != "" {
+			s.MonitorRoot = ir
+		} else {
+			s.MonitorRoot = DefaultInstallRoot
+		}
 	}
 	if s.DaemonRoot == "" {
 		s.DaemonRoot = DefaultDaemonRoot

@@ -119,7 +119,7 @@ overrides are `DELIGHT_SYSTEM_KAFKA_BROKERS`,
 
 ## Proto ownership
 
-The `.proto` is **vendored from kafka-svc** (`~/work/kafka-logging/proto`), the
+The `.proto` is **vendored from kafka-svc** (`~/mesh/prod/kafka-logging/proto`), the
 single source of truth. delightd pins a copy under `proto/` and generates Go
 bindings at build time; the bindings are never committed. Refresh with
 `task sync-proto && task generate`. See [proto/README.md](../proto/README.md).
