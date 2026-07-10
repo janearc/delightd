@@ -106,7 +106,8 @@ The exports engine reads the registry at `DELIGHT_EXPORTS_REGISTRY` (code defaul
 `~/etc/delight-registry.yaml`; the kube deployment sets
 `/etc/delightd/delight-registry.yaml`). From it the daemon generates docker shim
 scripts (`<bin>.sh`) under the exports state dir and symlinks them into
-`~/var/bin`, alongside static binaries it finds in `~/work/<project>/bin/`.
+`~/var/bin`, alongside static binaries it finds in `<fleet root>/<project>/bin/`
+(e.g. `~/mesh/prod/<project>/bin/`).
 
 > Path note. The code default registry path is `~/etc/delight-registry.yaml`; the
 > deployed path under kube is `/etc/delightd/delight-registry.yaml`. These differ;

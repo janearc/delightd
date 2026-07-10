@@ -32,7 +32,8 @@ explicitly to relocate backups independently of the rest of the state tree.
 
 > Path note. `backups_root` is the destination directory itself; the daemon never
 > appends a further `/backups`. The path is `~/var/backups`, never
-> `~/var/backups/backups` and never under the read-only `~/work`. (This replaced
+> `~/var/backups/backups` and never under the read-only monitored tree
+> (`~/mesh/prod` here). (This replaced
 > an earlier overloaded `system.root` whose `+ "/backups"` join could double the
 > segment.)
 
@@ -76,7 +77,7 @@ so a config of `exclude: ["models"]` catches it wherever it sits.
 ```yaml
 projects:
   - name: comfyui
-    path: ~/work/comfyui
+    path: ~/mesh/prod/comfyui
     backup:
       check_interval: "30m"
       exclude:

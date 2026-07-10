@@ -10,11 +10,14 @@
 # deliberate, bounded exception: delightd is the operator/front door, and nothing it
 # manages gets a wrapper like this.
 #
-# Env: DELIGHT_CONTROL_ADDR (default 127.0.0.1:8088), DELIGHTD_SRC (the checkout that holds
-# docker-compose.yml; default $HOME/work/delightd).
+# Env: DELIGHT_CONTROL_ADDR (default 127.0.0.1:8088), DELIGHT_INSTALL_ROOT (where the
+# fleet's checkouts live; default $HOME/mesh/prod -- /opt, /usr/local, wherever),
+# DELIGHTD_SRC (the checkout that holds docker-compose.yml; default
+# $DELIGHT_INSTALL_ROOT/delightd).
 set -euo pipefail
 
-SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+INSTALL_ROOT="${DELIGHT_INSTALL_ROOT:-$HOME/mesh/prod}"
+SRC="${DELIGHTD_SRC:-$INSTALL_ROOT/delightd}"
 
 # Per-workstation config lives in a gitignored .env in the checkout (the 1Password
 # credential reference, the apiserver URL, the CA path, the mount roots), so you set it

@@ -112,7 +112,7 @@ config:
 
 ```yaml
 system:
-  monitor_root: "~/work"   # tree delightd monitors (managed projects)
+  # monitor_root deliberately unset -- default $DELIGHT_INSTALL_ROOT, else ~/mesh/prod
   daemon_root: "~/var"     # delightd's own runtime/state tree
   # backups_root defaults to ${daemon_root}/backups -> ~/var/backups
   config_root: "~/etc"     # config + registry resolution dir
@@ -129,7 +129,7 @@ system:
 
 projects:
   - name: "paling"
-    path: "~/work/paling"
+    path: "~/mesh/prod/paling"
     backup:
       check_interval: "15m"
       rotation:

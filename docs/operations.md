@@ -19,7 +19,7 @@ vars and defaults.
 
 ```yaml
 system:
-  monitor_root: "~/work"                 # tree delightd monitors (managed projects)
+  # monitor_root deliberately unset -- default $DELIGHT_INSTALL_ROOT, else ~/mesh/prod
   daemon_root: "~/var"                   # delightd's own runtime/state tree
   # backups_root defaults to ${daemon_root}/backups; set to relocate backups
   # backups_root: "~/var/backups"
@@ -42,7 +42,7 @@ system:
 
 projects:
   - name: "paling"
-    path: "~/work/paling"
+    path: "~/mesh/prod/paling"
     backup:
       check_interval: "15m"              # Go duration string
       rotation:
@@ -53,7 +53,7 @@ projects:
 
 | Key | Type | Meaning |
 |-----|------|---------|
-| `system.monitor_root` | path | the tree delightd monitors (parent of the managed projects' git trees); canonical `~/work` |
+| `system.monitor_root` | path | the tree delightd monitors (parent of the managed projects' git trees); default `$DELIGHT_INSTALL_ROOT`, else `~/mesh/prod` |
 | `system.daemon_root` | path | delightd's own runtime/state tree; canonical `~/var` |
 | `system.backups_root` | path | the backup destination directory itself (no `/backups` appended); defaults to `${daemon_root}/backups`, set to relocate backups independently |
 | `system.config_root` | path | config + registry resolution dir; canonical `~/etc` |
@@ -87,7 +87,8 @@ present:
 
 | Variable | Overrides | Default |
 |----------|-----------|---------|
-| `DELIGHT_MONITOR_ROOT` | `system.monitor_root` | `~/work` |
+| `DELIGHT_MONITOR_ROOT` | `system.monitor_root` | `$DELIGHT_INSTALL_ROOT`, else `~/mesh/prod` |
+| `DELIGHT_INSTALL_ROOT` | seeds `system.monitor_root`'s default | `~/mesh/prod` -- relocates the whole host fleet layout with one variable |
 | `DELIGHT_DAEMON_ROOT` | `system.daemon_root` | `~/var` |
 | `DELIGHT_BACKUPS_ROOT` | `system.backups_root` | `${DELIGHT_DAEMON_ROOT}/backups` |
 | `DELIGHT_CONFIG_ROOT` | `system.config_root` | `~/etc` |
@@ -163,7 +164,7 @@ the commands above are useful until it has run.
 
 | Mount | Path in container | Mode | Why |
 |-------|-------------------|------|-----|
-| host `~/work` | `/work` | **read-only** | git-state source; delightd reads project trees, never writes them |
+| host `$DELIGHT_MONITOR_ROOT_HOST` (e.g. `~/mesh/prod`) | `/work` | **read-only** | git-state source; delightd reads project trees, never writes them |
 | host `~/var` | `/var` | read-write | the one write surface: backups, `/var/bin`, traefik dynamic |
 | creds dir (wrapper-managed, under `$HOME`) | `/run/delightd` | **read-only** | credentials delivered at runtime: the credential-less `kubeconfig`, the k8s `token` it points `tokenFile` at, and `control-token` (the control-port bearer). None of these are baked into the image or set as env/argv; the wrapper's `resolve_creds` writes them atomically and this is the only mount that carries a secret. |
 
@@ -214,7 +215,8 @@ task build             # generate, then go build -o bin/delightd ./cmd/delightd
 task test              # generate, then go test ./...
 task sync-proto        # re-vendor delight.v1 from kafka-svc, then run generate
 task e2e-registration  # prove the magpie->delightd registration seam end to end
-                       # (local-first: needs ~/work/magpie checked out and uv on PATH)
+                       # (local-first: needs magpie checked out under the fleet root
+                       # -- e.g. ~/mesh/prod/magpie -- and uv on PATH)
 ```
 
 ## Install from a checkout
@@ -226,7 +228,8 @@ builds the container image, and symlinks the `delightd` wrapper
 everything else forwarded to the control port) onto `$HOME/var/bin/delightd`.
 It is idempotent and takes no hand steps — no prompts, no sudo, and nothing
 over the wire but git and the image build. Override the checkout path with
-`DELIGHTD_SRC` (default `$HOME/work/delightd`).
+`DELIGHTD_SRC` (default `$DELIGHT_INSTALL_ROOT/delightd`, which itself
+defaults to `$HOME/mesh/prod/delightd`).
 
 ```bash
 scripts/install.sh

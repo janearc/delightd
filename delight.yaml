@@ -6,9 +6,11 @@ system:
   # deployments that relocate the layout -- the in-container paths come from the
   # compose/kube env, not these host defaults. A leading ~ expands to $HOME.
   #
-  #   monitor_root  DELIGHT_MONITOR_ROOT  default ~/work
+  #   monitor_root  DELIGHT_MONITOR_ROOT  default $DELIGHT_INSTALL_ROOT, else ~/mesh/prod
   #     The tree delightd monitors: the parent of the managed projects' git
   #     working trees. Read-only in the container deployments (git-state source).
+  #     Left unset here on purpose so DELIGHT_INSTALL_ROOT can govern -- a fleet
+  #     under /opt or /usr/local moves with that one variable.
   #   daemon_root   DELIGHT_DAEMON_ROOT   default ~/var
   #     delightd's own runtime/state tree (pid file, exports, the backups dir).
   #   backups_root  DELIGHT_BACKUPS_ROOT  default ${daemon_root}/backups
@@ -17,7 +19,7 @@ system:
   #     unset it derives from daemon_root; set it to relocate backups elsewhere.
   #   config_root   DELIGHT_CONFIG_ROOT   default ~/etc
   #     Where delightd resolves its configuration and registry.
-  monitor_root: "~/work"
+  # monitor_root deliberately unset -- see the chain above.
   daemon_root: "~/var"
   # backups_root left unset -> derives to ~/var/backups (${daemon_root}/backups).
   config_root: "~/etc"
@@ -49,7 +51,7 @@ system:
 
 projects:
   - name: "paling"
-    path: "~/work/paling"
+    path: "~/mesh/prod/paling"
     # Roster fields delightd now owns (the seam in docs/fleet-and-delightd.md):
     # the project's tier and how fleet rolls it. paling is the bare-metal eel --
     # `paling serve` needs Metal/MLX and cannot be a pod, so it deploys through a

@@ -8,9 +8,12 @@
 # no prompts, no sudo, no curl-pipe-to-shell. Only git and the image build touch the wire.
 set -euo pipefail
 
-# Where the checkout lives; override with DELIGHTD_SRC. BIN_DIR is overridable only for
-# tests (DELIGHTD_BIN_DIR) -- a real install always wants the standard bin surface.
-SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+# Where the checkout lives. DELIGHT_INSTALL_ROOT moves the whole fleet layout with one
+# variable (/opt, /usr/local, ~/mesh/prod); DELIGHTD_SRC overrides just this checkout.
+# BIN_DIR is overridable only for tests (DELIGHTD_BIN_DIR) -- a real install always
+# wants the standard bin surface.
+INSTALL_ROOT="${DELIGHT_INSTALL_ROOT:-$HOME/mesh/prod}"
+SRC="${DELIGHTD_SRC:-$INSTALL_ROOT/delightd}"
 REMOTE="git@github.com:janearc/delightd.git"
 BIN_DIR="${DELIGHTD_BIN_DIR:-$HOME/var/bin}"
 
