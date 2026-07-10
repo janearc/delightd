@@ -7,8 +7,11 @@ an emergency, because nothing is an emergency — the daemon fails closed and
 the state on disk keeps.
 
 Scope: bringing THIS machine's fleet back to serving. Cold bring-up of a new
-machine follows `scripts/install.sh`, validated 2026-07-10 (findings in the
-table below); its full prerequisite set is listed under known gaps.
+machine follows `scripts/install.sh`, validated live 2026-07-10. Its full
+prerequisite set, stated here because install.sh checks only some of it:
+docker+git on PATH, a machine-true `.env`, and two 1Password items --
+`delightd-k8s-token` and `delightd-control-token` (each an `op item create
+--category "API Credential"` per docs/kubernetes-access.md).
 
 The one rule, learned the hard way: **a thing listed is not a thing alive.**
 Ask the serving surface, not the inventory.
@@ -159,10 +162,10 @@ Two more failure modes seen in the field (2026-07-10):
   node cache dropped the image and the cluster has no registry to re-pull
   from. `k3d image import <image>:<tag> -c fleet` restores it.
 
-Furniture whose manifests still live in other repos (kafka, the elk stack)
-is inventoried in `meubilair.yaml` at the repo root. That file is a
-declarative index — nothing executes its probes yet — so turning an entry
-into a live check is on you, and the recipe is mechanical:
+Every piece's manifests live here under `kube/` (relocated from kafka-svc
+and obs-svc). `meubilair.yaml` at the repo root is the declarative probe
+index for the furniture — nothing executes its probes yet — so turning an
+entry into a live check is on you, and the recipe is mechanical:
 
 - an `httpGet` probe: port-forward the service, curl the path —
 
