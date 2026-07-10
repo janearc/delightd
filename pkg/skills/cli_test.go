@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -101,9 +102,9 @@ func TestGenerateCLIWrapper(t *testing.T) {
 // asserts the M4 contract (sprints#58): an HTTP failure is a nonzero exit with the body
 // still printed, a success is exit zero -- so an agent's tool call gates on health.
 func TestGeneratedCLIExitCodes(t *testing.T) {
-	var status int
+	var status atomic.Int32 // handler goroutine reads while the test goroutine flips it between requests
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(status)
+		w.WriteHeader(int(status.Load()))
 		w.Write([]byte(`{"status":"body-survives"}`))
 	}))
 	defer srv.Close()
@@ -118,7 +119,7 @@ func TestGeneratedCLIExitCodes(t *testing.T) {
 	}
 	cliPath := filepath.Join(tmpDir, "delight")
 
-	status = http.StatusServiceUnavailable
+	status.Store(http.StatusServiceUnavailable)
 	out, err := exec.Command("bash", cliPath, "example", "check_health").CombinedOutput()
 	if err == nil {
 		t.Error("5xx from the daemon must exit nonzero")
@@ -127,7 +128,7 @@ func TestGeneratedCLIExitCodes(t *testing.T) {
 		t.Errorf("failure body was not printed: %q", out)
 	}
 
-	status = http.StatusOK
+	status.Store(http.StatusOK)
 	out, err = exec.Command("bash", cliPath, "example", "check_health").CombinedOutput()
 	if err != nil {
 		t.Errorf("2xx must exit zero, got %v\n%s", err, out)
