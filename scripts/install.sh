@@ -73,6 +73,10 @@ set +a
 # Dockerfile requires GIT_SHA and fails loud without it).
 GIT_SHA=$(git -C "$SRC" rev-parse --short HEAD)
 [ -n "$(git -C "$SRC" status --porcelain)" ] && GIT_SHA="${GIT_SHA}-dirty"
+# compose interpolates the runtime mounts for EVERY subcommand, build included, and
+# DELIGHT_CREDS_DIR is guarded with :? -- export the same default the wrapper uses so
+# a build does not trip a runtime-only guard. The value is not baked into the image.
+export DELIGHT_CREDS_DIR="${DELIGHT_CREDS_DIR:-$HOME/.delightd/creds}"
 echo "building image (stamp $GIT_SHA)..."
 GIT_SHA="$GIT_SHA" docker compose --project-directory "$SRC" -f "$SRC/docker-compose.yml" build delightd
 
