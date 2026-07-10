@@ -228,7 +228,8 @@ builds the container image, and symlinks the `delightd` wrapper
 everything else forwarded to the control port) onto `$HOME/var/bin/delightd`.
 It is idempotent and takes no hand steps — no prompts, no sudo, and nothing
 over the wire but git and the image build. Override the checkout path with
-`DELIGHTD_SRC` (default `$HOME/work/delightd`).
+`DELIGHTD_SRC` (default `$DELIGHT_INSTALL_ROOT/delightd`, which itself
+defaults to `$HOME/mesh/prod/delightd`).
 
 ```bash
 scripts/install.sh
