@@ -11,10 +11,10 @@
 # manages gets a wrapper like this.
 #
 # Env: DELIGHT_CONTROL_ADDR (default 127.0.0.1:8088), DELIGHTD_SRC (the checkout that holds
-# docker-compose.yml; default $HOME/work/delightd).
+# docker-compose.yml; default $HOME/mesh/prod/delightd).
 set -euo pipefail
 
-SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+SRC="${DELIGHTD_SRC:-$HOME/mesh/prod/delightd}"
 
 # Per-workstation config lives in a gitignored .env in the checkout (the 1Password
 # credential reference, the apiserver URL, the CA path, the mount roots), so you set it

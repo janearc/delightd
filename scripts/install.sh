@@ -10,7 +10,7 @@ set -euo pipefail
 
 # Where the checkout lives; override with DELIGHTD_SRC. BIN_DIR is overridable only for
 # tests (DELIGHTD_BIN_DIR) -- a real install always wants the standard bin surface.
-SRC="${DELIGHTD_SRC:-$HOME/work/delightd}"
+SRC="${DELIGHTD_SRC:-$HOME/mesh/prod/delightd}"
 REMOTE="git@github.com:janearc/delightd.git"
 BIN_DIR="${DELIGHTD_BIN_DIR:-$HOME/var/bin}"
 
