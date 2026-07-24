@@ -47,6 +47,26 @@ Failure modes seen in the field:
 
 ## 2. Container runtime (colima)
 
+Before anything else, confirm the wrapper exists:
+
+```bash
+command -v delightd || ls ~/var/bin/delightd
+```
+
+Seen in the field (2026-07-24): the wrapper had never been installed on this
+machine — the sprint-15 containerize work built and ran the container, but
+`scripts/install.sh` was never run, so a later cold recovery stalled at
+"command not found" before step one. The fix is the installer (idempotent,
+no sudo; with the image already in colima's store the build is pure cache):
+
+```bash
+bash ~/mesh/prod/delightd/scripts/install.sh
+```
+
+It symlinks the wrapper to `~/var/bin/delightd`. `~/var/bin` may not be on
+PATH — the installer says so if it is not; whether to add it to shell init
+is the operator's call, and every command below works with the full path.
+
 ```bash
 colima status   # "colima is not running" after any reboot is normal
 colima list     # the default profile should exist, likely Stopped
@@ -72,6 +92,10 @@ after a reboot into a new OS. The fix is a full stop/start cycle, not a wait:
 k3d cluster stop fleet && k3d cluster start fleet
 kubectl get nodes       # Ready, within about a minute
 ```
+
+After a plain host shutdown (containers Exited 137, no OS change), a bare
+`k3d cluster start fleet` sufficed and the node was Ready inside a minute
+(2026-07-24). Reserve the stop/start cycle for the EOF case above.
 
 ## 4. The daemon
 
@@ -103,7 +127,11 @@ and everywhere else in this document.
 
 This restart path had its live bounce 2026-07-10 (the sprint-15 capstone
 run): `stop`/`start` through the wrapper, readyz 200 with both checks green
-on return. Proven procedure, not just a documented one.
+on return. Re-proven 2026-07-24 (the sprint-16 capstone), both ways: the
+graceful bounce (`delightd stop` / `start`, clean SIGTERM stop), and the
+ungraceful one (`docker kill` on the container, then `delightd start`) —
+readyz 200 with both checks green after each. Proven procedure, not just a
+documented one.
 
 Seen in the field: after 1Password self-updates, the still-running app
 serves no CLI socket and every `op read` dies with "couldn't connect to the
@@ -162,6 +190,33 @@ Two more failure modes seen in the field (2026-07-10):
   node cache dropped the image and the cluster has no registry to re-pull
   from. `k3d image import <image>:<tag> -c fleet` restores it.
 
+And from 2026-07-24:
+
+- Once the cluster is Ready, the furniture converges on its own — no
+  `furnish up` was needed for any piece. The slow starters (kibana,
+  logstash, schema-registry) sit `0/1` for two to three minutes before
+  going green; check again before reaching for a re-converge.
+- `furnish health` reports `INDETERMINATE` on the PersistentVolume rows
+  (kafka-logs, zookeeper-data, zookeeper-txnlog): the operator service
+  account cannot `get` cluster-scope PersistentVolumes. The report is
+  correct to say "cannot know" rather than red; the PVC rows beside them
+  still answer. The RBAC gap has its own issue; until it lands, an
+  all-green estate still reports `healthy: false` on these rows alone.
+- surrealdb persistence, verified without credentials: anonymous writes
+  are 403 (IAM; no `--user`/`--pass` is configured on the server, so
+  there is nothing to log in AS — expected, not breakage). The check
+  that works from outside: restart the deployment and confirm the new
+  pod reopens the existing store —
+
+  ```bash
+  kubectl rollout restart deploy/surrealdb -n fleet
+  kubectl rollout status  deploy/surrealdb -n fleet --timeout=120s
+  kubectl logs -n fleet deploy/surrealdb --tail=6
+  # "Started kvs store at rocksdb:///data/db" against the same PVC;
+  # the PVC's backing dir on the node keeps its old-mtime files
+  # (IDENTITY from the store's creation date) across the restart.
+  ```
+
 Every piece's manifests live here under `kube/` (relocated from kafka-svc
 and obs-svc). `meubilair.yaml` at the repo root is the declarative probe
 index for the furniture — nothing executes its probes yet — so turning an
@@ -194,3 +249,21 @@ Pods here that neither surface names (today: good-citizen-dummy,
 obs-svc-agg, paling-sidecar) are workloads deployed from their own repos;
 Running status in this listing is their recovery check, and anything deeper
 belongs to those repos' docs.
+
+One drift trap on the canary (2026-07-24): big-little-mesh main's
+`kube/dummy.yaml` now declares `frood-dummy:v1`, an image that has never
+been built or deployed — the cluster runs the older `good-citizen-dummy`
+deployment, whose manifest no longer exists in any repo. Until
+big-little-mesh converges (its issue covers the rename), recover the
+canary from the live object, not the repo:
+
+```bash
+kubectl get deploy good-citizen-dummy -n fleet -o yaml > /tmp/dummy.yaml
+# ... the deployment is lost or deleted ...
+kubectl apply -f /tmp/dummy.yaml
+```
+
+The 2026-07-24 capstone ran exactly that cycle — deployment deleted,
+delightd bounced, canary re-applied and Running — so the procedure is
+proven, but it leans on a saved copy. Treat the repo manifest as the
+target state only after the image drift is fixed.
