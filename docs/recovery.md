@@ -11,7 +11,16 @@ machine follows `scripts/install.sh`, validated live 2026-07-10. Its full
 prerequisite set, stated here because install.sh checks only some of it:
 docker+git on PATH, a machine-true `.env`, and two 1Password items --
 `delightd-k8s-token` and `delightd-control-token` (each an `op item create
---category "API Credential"` per docs/kubernetes-access.md).
+--category "API Credential"` per docs/kubernetes-access.md). The datastore
+adds one more out-of-band step (since 2026-08-11): the `surrealdb-credentials`
+Secret in namespace `fleet`, keys `SURREAL_USER`/`SURREAL_PASS`, values the
+operator's --
+
+    kubectl create secret generic surrealdb-credentials -n fleet \
+      --from-literal=SURREAL_USER=<user> --from-literal=SURREAL_PASS=<pass>
+
+Without it the surrealdb pod sits in a config error referencing a Secret
+nothing created; `furnish health` shows the Deployment RED.
 
 The one rule, learned the hard way: **a thing listed is not a thing alive.**
 Ask the serving surface, not the inventory.
@@ -202,19 +211,21 @@ And from 2026-07-24:
   correct to say "cannot know" rather than red; the PVC rows beside them
   still answer. The RBAC gap has its own issue; until it lands, an
   all-green estate still reports `healthy: false` on these rows alone.
-- surrealdb persistence, verified without credentials: anonymous writes
-  are 403 (IAM; no `--user`/`--pass` is configured on the server, so
-  there is nothing to log in AS — expected, not breakage). The check
-  that works from outside: restart the deployment and confirm the new
-  pod reopens the existing store —
+- surrealdb persistence: anonymous writes are 403 because the server
+  authenticates (since 2026-08-11 the root user is minted at startup from
+  the `surrealdb-credentials` Secret; the 2026-07-24 observation of the
+  same 403 had a different cause — no user existed at all. The observation
+  held, the cause changed). The check that works from outside: restart the
+  deployment and confirm the new pod reopens the existing store —
 
   ```bash
   kubectl rollout restart deploy/surrealdb -n fleet
   kubectl rollout status  deploy/surrealdb -n fleet --timeout=120s
   kubectl logs -n fleet deploy/surrealdb --tail=6
-  # "Started kvs store at rocksdb:///data/db" against the same PVC;
-  # the PVC's backing dir on the node keeps its old-mtime files
-  # (IDENTITY from the store's creation date) across the restart.
+  # "Started rocksdb kvs store" against the same PVC, store at /data/db3
+  # (the v3 store; /data/db is the dead v2-format dir the manifest
+  # explains); the PVC's backing dir on the node keeps its old-mtime
+  # files (IDENTITY from the store's creation date) across the restart.
   ```
 
 Every piece's manifests live here under `kube/` (relocated from kafka-svc
