@@ -25,14 +25,28 @@ spec:
       containers:
         - name: surrealdb
           # Pinned point release, never a rolling tag: the piece must mean the
-          # same thing on every converge.
-          image: surrealdb/surrealdb:v2.6.5
+          # same thing on every converge. v3, not v2: dodo -- the first write
+          # workload -- is built against 3.x semantics. The v2 store held
+          # nothing (credential-less meant no write ever succeeded), so the
+          # bump needs a clean /data/db rather than a storage migration; v3
+          # refuses to open a v2 directory outright.
+          image: surrealdb/surrealdb:v3.2.0
           # Durable engine on the mounted claim (tier-1 ruling 2026-07-06: a
-          # pod restart losing everything is not tier-1 behavior). Still no
-          # credentials -- secrets never live in manifests; without a
-          # configured root user the server refuses privileged access, and
-          # auth remains the schemaless-datastore work.
-          args: ["start", "--bind", "0.0.0.0:8000", "rocksdb:/data/db"]
+          # pod restart losing everything is not tier-1 behavior). Credentials
+          # arrive from the surrealdb-credentials Secret -- operator-created,
+          # values never in a manifest. SurrealDB mints its initial root user
+          # from SURREAL_USER/SURREAL_PASS at startup only while the store
+          # holds no users, which closes the auth item the earlier version of
+          # this header deferred to the schemaless-datastore work.
+          # /data/db3, not /data/db: the old path holds the v2-format remains
+          # of the never-written store, and v3 refuses to open it. Pointing at
+          # a fresh directory costs a few dead megabytes on the claim and
+          # avoids a destructive wipe; remove /data/db whenever a hand is in
+          # there anyway.
+          args: ["start", "--bind", "0.0.0.0:8000", "rocksdb:/data/db3"]
+          envFrom:
+            - secretRef:
+                name: surrealdb-credentials
           ports:
             - name: http
               containerPort: 8000

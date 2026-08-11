@@ -53,10 +53,12 @@ meubilair:
     endpoints:
       - scheme: http
         address: "surrealdb.fleet.svc.cluster.local:8000"
+      # Also fronted at the edge (Host `surrealdb.localhost`, deliberately the
+      # loopback TLD: the workstation is the only intended caller).
     probe:
       # /health answers 200 once the server can serve; it needs no credentials
-      # (the piece ships credential-free and memory-engined -- dev-grade until
-      # the schemaless-datastore work configures persistence and auth).
+      # (auth guards the data API only: the root user comes from the
+      # surrealdb-credentials Secret, and the engine is rocksdb on the claim).
       httpGet:
         path: /health
         port: 8000
