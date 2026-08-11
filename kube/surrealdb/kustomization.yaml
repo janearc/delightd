@@ -12,8 +12,15 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
+  - ingressroute.yaml
 
 # The first furniture manifest that lives IN delightd's kube/ rather than in
 # another repo (see meubilair.yaml's source_manifest entries for the pieces
-# that have not moved in yet). Reachable in-cluster by Service name only; no
-# edge exposure for a datastore.
+# that have not moved in yet).
+#
+# The earlier "no edge exposure for a datastore" stance is deliberately
+# revised (2026-08-11): dodo runs on the workstation and writes here, and the
+# ingressroute is the workstation's only path in. The exposure is the
+# loopback-flavored surrealdb.localhost host rule, and the server now
+# authenticates (see deployment.yaml), which the datastore did not when the
+# stance was written.

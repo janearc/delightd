@@ -1,0 +1,27 @@
+# The workstation path to the datastore: traefik's web entrypoint sits on the
+# k3d loadbalancer's host port 8800, and macOS resolves *.localhost to loopback
+# natively, so http://surrealdb.localhost:8800 reaches the server with no
+# /etc/hosts entry and no port-forward. Unlike grafana/kibana's `.local`
+# placeholder hosts, `.localhost` is deliberate here: the DB should only ever
+# be addressed from this machine, and the TLD says so.
+#
+# Authentication is SurrealDB's own (see deployment.yaml); the route adds no
+# second layer, same as the other fleet edges.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: surrealdb
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: surrealdb
+    app.kubernetes.io/part-of: fleet
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`surrealdb.localhost`)
+      services:
+        - kind: Service
+          name: surrealdb
+          port: 8000
+          passHostHeader: true
