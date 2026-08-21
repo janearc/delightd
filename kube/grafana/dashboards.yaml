@@ -172,3 +172,176 @@ data:
         }
       ]
     }
+  surrealdb.json: |
+    {
+      "uid": "surrealdb",
+      "title": "surrealdb",
+      "tags": ["fleet", "surrealdb"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "id": 1,
+          "title": "scrape authenticated",
+          "description": "The panel to read FIRST, and the reason this dashboard exists. surrealdb answers /metrics to anyone, but renders through an allow-list: an anonymous scraper gets six process gauges and nothing about what the database is doing. Every other panel here needs the root credential. This checks for a family that only appears when authed -- 0 means the credential is working, 1 means the scrape is up but blind and every panel below it is empty for that reason and not because the store is idle.",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "authenticated", "color": "green" } } },
+                { "type": "value", "options": { "1": { "text": "ANONYMOUS -- blind", "color": "red" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "targets": [{ "expr": "absent(surrealdb_query_total) or vector(0)", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 2,
+          "title": "store reachable",
+          "description": "up for the surrealdb job. Note this goes to 0 on a 401 as well as on a refused connection -- a bad credential and a dead store look identical here, which is what the panel to the left disambiguates.",
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "1": { "text": "up", "color": "green" } } },
+                { "type": "value", "options": { "0": { "text": "DOWN or 401", "color": "red" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null }, { "color": "green", "value": 1 }
+              ]}
+            }
+          },
+          "targets": [{ "expr": "up{job=\"surrealdb\"}", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 3,
+          "title": "resident memory",
+          "description": "Available anonymously, so this one survives a broken credential. Worth watching on its own terms: the store was holding 1.79GB of an 11.65 GiB node in August 2026, which makes it one of the largest single consumers on the machine it is the glue for.",
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [{ "expr": "surrealdb_process_memory_bytes", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 4,
+          "title": "uptime",
+          "description": "Seconds since the surreal process started. A reset here that nobody ordered is the first thing to check when a pane starts throwing NotAllowed -- signin tokens do not survive a restart the way a pane assumes they do.",
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [{ "expr": "surrealdb_process_uptime_seconds", "refId": "A" }]
+        },
+        {
+          "type": "timeseries",
+          "id": 5,
+          "title": "queries per second, by outcome",
+          "description": "The standing policy is that anything remote is counted and labelled by outcome; this is that view for the store everything else depends on. A failure line that is flat at zero and then is not is the shape worth catching -- errors here surface as broken panes several layers up, where the cause is invisible.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (outcome) (rate(surrealdb_query_total[5m]))",
+            "legendFormat": "{{outcome}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 6,
+          "title": "query latency, p50 / p95 / p99",
+          "description": "Three quantiles rather than an average, because an average over a store that serves both a pane's point lookup and a nightly's bulk write tells you about neither. Watch p99 against p50: they separate when something started doing table scans.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(surrealdb_query_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(surrealdb_query_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(surrealdb_query_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 7,
+          "title": "statements per second, by type",
+          "description": "SELECT against CREATE/UPDATE/DELETE. This is how you tell a nightly harvest apart from someone reading a pane, without asking either of them.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (statement_type) (rate(surrealdb_statement_total[5m]))",
+            "legendFormat": "{{statement_type}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 8,
+          "title": "transactions per second, read against write",
+          "description": "The write line is the one that matters for durability: it is what a backup has to be consistent with, and what a Recreate rollout interrupts. write=\"true\" is a mutating transaction.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (write, outcome) (rate(surrealdb_transaction_total[5m]))",
+            "legendFormat": "write={{write}} {{outcome}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 9,
+          "title": "transaction conflicts",
+          "description": "Two writers touching the same keys. On a single-operator estate this should be near zero, so anything sustained means two things are writing the same rows -- the nightly running beside a manual pass is the usual cause, and it is a correctness question rather than a performance one.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "mode": "absolute", "steps": [
+              { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+            ]}}
+          },
+          "targets": [{
+            "expr": "sum by (namespace, database) (increase(surrealdb_transaction_conflicts_total[1h]))",
+            "legendFormat": "{{namespace}}/{{database}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 10,
+          "title": "bytes read and written",
+          "description": "Physical traffic through the rocksdb layer, which is the closest thing to \"is the store growing\" that surreal reports about itself. It is NOT the same question as how many rows exist -- surreal has no metric for that, which is what the logical-growth exporter is for.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+          "fieldConfig": { "defaults": { "unit": "Bps" } },
+          "targets": [
+            { "expr": "sum(rate(surrealdb_transaction_value_bytes_read_total[5m]))", "legendFormat": "read", "refId": "A" },
+            { "expr": "sum(rate(surrealdb_transaction_value_bytes_written_total[5m]))", "legendFormat": "written", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 11,
+          "title": "HTTP by route and status",
+          "description": "Which endpoints the panes actually use, and what they get back. dodo and albatross both talk HTTP rather than WebSocket -- node 20 ships no global WebSocket -- so effectively all pane traffic appears here rather than under the rpc family.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (http_route, http_response_status_code) (rate(surrealdb_http_request_total[5m]))",
+            "legendFormat": "{{http_route}} {{http_response_status_code}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 12,
+          "title": "active sessions",
+          "description": "Open sessions by protocol. dodo's db.ts re-signs every 20 minutes because a signin token expires around an hour and a long-running pane otherwise goes quietly anonymous; a sawtooth here is that refresh working as intended.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+          "targets": [{
+            "expr": "sum by (protocol, service) (surrealdb_session_active)",
+            "legendFormat": "{{protocol}} {{service}}",
+            "refId": "A"
+          }]
+        }
+      ]
+    }
