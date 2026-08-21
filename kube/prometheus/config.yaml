@@ -51,6 +51,23 @@ data:
         - mesh.pr
         - terminal.type
 
+    # WHERE ALERTS GO. Without this block the rules below evaluate, fire, and
+    # go nowhere: Prometheus records a firing alert and has nobody to hand it
+    # to. Every rule in prometheus-rules was inert until this landed, which is
+    # the quiet kind of broken -- the rules page shows red and no light comes
+    # on.
+    #
+    # Routing is opt-in PER RULE via a nanoleaf label, not by severity, and the
+    # split is not importance. NodeDiskFillingUp is deliberately unlit: it is
+    # the early warning you want on a dashboard where you can look at it, not
+    # on a lamp that interrupts you at 80% with five hours of room left. An
+    # unlit alert is still recorded and still worth rendering. Do not read
+    # "routed" as "the real ones".
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.fleet.svc.cluster.local:9093']
+
     rule_files:
       - /etc/prometheus/rules/*.yml
 
