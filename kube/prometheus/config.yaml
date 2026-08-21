@@ -21,6 +21,36 @@ data:
       external_labels:
         cluster: fleet
 
+    # OTLP INGESTION. Claude Code sessions push here rather than being scraped;
+    # the receiver flag in deployment.yaml carries the reasoning.
+    #
+    # A resource attribute does NOT become a label unless it is named below.
+    #
+    # user.email, user.id, user.account_uuid and organization.id ride on every
+    # metric the SDK emits, and are deliberately NOT promoted. Not for privacy
+    # -- this is a single-operator laptop -- but because each holds one value
+    # forever. A label that never varies distinguishes nothing and costs
+    # storage on every sample of every series.
+    #
+    # session.id IS promoted, and it is the one that earns its cardinality.
+    # One Claude Code session is one judge invocation, so session.id is what
+    # separates two rulings on the SAME pull request, and repeat rulings are
+    # ordinary: PR 131 was judged twice on 2026-08-21. mesh.pr collapses those
+    # into a single series; session.id keeps them apart. holden is the largest
+    # consumer of the allotment, so breaking its usage out per run is the
+    # point of this exercise rather than a nicety on top of it.
+    #
+    # mesh.* are ours, set through OTEL_RESOURCE_ATTRIBUTES by whatever spawns
+    # the session, so a run can be attributed to the repo and PR it ruled on.
+    otlp:
+      promote_resource_attributes:
+        - service.name
+        - session.id
+        - mesh.component
+        - mesh.repo
+        - mesh.pr
+        - terminal.type
+
     rule_files:
       - /etc/prometheus/rules/*.yml
 
