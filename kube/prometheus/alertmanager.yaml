@@ -1,0 +1,203 @@
+# Alertmanager: the seam between "Prometheus noticed" and "a light changed".
+#
+# Prometheus decides WHEN something is wrong. Alertmanager decides WHO hears
+# about it. Until now nothing heard about it at all -- the five rules beside
+# this file fire into Prometheus and Grafana, which are surfaces you have to go
+# and look at. The whole point of a light is that you do not have to look.
+#
+# WHAT EARNS A LIGHT, ruled by the operator 2026-08-21: OOM kills, or disk
+# pressure. Nothing else, initially. Her reasoning, which is the load-bearing
+# part of this file: if everything lights it up, nothing does. A light that
+# means "something, somewhere, maybe" is a light you learn to ignore, and then
+# it is worse than no light because you believe you would have noticed.
+#
+# So routing here is OPT-IN PER RULE, not severity-based. A rule reaches the
+# lights only if it carries `nanoleaf: "true"`. Adding a rule does not
+# automatically add a light; someone has to decide it earns one. Two rules
+# carry that label today and they are both in config.yaml.
+#
+# WHO IMPLEMENTS THE RECEIVER: not this repo. The webhook lands in
+# janearc/lights, which owns the Nanoleaf devices and the mapping from alert to
+# colour. This file owns the contract and nothing past it. See
+# docs/nanoleaf-alert-seam.md for the payload lights will actually receive.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: fleet
+data:
+  alertmanager.yml: |
+    global:
+      # How long a firing alert stays "firing" without a refresh from
+      # Prometheus. Longer than the 30s evaluation interval by enough that one
+      # missed scrape does not resolve an alert that is still true.
+      resolve_timeout: 5m
+
+    route:
+      # Group by the alert and the object it is about, so ten OOMKills in one
+      # pod are one notification rather than ten. group_by on alertname alone
+      # would merge unrelated pods into one light, which loses the thing you
+      # need to know.
+      # node is in here for the disk ladder: those alerts carry no pod, and
+      # grouping them without it would merge two nodes' disk states into one
+      # notification and one light.
+      group_by: ['alertname', 'namespace', 'pod', 'node']
+      group_wait: 30s
+      group_interval: 5m
+      # Twelve hours, deliberately. A light that re-fires every five minutes for
+      # a condition you already know about is a light you unplug. If it is still
+      # true in twelve hours you want reminding; before that you do not.
+      repeat_interval: 12h
+
+      # DEFAULT IS SILENCE. Every alert lands here unless a child route claims
+      # it, and this receiver does nothing. That is the opt-in rule expressed as
+      # config: a new alert rule is not routed anywhere until someone decides it
+      # earns a light. The alert is still visible in Prometheus and Grafana --
+      # "not routed" is not "not recorded".
+      receiver: 'blackhole'
+
+      routes:
+        - matchers:
+            - nanoleaf = "true"
+          receiver: 'nanoleaf'
+          # continue: false is the default and is wanted here -- an alert that
+          # earns a light does not also fall through to the blackhole.
+
+    # ONE RUNG OF THE DISK LADDER AT A TIME. A node at 95% under DiskPressure
+    # genuinely satisfies all three disk rules, and three effects arriving at
+    # once would fight over the same panels -- the light would show whichever
+    # webhook landed last, which is worse than showing nothing because it looks
+    # deliberate.
+    #
+    # Inhibition rather than PromQL gymnastics in the rules: expressing mutual
+    # exclusion with `unless` chains puts the ladder's shape in two places and
+    # they drift. Alertmanager owns "which of these do I actually deliver",
+    # which is exactly this question.
+    #
+    # `equal: [node]` matters -- a fast throb on one node must not silence a
+    # slow throb on a different one. There is one node today, and that is
+    # precisely when this sort of thing gets written wrong and nobody notices.
+    inhibit_rules:
+      - source_matchers: [ 'nanoleaf_effect = "disk-throb-fast"' ]
+        target_matchers: [ 'nanoleaf_effect =~ "disk-throb-(slow|medium)"' ]
+        equal: ['node']
+      - source_matchers: [ 'nanoleaf_effect = "disk-throb-medium"' ]
+        target_matchers: [ 'nanoleaf_effect = "disk-throb-slow"' ]
+        equal: ['node']
+
+    receivers:
+      - name: 'blackhole'
+        # Intentionally empty. Alertmanager requires a receiver to exist; this
+        # one exists to be the honest destination for everything nobody has
+        # decided about yet.
+
+      - name: 'nanoleaf'
+        webhook_configs:
+          # janearc/lights owns this endpoint. It does not exist yet at the time
+          # of writing, and that is deliberate rather than an oversight: the
+          # contract lands first so the lights session can build against
+          # something fixed.
+          #
+          # Until it exists, delivery FAILS AND IS LOGGED. That is the correct
+          # behaviour and not a bug to paper over -- a seam that silently
+          # swallowed undeliverable alerts would be indistinguishable from a
+          # working one, which is the exact failure this estate spent an evening
+          # finding in four other places. Failures are rare in practice because
+          # only OOM kills and disk pressure route here.
+          - url: 'http://lights.mesh/nanoleaf/alert'
+            send_resolved: true
+            max_alerts: 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager
+        app.kubernetes.io/part-of: fleet
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/alertmanager/conf/alertmanager.yml
+            - --storage.path=/alertmanager
+          ports:
+            - name: http
+              containerPort: 9093
+          volumeMounts:
+            # A DIRECTORY, not subPath. A ConfigMap mounted with subPath never
+            # receives updates -- the file is frozen at pod start -- so an edit
+            # to the routing above would apply to nothing while every command
+            # reported success. That trap cost real time on the Prometheus
+            # deployment beside this one; see issue #141.
+            - name: config
+              mountPath: /etc/alertmanager/conf
+            - name: data
+              mountPath: /alertmanager
+          resources:
+            # Bounded, because the node is 11.65 GiB and the one container in
+            # this estate WITHOUT a limit is the one that worries us (issue
+            # #136). Alertmanager holds alert state and a notification log, both
+            # small at this scale.
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            # /-/healthy on the SAME port that serves it. Spelled out because
+            # the neighbouring kube-state-metrics probe pointed at a port that
+            # did not serve its path, 404'd for three hours, and restarted a
+            # healthy process 47 times (PR #135).
+            httpGet: { path: /-/healthy, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        - name: data
+          # emptyDir, not a claim. What lives here is the notification log and
+          # current alert state -- which alerts have already been sent, so a
+          # restart does not re-notify. Losing it costs at most one duplicate
+          # light. That is not worth a PersistentVolumeClaim on a 50 GiB VM
+          # that hit DiskPressure this week.
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: fleet
+spec:
+  selector:
+    app.kubernetes.io/name: alertmanager
+  ports:
+    - { name: http, port: 9093, targetPort: http }
