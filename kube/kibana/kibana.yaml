@@ -109,7 +109,7 @@ spec:
     - kind: Rule
       # Identity-safe internal hostname; the real public hostname Cloudflare
       # Access fronts is set at cloudflared/go-live, not baked in here.
-      match: Host(`kibana.local`)
+      match: Host(`kibana.localhost`) || Host(`kibana.local`)
       services:
         - kind: Service
           name: kibana

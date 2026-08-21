@@ -51,6 +51,7 @@ data:
       "panels": [
         {
           "type": "gauge",
+          "id": 1,
           "title": "node disk used",
           "description": "The 52.5GB ext4 the whole cluster shares. Kubelet evicts at 85% -- that is what took 30 pods out. Mountpoint is /var/lib/rancher/k3s, not /, because node-exporter runs in a container and never sees a mount called / for the node disk.",
           "gridPos": { "h": 7, "w": 6, "x": 0, "y": 0 },
@@ -71,6 +72,7 @@ data:
         },
         {
           "type": "gauge",
+          "id": 2,
           "title": "node memory used",
           "description": "11.65 GiB allocatable, which is far less than the Mac's memory and is the number that actually constrains limits.",
           "gridPos": { "h": 7, "w": 6, "x": 6, "y": 0 },
@@ -91,6 +93,7 @@ data:
         },
         {
           "type": "stat",
+          "id": 3,
           "title": "containers with NO memory limit",
           "description": "An unbounded container can take the whole node; a bounded one merely dies. This is the node's real exposure -- logstash was bounded and visibly OOMKilling, which is the safe failure.",
           "gridPos": { "h": 7, "w": 6, "x": 12, "y": 0 },
@@ -106,6 +109,7 @@ data:
         },
         {
           "type": "stat",
+          "id": 4,
           "title": "topics producing into the void",
           "description": "hall-monitor's absence ledger. A producer with zero live consumer groups is refusal-class: the mesh once ran a week like this with every artifact gate green, which is why hm exists. It emitted this metric for 116 ticks before anything scraped it.",
           "gridPos": { "h": 7, "w": 6, "x": 18, "y": 0 },
@@ -118,6 +122,7 @@ data:
         },
         {
           "type": "timeseries",
+          "id": 5,
           "title": "container restarts (1h rate)",
           "description": "Rate, not lifetime total. logstash sat at 88 lifetime restarts behind a green 1/1 for 59 days -- a total would alarm forever after a pod recovers, and a rate says what is wrong NOW.",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
@@ -129,6 +134,7 @@ data:
         },
         {
           "type": "timeseries",
+          "id": 6,
           "title": "memory by pod",
           "description": "Working set per pod. Watch for a pod climbing toward its limit rather than sitting under it -- that is the shape of the next OOMKill.",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
@@ -141,6 +147,7 @@ data:
         },
         {
           "type": "timeseries",
+          "id": 7,
           "title": "hall-monitor: records seen per topic",
           "description": "What is actually crossing the wire. hm reads the broker's own metadata, so this is observed traffic rather than what a service claims to publish.",
           "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
@@ -152,6 +159,7 @@ data:
         },
         {
           "type": "timeseries",
+          "id": 8,
           "title": "node disk free",
           "description": "The absolute number, beside the percentage gauge. A percentage hides how much room is actually left when the denominator is only 52.5GB.",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
