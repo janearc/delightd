@@ -24,13 +24,38 @@ data:
     # OTLP INGESTION. Claude Code sessions push here rather than being scraped;
     # the receiver flag in deployment.yaml carries the reasoning.
     #
-    # A resource attribute does NOT become a label unless it is named below.
+    # A RESOURCE attribute does not become a label unless it is named below.
+    # That is the whole of what this list controls, and the distinction was
+    # got wrong here.
     #
-    # user.email, user.id, user.account_uuid and organization.id ride on every
-    # metric the SDK emits, and are deliberately NOT promoted. Not for privacy
-    # -- this is a single-operator laptop -- but because each holds one value
-    # forever. A label that never varies distinguishes nothing and costs
-    # storage on every sample of every series.
+    # This block used to say user.email, user.id, user.account_uuid and
+    # organization.id "ride on every metric the SDK emits, and are deliberately
+    # NOT promoted". The first half is right and the second half does not
+    # follow. Those four are DATAPOINT attributes, not resource attributes, so
+    # this allow-list never had any say over them -- and they are all present
+    # as labels on every claude_code_* series in the store right now, verified
+    # 2026-08-21. Leaving them off the list achieved nothing.
+    #
+    # The cost argument was sound and still applies: each holds one value
+    # forever on a single-operator estate, so they distinguish nothing and are
+    # paid for on every sample. Dropping them needs a metric_relabel_configs
+    # labeldrop on the OTLP path, not an omission here. Not done yet, and
+    # written down rather than left as a comment that describes a filter that
+    # does not exist.
+    #
+    # WHAT ACTUALLY BROKE THIS, for the next person: nothing arrived here for
+    # weeks and every surface looked fine. Two faults, stacked. The endpoint
+    # was set to .../api/v1/otlp -- but OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is
+    # the SIGNAL-SPECIFIC variable and is used verbatim; only the generic
+    # OTEL_EXPORTER_OTLP_ENDPOINT gets /v1/metrics appended. Fixing that got a
+    # 200 and STILL no series, because Claude Code exports DELTA temporality
+    # and Prometheus stores cumulative only: it drops delta points silently
+    # while still creating target_info from the resource. So the store showed a
+    # healthy-looking claude-code target with nothing behind it. The client
+    # needs OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative.
+    #
+    # Both faults are the same shape as the four others found the same night: a
+    # thing that was never populated, wearing the face of a thing that is fine.
     #
     # session.id IS promoted, and it is the one that earns its cardinality.
     # One Claude Code session is one judge invocation, so session.id is what
@@ -238,6 +263,109 @@ data:
           # is a question that gets asked.
           - action: labeldrop
             regex: user
+
+      # ALBATROSS, the resident half. The job market as numbers: open postings,
+      # arrivals per day, posting lifetime, demand by theme, ghost rate, board
+      # posture, reposting churn.
+      #
+      # THIS TARGET IS TEMPORARY AND SHOULD BE DELETED. It points at the host
+      # because albatross runs as a host process today, and it runs as a host
+      # process only because it was split out of dodo on 2026-08-20 and nobody
+      # has written its manifests yet. The operator has ruled it belongs in the
+      # cluster. The moment its Deployment exists carrying
+      #
+      #     prometheus.io/scrape: "true"
+      #     prometheus.io/port:   "15001"
+      #
+      # the fleet-services job above discovers it and THIS BLOCK MUST GO. Two
+      # targets for one service means one of them is silently wrong.
+      #
+      # 192.168.5.2 is the lima host route and it is the ONLY address that
+      # crosses the VM boundary from inside this cluster. Measured 2026-08-21:
+      # host.k3d.internal does not resolve (CoreDNS NodeHosts carries exactly
+      # one line, the node itself), host.docker.internal does not resolve, and
+      # 172.21.0.1 is the k3d docker bridge gateway -- which is the colima VM,
+      # one layer below the Mac, and refuses the connection. Only 192.168.5.2
+      # answers.
+      #
+      # Recording the disagreement rather than losing it: this was argued
+      # against as temporary cleverness in a committed manifest, on the grounds
+      # that a temporary address outlives its reason every time. The operator
+      # ruled that the signal tonight is worth more than the tidiness, which is
+      # a fair call on a personal estate. The comment above is the mitigation --
+      # whoever writes the manifests owns deleting this.
+      #
+      # Only 15001. The resume estate on 15006 serves no metrics, and a target
+      # that 404s forever is worse than no target. The nightly is not here at
+      # all and never will be: a batch job is not at any address when the
+      # scrape arrives, so its counters PUSH over OTLP at end of pass.
+      - job_name: albatross
+        static_configs:
+          - targets: ['192.168.5.2:15001']
+            labels:
+              mesh_component: albatross
+        # The market queries read three whole tables and are cached for 60s on
+        # albatross's side; scraping faster than the cache just serves the same
+        # numbers back. The data moves when a nightly pass runs, once a day.
+        scrape_interval: 60s
+
+      # TRAEFIK. Every request into this estate crosses it, and it has been
+      # exporting Prometheus metrics since the cluster was built with nothing
+      # collecting them. Per-route request rates, latencies and response codes,
+      # produced and discarded for weeks.
+      #
+      # WHY THIS ONE IS DIFFERENT FROM EVERY OTHER TARGET HERE: the rest of the
+      # estate tells you a service is UNHEALTHY. traefik is the only thing that
+      # tells you someone TRIED TO REACH one and what happened to them. A .mesh
+      # name that does not resolve, an IngressRoute pointing at a service that
+      # no longer exists, a backend that started refusing -- none of those show
+      # up as an unhealthy pod, because the pod is fine and the request never
+      # arrives. grafana was unreachable for 59 days behind exactly that blind
+      # spot.
+      #
+      # POD DISCOVERY, NOT A STATIC TARGET, and this is the part that catches
+      # people. traefik's Service exposes only web:80 and websecure:443 --
+      # measured -- so a static target at the ClusterIP cannot reach 9100 at
+      # all. Two sessions independently checked that the metrics entrypoint
+      # existed and neither checked whether the Service published it. The port
+      # is on the POD, so the pod is what gets discovered.
+      #
+      # Kept to kube-system rather than discovering cluster-wide: this job wants
+      # exactly one workload, and a namespace filter is cheaper than asking the
+      # apiserver for every pod in the cluster and throwing nearly all of them
+      # away.
+      #
+      # Filtered on the container port NAME rather than the number. role: pod
+      # yields one target per declared container port -- traefik declares four
+      # (metrics 9100, traefik 8080, web 8000, websecure 8443) -- so without
+      # this the job scrapes all four and three of them fail forever. The name
+      # also survives the chart renumbering the port, which a hardcoded 9100
+      # would not.
+      - job_name: traefik
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['kube-system']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: traefik
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: metrics
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metric_relabel_configs:
+          # traefik emits a full Go runtime surface -- goroutines, GC pauses,
+          # every heap bucket -- on top of the routing metrics. On a laptop
+          # TSDB with a 5Gi claim that is a lot of series describing the
+          # ingress's garbage collector, which nobody has ever needed. The
+          # routing signal is what this job exists for.
+          - source_labels: [__name__]
+            action: drop
+            regex: 'go_.*|process_.*|promhttp_.*'
 ---
 apiVersion: v1
 kind: ConfigMap

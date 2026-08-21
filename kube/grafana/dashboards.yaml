@@ -491,3 +491,196 @@ data:
         }
       ]
     }
+  claude-code.json: |
+    {
+      "uid": "claude-code",
+      "title": "claude code",
+      "tags": ["fleet", "claude"],
+      "timezone": "browser",
+      "refresh": "1m",
+      "time": { "from": "now-24h", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "id": 1,
+          "title": "spend, last 24h",
+          "description": "Every model call Claude Code made, in dollars. The metric is claude_code_cost_usage_USD_total -- note the capital USD, which is the OTLP unit suffix and is easy to mistype into an empty panel.\n\nWHY max_over_time AND NOT increase, on every panel here. Do not 'fix' these to rate() or increase(); it was tried and it returns nothing. These series are PUSHED by short-lived sessions, not scraped from a resident process. Each session owns its own series via session.id, counts up while it runs, and then that series ends forever. increase() and rate() need at least two samples inside the window, and a session that pushes once and exits never has two -- so every panel reads empty while the data sits right there. max_over_time takes each session's final value and sums across sessions, which is the correct total for counters that are cumulative WITHIN a lifetime rather than across one.\n\nThe consequence to keep in mind: on a timeseries this is a ROLLING window total -- spend attributable to sessions seen in the preceding window -- not spend that occurred in that instant.\n\nAnd this arrived at all only after two stacked faults were fixed on 2026-08-21: the endpoint was missing its /v1/metrics suffix, and Claude Code exports DELTA temporality which Prometheus drops silently while still registering the target. Before that the dashboard was blank and the target looked healthy.",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
+          "targets": [{ "expr": "sum(max_over_time(claude_code_cost_usage_USD_total[24h]))", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 2,
+          "title": "tokens, last 24h",
+          "description": "All four kinds together: input, output, cacheRead and cacheCreation. The breakdown below is the interesting view -- a total is dominated by cacheRead on any real session and tells you very little on its own.",
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "targets": [{ "expr": "sum(max_over_time(claude_code_token_usage_tokens_total[24h]))", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 3,
+          "title": "sessions, last 24h",
+          "description": "Counted by start_type: fresh, resume, continue, agents_view. A judge invocation is one session, which is why session.id is the one high-cardinality label the scrape config deliberately keeps.",
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+          "targets": [{ "expr": "sum(max_over_time(claude_code_session_count_total[24h]))", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 4,
+          "title": "active time, last 24h",
+          "description": "Split user against cli. This is ACTIVE time, not wall-clock session duration -- true duration lives in the events stream, which Prometheus cannot take because its OTLP receiver accepts metrics only. If session length matters, that wants OTEL_LOGS_EXPORTER pointed at elasticsearch.",
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [{ "expr": "sum(max_over_time(claude_code_active_time_seconds_total[24h]))", "refId": "A" }]
+        },
+        {
+          "type": "timeseries",
+          "id": 5,
+          "title": "spend by model",
+          "description": "Which models the money went to. The estate's review-fleet doctrine is cheap models for per-file passes and one expensive adversarial pass on top, so a fable line dwarfing the haiku lines is the shape to look for -- it means a fan-out inherited the session's effort instead of setting its own.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+          "targets": [{
+            "expr": "sum by (model) (max_over_time(claude_code_cost_usage_USD_total[1h]))",
+            "legendFormat": "{{model}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 6,
+          "title": "spend: foreground against background",
+          "description": "query_source separates main -- the conversation you are having -- from auxiliary, which is everything Claude Code runs on your behalf without being asked: title generation, summarisation, background checks. Auxiliary is the line nobody thinks to look at, and it is the one that accrues while the session sits idle.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+          "targets": [{
+            "expr": "sum by (query_source) (max_over_time(claude_code_cost_usage_USD_total[1h]))",
+            "legendFormat": "{{query_source}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 7,
+          "title": "tokens by kind",
+          "description": "input and output are what you pay full rate for. cacheRead is the prompt cache being reused and is billed at a fraction; cacheCreation is what it cost to put it there. On a long session cacheRead dominates everything else by an order of magnitude, which is the cache working rather than a problem.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "fieldConfig": { "defaults": { "unit": "short" } },
+          "targets": [{
+            "expr": "sum by (type) (max_over_time(claude_code_token_usage_tokens_total[1h]))",
+            "legendFormat": "{{type}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "gauge",
+          "id": 8,
+          "title": "prompt cache hit share",
+          "description": "cacheRead as a share of everything read in (cacheRead plus input). High is good and expected: a long conversation re-sends its whole history every turn, and the cache is what stops that being billed at full rate every time. A sustained DROP is the interesting event -- it means the cache is being invalidated, which on this setup usually means the context was edited near the front rather than appended to.",
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 14 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "orange", "value": 50 },
+                { "color": "green", "value": 80 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 * sum(max_over_time(claude_code_token_usage_tokens_total{type=\"cacheRead\"}[24h])) / clamp_min(sum(max_over_time(claude_code_token_usage_tokens_total{type=~\"input|cacheRead\"}[24h])), 1)",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 9,
+          "title": "sessions started, by kind",
+          "description": "fresh against resume and continue. A wall of fresh sessions where you expected resumes means context is being thrown away and rebuilt, which is paid for in cacheCreation on the panel above.",
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 14 },
+          "targets": [{
+            "expr": "sum by (start_type) (max_over_time(claude_code_session_count_total[1h]))",
+            "legendFormat": "{{start_type}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "bargauge",
+          "id": 10,
+          "title": "most expensive sessions, last 24h",
+          "description": "Cost per session.id. This is the panel the whole session.id cardinality argument was made for: two judge runs on the SAME pull request are separate sessions, and mesh.pr would collapse them into one series while this keeps them apart. A single session far above the others is the one worth opening.",
+          "gridPos": { "h": 9, "w": 12, "x": 0, "y": 22 },
+          "options": { "displayMode": "gradient", "orientation": "horizontal" },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } },
+          "targets": [{
+            "expr": "topk(10, sum by (session_id) (max_over_time(claude_code_cost_usage_USD_total[24h])))",
+            "legendFormat": "{{session_id}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 11,
+          "title": "spend attributed to repo and PR",
+          "description": "mesh.repo and mesh.pr are OURS, set through OTEL_RESOURCE_ATTRIBUTES by whatever spawns the session -- the judge wrapper sets them, so a ruling costs a known amount against a known pull request. EMPTY unless something sets them: an ordinary interactive session carries neither, and that is correct rather than missing.",
+          "gridPos": { "h": 9, "w": 12, "x": 12, "y": 22 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+          "targets": [{
+            "expr": "sum by (mesh_repo, mesh_pr, mesh_component) (max_over_time(claude_code_cost_usage_USD_total{mesh_repo!=\"\"}[24h]))",
+            "legendFormat": "{{mesh_component}} {{mesh_repo}}#{{mesh_pr}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 12,
+          "title": "spend by effort, agent and skill",
+          "description": "The attribution the review-fleet doctrine needs: effort is low/medium/high/xhigh/max, and agent.name, skill.name and plugin.name name what spent it. These labels appear only on calls that carry them, so this panel is empty until a fan-out or a skill actually runs -- an interactive turn has no agent name to report.\n\nThe standing rule is that every fan-out agent sets effort explicitly rather than inheriting the session's, after a seven-agent fan-out at inherited effort took most of an allotment in half an hour. This is where that would now be visible while it happened.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+          "targets": [
+            { "expr": "sum by (effort) (max_over_time(claude_code_cost_usage_USD_total{effort!=\"\"}[1h]))", "legendFormat": "effort={{effort}}", "refId": "A" },
+            { "expr": "sum by (agent_name) (max_over_time(claude_code_cost_usage_USD_total{agent_name!=\"\"}[1h]))", "legendFormat": "agent={{agent_name}}", "refId": "B" },
+            { "expr": "sum by (skill_name) (max_over_time(claude_code_cost_usage_USD_total{skill_name!=\"\"}[1h]))", "legendFormat": "skill={{skill_name}}", "refId": "C" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 13,
+          "title": "lines of code written and removed",
+          "description": "Claude Code's own count of what it changed, split added against removed. Read it beside the estate's LOC collector rather than instead of it: this counts edits as they happen and does not know the difference between code and comment, while the collector reads the committed tree and does. A day of heavy editing here with no movement there is work that never landed.\n\nVerified live 2026-08-21 by running a session that edited a file and reading the series back.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+          "targets": [{
+            "expr": "sum by (type) (max_over_time(claude_code_lines_of_code_count_total[1h]))",
+            "legendFormat": "{{type}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 14,
+          "title": "commits and pull requests",
+          "description": "What actually reached git. Beside the lines-of-code panel this is the honest completion signal: edits are activity, commits are outcomes.\n\nTHE ONLY TWO NAMES ON THIS DASHBOARD NOT VERIFIED AGAINST A LIVE SERIES. Every other panel here was checked by emitting the metric and reading it back; these two need a Claude session to actually commit or open a pull request, which was not worth manufacturing. They follow the naming rule confirmed six times over -- dots to underscores, unit inserted when the metric has one, _total appended -- so they are near-certain rather than guessed. If they stay empty after a session that genuinely commits, suspect the name here before suspecting the pipeline.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+          "targets": [
+            { "expr": "sum(max_over_time(claude_code_commit_count_total[1h]))", "legendFormat": "commits", "refId": "A" },
+            { "expr": "sum(max_over_time(claude_code_pull_request_count_total[1h]))", "legendFormat": "pull requests", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 15,
+          "title": "edits accepted and rejected",
+          "description": "Every edit Claude Code proposed, by tool, language and whether it was taken. A rising reject rate in one language is the most direct signal available that the work is going wrong in a way nobody has said out loud yet.\n\nVerified live 2026-08-21. Note that an auto-accepted edit still reports decision=accept with source naming what accepted it, so a wall of accepts under an automated permission mode is not the same evidence as a wall of accepts from a human.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+          "targets": [{
+            "expr": "sum by (decision, tool_name, language) (max_over_time(claude_code_code_edit_tool_decision_total[1h]))",
+            "legendFormat": "{{decision}} {{tool_name}} {{language}}",
+            "refId": "A"
+          }]
+        }
+      ]
+    }
