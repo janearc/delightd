@@ -81,6 +81,13 @@ spec:
           env:
             # modest fixed heap, same reasoning as ES -- bound it so it cannot
             # OOM the laptop VM next to the rest of the fleet.
+            #
+            # The heap is NOT the container's memory footprint, and the gap is
+            # what was killing this pod: a JVM also needs metaspace, thread
+            # stacks, direct byte buffers, GC structures and the JIT code
+            # cache, none of which come out of -Xmx. For Logstash that
+            # non-heap overhead runs 300-500MB. See the limit below, which is
+            # sized for heap PLUS overhead rather than for heap alone.
             - name: LS_JAVA_OPTS
               value: "-Xms512m -Xmx512m"
           ports:
@@ -108,10 +115,29 @@ spec:
           resources:
             requests:
               cpu: 200m
+              # unchanged: the request is what this pod RESERVES from the node,
+              # and its steady state genuinely is under 768Mi. Raising the
+              # request would take memory away from everything else for no
+              # reason; the limit is the part that was wrong.
               memory: 768Mi
             limits:
               cpu: "1"
-              memory: 1Gi
+              # 2Gi, raised from 1Gi on 2026-08-20 after this pod was found
+              # with 88 restarts, all OOMKilled (exit 137), the most recent one
+              # an hour before it was noticed.
+              #
+              # 1Gi was heap (512m) plus roughly 400MB of JVM overhead, which
+              # lands ON the ceiling rather than under it -- so the kernel
+              # killed it about one and a half times a day for 59 days while
+              # the Deployment reported 1/1 and nothing alerted. A crash-loop
+              # slow enough to look healthy is the kind that survives longest.
+              #
+              # The fix is headroom, not a bigger heap: -Xmx stays at 512m, so
+              # this does not let Logstash use more, it lets it finish using
+              # what it was already asking for. A limit is a ceiling, not an
+              # allocation -- nothing else on the node loses anything unless
+              # this pod actually climbs.
+              memory: 2Gi
           volumeMounts:
             # logstash.yml replaces the node settings file; pipeline.conf is
             # dropped into the conf.d dir the image's default pipeline reads.
