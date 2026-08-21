@@ -51,6 +51,23 @@ data:
         - mesh.pr
         - terminal.type
 
+    # WHERE ALERTS GO. Without this block the rules below evaluate, fire, and
+    # go nowhere: Prometheus records a firing alert and has nobody to hand it
+    # to. Every rule in prometheus-rules was inert until this landed, which is
+    # the quiet kind of broken -- the rules page shows red and no light comes
+    # on.
+    #
+    # Routing is opt-in PER RULE via a nanoleaf label, not by severity, and the
+    # split is not importance. NodeDiskFillingUp is deliberately unlit: it is
+    # the early warning you want on a dashboard where you can look at it, not
+    # on a lamp that interrupts you at 80% with five hours of room left. An
+    # unlit alert is still recorded and still worth rendering. Do not read
+    # "routed" as "the real ones".
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.fleet.svc.cluster.local:9093']
+
     rule_files:
       - /etc/prometheus/rules/*.yml
 
@@ -101,8 +118,49 @@ data:
       # Opt-in rather than scrape-everything on purpose: most pods here serve
       # no metrics, and a scrape config that hammers every port in the namespace
       # generates noise, failed-target alerts, and load nobody asked for.
-      # dodo, albatross and kestrel already emit the exposition format from
-      # their health ports -- they need the annotation, not new code.
+      #
+      # This block used to claim dodo, albatross and kestrel "already emit the
+      # exposition format from their health ports -- they need the annotation,
+      # not new code". That was measured on 2026-08-21 and it is false. What is
+      # actually served right now:
+      #
+      #   albatross :15001 /metrics  404   (jobs web, resident)
+      #   albatross :15006 /metrics  404   (resume estate, resident)
+      #   dodo      :15000 /metrics  the landing page HTML, not metrics
+      #   dodo      :15090 /metrics  200, body EMPTY
+      #
+      # albatross's src/ports.ts claimed "the web interfaces serve their own on
+      # their main port"; they did not. The exposition format existed only in
+      # src/health.ts and only a CLI pass ever starts that server, so the
+      # numbers lived for the length of a nightly run and vanished. The
+      # annotation was necessary and it was never sufficient.
+      #
+      # SINCE FIXED on the resident half: albatross :15001 now serves the
+      # market families from src/market.ts -- open postings, arrivals, posting
+      # lifetime, demand by theme, ghost rate, reposting churn. So there is
+      # finally something worth scraping.
+      #
+      # No static target is added here for it, deliberately. albatross has no
+      # kubernetes manifests yet only because it was split out of dodo on
+      # 2026-08-20 and nobody has written them; the operator has ruled it
+      # belongs in the cluster. Once its Deployment exists carrying
+      #
+      #     prometheus.io/scrape: "true"
+      #     prometheus.io/port:   "15001"
+      #
+      # the job above discovers it with no change to this file. Pointing a
+      # static target at the host in the meantime would mean hard-coding
+      # 192.168.5.2 -- the lima host route, and the only address that crosses
+      # the VM boundary, since host.k3d.internal does not resolve here and
+      # 172.21.0.1 is the docker bridge gateway, i.e. the VM rather than the
+      # Mac. That is a real address and a temporary one, and a temporary
+      # address in a committed manifest outlives its reason every time.
+      #
+      # The batch half is different and stays different. A nightly is not at
+      # any address when the scrape arrives, in the cluster or out of it, so
+      # its counters -- including the Brave quota, cost and outcome series --
+      # PUSH over OTLP at the end of the pass. Two halves, two deliveries; the
+      # cluster move does not collapse them into one. See the otlp block above.
       - job_name: fleet-services
         kubernetes_sd_configs:
           - role: pod
@@ -123,6 +181,63 @@ data:
             target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+
+      # SURREALDB, AUTHENTICATED. The store is the glue under dodo, albatross
+      # and kestrel, so "is it up" was never the question worth answering.
+      #
+      # /metrics is mounted by default (SURREAL_METRICS_ENABLED=true) but it
+      # renders through an allow-list at request time, and an ANONYMOUS scraper
+      # gets exactly six things: surrealdb_build_info, the three
+      # surrealdb_process_* gauges, target_info and otel_scope_info. Process
+      # vitals. Nothing about what the database is doing. Measured, not assumed
+      # -- an unauthenticated scrape of this endpoint on 2026-08-21 returned
+      # those and nothing else.
+      #
+      # Root credentials unlock the rest: statement, query, transaction, rpc,
+      # auth, session, network, http, live_query, slow_query and storage. That
+      # is the difference between a target that says surreal is running and one
+      # that says a write took 400ms and three transactions conflicted.
+      #
+      # The credential is a FILE REFERENCE, never a value. Both keys come from
+      # the operator-created surrealdb-credentials Secret -- the same Secret the
+      # surrealdb Deployment already consumes via envFrom -- mounted read-only
+      # into this pod by deployment.yaml. Nothing here, in git, or in any
+      # manifest holds the secret itself.
+      #
+      # A trap worth naming because it has cost people days elsewhere: a
+      # password_file whose contents carry a trailing newline used to
+      # authenticate as a DIFFERENT string and fail with a 401 that looks like
+      # a wrong password. Prometheus trims surrounding whitespace on both
+      # _file values as of v2.x, and this cluster runs v3.1.0, so a Secret
+      # written with or without a trailing newline works. Do not "fix" it by
+      # stripping the newline in the Secret; that is not where the bug was.
+      - job_name: surrealdb
+        # in-cluster ClusterIP, not the surrealdb.localhost ingressroute: the
+        # edge route exists for the workstation, and sending a scrape out to
+        # traefik and back buys a second thing that can break between here and
+        # a pod two hops away.
+        static_configs:
+          - targets: ['surrealdb.fleet.svc.cluster.local:8000']
+        basic_auth:
+          username_file: /etc/prometheus/secrets/surrealdb/SURREAL_USER
+          password_file: /etc/prometheus/secrets/surrealdb/SURREAL_PASS
+        metric_relabel_configs:
+          # otel_scope_name rides on EVERY series surreal emits and is a
+          # restatement of the metric name's own prefix --
+          # surrealdb_statement_total is already the statement scope. One label
+          # that adds nothing, on every sample of every series, on a node with
+          # 11.65 GiB and a 5Gi TSDB.
+          - action: labeldrop
+            regex: otel_scope_name
+          # `user` is on every labelled family and holds one value forever on a
+          # single-operator estate. Same argument the otlp block above makes for
+          # user.email and organization.id, applied to the pull side: a label
+          # that never varies distinguishes nothing and costs storage always.
+          # namespace and database are KEPT -- those genuinely vary as albatross
+          # and kestrel take their own, and "which database is doing the writes"
+          # is a question that gets asked.
+          - action: labeldrop
+            regex: user
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -100,6 +100,20 @@ spec:
               mountPath: /etc/prometheus/conf
             - name: rules
               mountPath: /etc/prometheus/rules
+            # The surrealdb root credential, as FILES for the surrealdb scrape
+            # job's basic_auth username_file/password_file. Read-only, and the
+            # value never appears in a manifest, an argument list or an env var
+            # on this pod -- the Secret is operator-created and this is a
+            # reference to it.
+            #
+            # A projected Secret volume, not envFrom: an env var is visible in
+            # `kubectl describe pod` and in /proc/1/environ to anything that
+            # gets a shell here, and prometheus.yml cannot read env vars anyway
+            # -- it has no expansion, which is exactly why the _file variants
+            # exist. defaultMode 0400 because uid 65534 is the only reader.
+            - name: surrealdb-credentials
+              mountPath: /etc/prometheus/secrets/surrealdb
+              readOnly: true
             - name: data
               mountPath: /prometheus
           readinessProbe:
@@ -130,6 +144,21 @@ spec:
           configMap: { name: prometheus-config }
         - name: rules
           configMap: { name: prometheus-rules }
+        # optional: false is deliberate. If the Secret is missing this pod must
+        # refuse to start and say so, rather than come up healthy with a
+        # surrealdb target that 401s forever -- a scrape job that authenticates
+        # with nothing looks identical to one that is merely broken, and the
+        # whole point of this job is the metrics you only get when authed.
+        - name: surrealdb-credentials
+          secret:
+            secretName: surrealdb-credentials
+            defaultMode: 0400
+            optional: false
+            items:
+              - key: SURREAL_USER
+                path: SURREAL_USER
+              - key: SURREAL_PASS
+                path: SURREAL_PASS
         - name: data
           persistentVolumeClaim: { claimName: prometheus-data }
 ---

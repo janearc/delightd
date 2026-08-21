@@ -172,3 +172,322 @@ data:
         }
       ]
     }
+  surrealdb.json: |
+    {
+      "uid": "surrealdb",
+      "title": "surrealdb",
+      "tags": ["fleet", "surrealdb"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "id": 1,
+          "title": "scrape authenticated",
+          "description": "The panel to read FIRST, and the reason this dashboard exists. surrealdb answers /metrics to anyone, but renders through an allow-list: an anonymous scraper gets six process gauges and nothing about what the database is doing. Every other panel here needs the root credential. This checks for a family that only appears when authed -- 0 means the credential is working, 1 means the scrape is up but blind and every panel below it is empty for that reason and not because the store is idle.",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "authenticated", "color": "green" } } },
+                { "type": "value", "options": { "1": { "text": "ANONYMOUS -- blind", "color": "red" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "red", "value": 1 }
+              ]}
+            }
+          },
+          "targets": [{ "expr": "absent(surrealdb_query_total) or vector(0)", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 2,
+          "title": "store reachable",
+          "description": "up for the surrealdb job. Note this goes to 0 on a 401 as well as on a refused connection -- a bad credential and a dead store look identical here, which is what the panel to the left disambiguates.",
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "1": { "text": "up", "color": "green" } } },
+                { "type": "value", "options": { "0": { "text": "DOWN or 401", "color": "red" } } }
+              ],
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null }, { "color": "green", "value": 1 }
+              ]}
+            }
+          },
+          "targets": [{ "expr": "up{job=\"surrealdb\"}", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 3,
+          "title": "resident memory",
+          "description": "Available anonymously, so this one survives a broken credential. Worth watching on its own terms: the store was holding 1.79GB of an 11.65 GiB node in August 2026, which makes it one of the largest single consumers on the machine it is the glue for.",
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [{ "expr": "surrealdb_process_memory_bytes", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 4,
+          "title": "uptime",
+          "description": "Seconds since the surreal process started. A reset here that nobody ordered is the first thing to check when a pane starts throwing NotAllowed -- signin tokens do not survive a restart the way a pane assumes they do.",
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [{ "expr": "surrealdb_process_uptime_seconds", "refId": "A" }]
+        },
+        {
+          "type": "timeseries",
+          "id": 5,
+          "title": "queries per second, by outcome",
+          "description": "The standing policy is that anything remote is counted and labelled by outcome; this is that view for the store everything else depends on. A failure line that is flat at zero and then is not is the shape worth catching -- errors here surface as broken panes several layers up, where the cause is invisible.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (outcome) (rate(surrealdb_query_total[5m]))",
+            "legendFormat": "{{outcome}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 6,
+          "title": "query latency, p50 / p95 / p99",
+          "description": "Three quantiles rather than an average, because an average over a store that serves both a pane's point lookup and a nightly's bulk write tells you about neither. Watch p99 against p50: they separate when something started doing table scans.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [
+            { "expr": "histogram_quantile(0.50, sum by (le) (rate(surrealdb_query_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum by (le) (rate(surrealdb_query_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B" },
+            { "expr": "histogram_quantile(0.99, sum by (le) (rate(surrealdb_query_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 7,
+          "title": "statements per second, by type",
+          "description": "SELECT against CREATE/UPDATE/DELETE. This is how you tell a nightly harvest apart from someone reading a pane, without asking either of them.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (statement_type) (rate(surrealdb_statement_total[5m]))",
+            "legendFormat": "{{statement_type}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 8,
+          "title": "transactions per second, read against write",
+          "description": "The write line is the one that matters for durability: it is what a backup has to be consistent with, and what a Recreate rollout interrupts. write=\"true\" is a mutating transaction.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (write, outcome) (rate(surrealdb_transaction_total[5m]))",
+            "legendFormat": "write={{write}} {{outcome}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 9,
+          "title": "transaction conflicts",
+          "description": "Two writers touching the same keys. On a single-operator estate this should be near zero, so anything sustained means two things are writing the same rows -- the nightly running beside a manual pass is the usual cause, and it is a correctness question rather than a performance one.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "mode": "absolute", "steps": [
+              { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+            ]}}
+          },
+          "targets": [{
+            "expr": "sum by (namespace, database) (increase(surrealdb_transaction_conflicts_total[1h]))",
+            "legendFormat": "{{namespace}}/{{database}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 10,
+          "title": "bytes read and written",
+          "description": "Physical traffic through the rocksdb layer, which is the closest thing to \"is the store growing\" that surreal reports about itself. It is NOT the same question as how many rows exist -- surreal has no metric for that, which is what the logical-growth exporter is for.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+          "fieldConfig": { "defaults": { "unit": "Bps" } },
+          "targets": [
+            { "expr": "sum(rate(surrealdb_transaction_value_bytes_read_bytes_total[5m]))", "legendFormat": "values read", "refId": "A" },
+            { "expr": "sum(rate(surrealdb_transaction_value_bytes_written_bytes_total[5m]))", "legendFormat": "values written", "refId": "B" },
+            { "expr": "sum(rate(surrealdb_transaction_key_bytes_read_bytes_total[5m]))", "legendFormat": "keys read", "refId": "C" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 11,
+          "title": "HTTP by route and status",
+          "description": "Which endpoints the panes actually use, and what they get back. dodo and albatross both talk HTTP rather than WebSocket -- node 20 ships no global WebSocket -- so effectively all pane traffic appears here rather than under the rpc family.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+          "fieldConfig": { "defaults": { "unit": "reqps" } },
+          "targets": [{
+            "expr": "sum by (http_route, http_response_status_code) (rate(surrealdb_http_request_total[5m]))",
+            "legendFormat": "{{http_route}} {{http_response_status_code}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 12,
+          "title": "store growth: keys held, and live data on disk",
+          "description": "The closest thing surreal reports to LOGICAL growth. estimate_num_keys is rocksdb's own count of keys held -- not rows, since one record spans several keys, but it moves with the estate rather than with process memory, and it is the only native series that does. Beside it, the live data size after compaction.\n\nThis panel replaced an active-sessions panel written from the published metrics catalogue: surrealdb_session_active does not exist in 3.2.0. The whole session family is absent from what this server actually renders, which is why every panel here was re-checked against a live scrape rather than against the documentation.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+          "fieldConfig": { "defaults": { "custom": { "axisPlacement": "auto" } } },
+          "targets": [
+            { "expr": "surrealdb_storage_rocksdb_estimate_num_keys", "legendFormat": "keys held (estimate)", "refId": "A" },
+            { "expr": "surrealdb_storage_rocksdb_estimate_live_data_size", "legendFormat": "live data bytes", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 13,
+          "title": "query errors in the last hour, by class and database",
+          "description": "INCREASE, not the raw counter, and that is the whole point of the panel. surrealdb_query_total is cumulative since the process started, so a total carries every fault since boot and looks alarming forever -- the same trap the fleet dashboard names about logstash sitting at 88 lifetime restarts behind a green 1/1 for 59 days.\n\nWhat is actionable here is RECURRENCE. On 2026-08-21 this store held 22 internal-class errors against the dodo database, beside 196865 successful queries -- 0.011 percent -- and not one of them had incremented since the scrape came up. They are historical, and they sit inside roughly 47 hours we have no visibility into, a window that contained a DiskPressure eviction of 30 pods, a kube-state-metrics crashloop and two Prometheus restarts. Any of those drops a client mid-query, which is a plausible internal-class error and is not a bug in the caller. Correlating 22 errors against four known disturbances would have found something, which is exactly why nobody went looking.\n\nSo this panel is the instrument that makes the next one real. A line that stays flat at zero means those 22 were the old world. A line that moves gives a bounded window and something worth chasing.\n\nerror_class separates them: client means a caller asked wrongly, internal means the store failed on its own account.",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "bars", "fillOpacity": 60 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "sum by (database, error_class) (increase(surrealdb_query_total{outcome=\"error\"}[1h]))",
+            "legendFormat": "{{database}} / {{error_class}}",
+            "refId": "A"
+          }]
+        }
+      ]
+    }
+  job-market.json: |
+    {
+      "uid": "job-market",
+      "title": "job market",
+      "tags": ["albatross", "market"],
+      "timezone": "browser",
+      "refresh": "1m",
+      "time": { "from": "now-7d", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "id": 1,
+          "title": "open postings",
+          "description": "Postings seen within the last seven days. The nightly re-harvests every employer's board, so a live posting is re-seen every night and a week of silence is a closed role rather than a missed run.",
+          "gridPos": { "h": 6, "w": 5, "x": 0, "y": 0 },
+          "targets": [{ "expr": "albatross_postings_open", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 2,
+          "title": "new in the last day",
+          "description": "Postings first seen in the last 24 hours. This is the arrival rate -- what the market put up since yesterday, not what is up in total.",
+          "gridPos": { "h": 6, "w": 5, "x": 5, "y": 0 },
+          "targets": [{ "expr": "albatross_postings_new_1d", "refId": "A" }]
+        },
+        {
+          "type": "gauge",
+          "id": 3,
+          "title": "ghost rate",
+          "description": "Share of checked employers keeping postings on a rented board their own site links from NOWHERE -- so an ordinary visitor clicking Careers never sees them. See ghosts.ts for why that signature is checkable. This is the number that says how much of a search is spent on roles nobody is reading. It was 85 of 193 checked employers on 2026-08-21, which is not a rounding error.",
+          "gridPos": { "h": 6, "w": 5, "x": 10, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 20 },
+                { "color": "red", "value": 40 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 * albatross_boards_ghost / clamp_min(albatross_boards_checked, 1)",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "stat",
+          "id": 4,
+          "title": "median posting lifetime",
+          "description": "Days a posting stays up, measured ONLY over postings that have closed -- counting still-open ones would report how long they have been up so far and drag the median toward zero every time a batch arrives. It needs closed postings to mean anything, and on 2026-08-21 there were four of them, so read this as not-yet-answerable rather than as a fast market. It becomes real after a few harvest cycles.",
+          "gridPos": { "h": 6, "w": 4, "x": 15, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "d" } },
+          "targets": [{ "expr": "albatross_posting_lifetime_days{quantile=\"0.5\"}", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 5,
+          "title": "postings not yet classified",
+          "description": "READ THIS BEFORE THE THEME PANELS. Live postings carrying no demand theme, as a share of live postings.\n\nThe backfill has RUN. On 2026-08-21 this read 14646 of 14761 -- over 99 percent -- because themes are assigned at ingest and nothing is ever re-analyzed, so every posting harvested before the theme index landed on 2026-08-20 carried none. Running the theme pass over the corpus took it to 7088 of 14761, classifying 7673 postings and bringing all 22 themes into use where 19 had any members at all.\n\nSo what is left is no longer a backlog. Every job row has now been through assignThemes, which means the remaining 48 percent are titles containing no keyword from any of the 22 themes -- a genuine coverage limit rather than work not yet done. THAT is the number a rediscovery run would address, and it could only be read honestly once the backfill had drained the other kind. Backfill first, then judge coverage; the two look identical from outside and have opposite remedies.\n\nThe panel keeps its place ahead of the theme charts because the breakdown below still describes about half the corpus, and half is worth knowing about before reading it as the whole.",
+          "gridPos": { "h": 6, "w": 5, "x": 19, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 25 },
+                { "color": "red", "value": 60 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 * albatross_jobs_untyped / clamp_min(albatross_jobs_live, 1)",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "bargauge",
+          "id": 6,
+          "title": "demand by theme, now",
+          "description": "Live postings per demand theme -- what employers are trying to get done, not job families. A posting belongs to every theme whose keywords its title contains, so these deliberately OVERLAP and must not be summed or compared against the total.",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 },
+          "options": { "displayMode": "gradient", "orientation": "horizontal" },
+          "targets": [{
+            "expr": "topk(15, albatross_postings_by_theme)",
+            "legendFormat": "{{theme}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 7,
+          "title": "theme drift",
+          "description": "The same series over time: is infra showing up more, is golang showing up more. NOTE THE CEILING -- Prometheus keeps seven days here, so this answers 'what moved this week' and can never answer 'what moved since June'. The long view needs the store, which has first_seen on every posting and does not forget.",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 },
+          "targets": [{
+            "expr": "topk(10, albatross_postings_by_theme)",
+            "legendFormat": "{{theme}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 8,
+          "title": "arrivals per day",
+          "description": "New postings per day beside the running total of what is open. The two moving together is a growing market; arrivals steady while open climbs means postings are not closing, which is the shape ghost boards make.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "targets": [
+            { "expr": "albatross_postings_new_1d", "legendFormat": "new in last day", "refId": "A" },
+            { "expr": "albatross_postings_open", "legendFormat": "open", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 9,
+          "title": "board posture, and reposting churn",
+          "description": "broadcast means the employer publishes structured postings its own site links; quiet means it does not. Churn counts titles seen going down and back up again -- a role genuinely being filled does not do that, so churn is a second, independent signal of the same thing the ghost rate measures.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "targets": [
+            { "expr": "albatross_boards_posture", "legendFormat": "{{posture}}", "refId": "A" },
+            { "expr": "albatross_reposting_churn", "legendFormat": "reposting churn", "refId": "B" }
+          ]
+        }
+      ]
+    }
