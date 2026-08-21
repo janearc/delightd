@@ -23,6 +23,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -88,6 +89,15 @@ var kubeScheme = func() *runtime.Scheme {
 	}
 	if err := corev1.AddToScheme(s); err != nil {
 		panic("register core/v1: " + err.Error())
+	}
+	// rbac/v1 joined when the first ClusterRole landed in kube/ (the prometheus
+	// piece). Without it this test refuses a perfectly valid ServiceAccount /
+	// ClusterRole / ClusterRoleBinding as "not an allowlisted CRD; likely a
+	// typo" -- the right default for an unknown kind, the wrong answer for a
+	// core Kubernetes one. Any piece that grants permissions needs these three,
+	// so registering the group is the fix rather than tolerating the kinds.
+	if err := rbacv1.AddToScheme(s); err != nil {
+		panic("register rbac/v1: " + err.Error())
 	}
 	return s
 }()

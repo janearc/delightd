@@ -1,0 +1,26 @@
+# Copied from ~/mesh/prod/traefik/kube/ingressroute-template.yaml.
+#
+# Both hostnames: .localhost resolves to loopback on any device natively, and
+# .mesh is the private TLD CoreDNS serves for this estate (traefik-svc owns
+# that zone). A Host match is ROUTING, not access control -- the header is
+# client-supplied and 8800 is open to the LAN, so anything reachable here is
+# reachable by anyone on the network who knows the name. Prometheus has no auth
+# of its own; that is worth knowing before this is exposed further.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: prometheus
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: fleet
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`prometheus.localhost`) || Host(`prometheus.mesh`)
+      services:
+        - kind: Service
+          name: prometheus
+          port: 9090
+          passHostHeader: true

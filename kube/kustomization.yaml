@@ -35,3 +35,6 @@ resources:
   - kibana
   - logstash
   - grafana
+  # metrics collection: prometheus, node-exporter, kube-state-metrics.
+  # Last in the list because it watches everything above it.
+  - prometheus

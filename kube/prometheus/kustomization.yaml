@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Metrics collection for the fleet: Prometheus, plus the two exporters that
+# actually produce numbers.
+#
+#   kubectl kustomize kube/prometheus/    renders it
+#   kubectl apply -k kube/prometheus/     converges it
+#
+# The fleet Namespace is deliberately NOT owned here: folding a shared
+# namespace into a workload makes deleting that workload cascade-delete the
+# whole fleet.
+
+namespace: fleet
+
+resources:
+  - rbac.yaml
+  - config.yaml
+  - deployment.yaml
+  - exporters.yaml
+  - ingressroute.yaml

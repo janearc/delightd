@@ -1,0 +1,53 @@
+# Prometheus needs to DISCOVER what to scrape, which means reading the API.
+#
+# Scoped to reading, and only the objects service discovery actually uses. It
+# can list nodes, services, endpoints and pods; it cannot read a Secret, cannot
+# write anything, and cannot see a ConfigMap's contents. A metrics collector
+# that could read Secrets would be a credential exfiltration path wearing a
+# dashboard.
+#
+# The /metrics and /metrics/cadvisor subresources on nodes are what carry
+# kubelet and container metrics -- container_memory_working_set_bytes,
+# container_fs_usage_bytes and the rest -- so they are named explicitly rather
+# than granted by a wildcard on nodes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: fleet
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics", "nodes/proxy"]
+    verbs: ["get"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: fleet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: fleet
