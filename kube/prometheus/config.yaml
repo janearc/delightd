@@ -24,13 +24,38 @@ data:
     # OTLP INGESTION. Claude Code sessions push here rather than being scraped;
     # the receiver flag in deployment.yaml carries the reasoning.
     #
-    # A resource attribute does NOT become a label unless it is named below.
+    # A RESOURCE attribute does not become a label unless it is named below.
+    # That is the whole of what this list controls, and the distinction was
+    # got wrong here.
     #
-    # user.email, user.id, user.account_uuid and organization.id ride on every
-    # metric the SDK emits, and are deliberately NOT promoted. Not for privacy
-    # -- this is a single-operator laptop -- but because each holds one value
-    # forever. A label that never varies distinguishes nothing and costs
-    # storage on every sample of every series.
+    # This block used to say user.email, user.id, user.account_uuid and
+    # organization.id "ride on every metric the SDK emits, and are deliberately
+    # NOT promoted". The first half is right and the second half does not
+    # follow. Those four are DATAPOINT attributes, not resource attributes, so
+    # this allow-list never had any say over them -- and they are all present
+    # as labels on every claude_code_* series in the store right now, verified
+    # 2026-08-21. Leaving them off the list achieved nothing.
+    #
+    # The cost argument was sound and still applies: each holds one value
+    # forever on a single-operator estate, so they distinguish nothing and are
+    # paid for on every sample. Dropping them needs a metric_relabel_configs
+    # labeldrop on the OTLP path, not an omission here. Not done yet, and
+    # written down rather than left as a comment that describes a filter that
+    # does not exist.
+    #
+    # WHAT ACTUALLY BROKE THIS, for the next person: nothing arrived here for
+    # weeks and every surface looked fine. Two faults, stacked. The endpoint
+    # was set to .../api/v1/otlp -- but OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is
+    # the SIGNAL-SPECIFIC variable and is used verbatim; only the generic
+    # OTEL_EXPORTER_OTLP_ENDPOINT gets /v1/metrics appended. Fixing that got a
+    # 200 and STILL no series, because Claude Code exports DELTA temporality
+    # and Prometheus stores cumulative only: it drops delta points silently
+    # while still creating target_info from the resource. So the store showed a
+    # healthy-looking claude-code target with nothing behind it. The client
+    # needs OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative.
+    #
+    # Both faults are the same shape as the four others found the same night: a
+    # thing that was never populated, wearing the face of a thing that is fine.
     #
     # session.id IS promoted, and it is the one that earns its cardinality.
     # One Claude Code session is one judge invocation, so session.id is what
