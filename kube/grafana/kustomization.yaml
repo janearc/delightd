@@ -10,6 +10,9 @@ labels:
 
 resources:
   - grafana.yaml
+  # dashboards, provisioned from files so they survive a rebuild and can be
+  # reviewed in a diff rather than reconstructed from memory
+  - dashboards.yaml
 
 # Relocated from obs-svc (kube/elk/grafana.yaml) so delightd owns the manifest
 # ahead of obs-svc's sunset (T9). Manifest kept verbatim -- it carries its edge

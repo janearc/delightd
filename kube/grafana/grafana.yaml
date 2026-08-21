@@ -140,6 +140,14 @@ spec:
               mountPath: /var/lib/grafana
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            # Dashboards as FILES, not click-ops. The provider config tells
+            # grafana where to look; the JSON beside it is the view. Both are
+            # ConfigMaps, so a cluster rebuilt from git comes back with the
+            # same panels instead of an empty folder.
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -147,6 +155,12 @@ spec:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboard-fleet
 ---
 apiVersion: v1
 kind: Service
