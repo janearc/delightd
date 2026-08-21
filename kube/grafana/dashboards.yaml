@@ -404,8 +404,8 @@ data:
         {
           "type": "stat",
           "id": 5,
-          "title": "postings the classifier cannot type",
-          "description": "READ THIS BEFORE THE THEME PANELS. Live postings matching no demand theme at all, as a share of live postings. Theme membership is mechanical substring matching on titles, so a low match rate means the keyword sets have stopped covering the corpus rather than that the market went quiet. On 2026-08-21 this was 14646 of 14761 -- over 99 percent -- which means the theme breakdown below currently describes under one percent of what is up. Rediscovering the theme index is what fixes it.",
+          "title": "postings not yet classified",
+          "description": "READ THIS BEFORE THE THEME PANELS. Live postings carrying no demand theme, as a share of live postings. On 2026-08-21 it was 14646 of 14761 -- over 99 percent -- so the theme breakdown below currently describes about 115 postings, which is why this panel sits before them.\n\nThis is a BACKLOG, not a broken classifier. Themes are assigned at ingest and nothing is ever re-analyzed, so a posting harvested before the theme index existed carries no themes and never will until something goes back over it. The index landed 2026-08-20; everything older predates it. The remedy is a backfill of assignThemes across the corpus -- deterministic, no model call, keeps the existing themes. It is NOT a rediscovery run, which would spend a model call and mint a new taxonomy to fix a problem nobody has. Watch this drain as the backfill runs.",
           "gridPos": { "h": 6, "w": 5, "x": 19, "y": 0 },
           "fieldConfig": {
             "defaults": {
