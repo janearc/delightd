@@ -343,6 +343,26 @@ data:
             { "expr": "surrealdb_storage_rocksdb_estimate_num_keys", "legendFormat": "keys held (estimate)", "refId": "A" },
             { "expr": "surrealdb_storage_rocksdb_estimate_live_data_size", "legendFormat": "live data bytes", "refId": "B" }
           ]
+        },
+        {
+          "type": "timeseries",
+          "id": 13,
+          "title": "query errors in the last hour, by class and database",
+          "description": "INCREASE, not the raw counter, and that is the whole point of the panel. surrealdb_query_total is cumulative since the process started, so a total carries every fault since boot and looks alarming forever -- the same trap the fleet dashboard names about logstash sitting at 88 lifetime restarts behind a green 1/1 for 59 days.\n\nWhat is actionable here is RECURRENCE. On 2026-08-21 this store held 22 internal-class errors against the dodo database, beside 196865 successful queries -- 0.011 percent -- and not one of them had incremented since the scrape came up. They are historical, and they sit inside roughly 47 hours we have no visibility into, a window that contained a DiskPressure eviction of 30 pods, a kube-state-metrics crashloop and two Prometheus restarts. Any of those drops a client mid-query, which is a plausible internal-class error and is not a bug in the caller. Correlating 22 errors against four known disturbances would have found something, which is exactly why nobody went looking.\n\nSo this panel is the instrument that makes the next one real. A line that stays flat at zero means those 22 were the old world. A line that moves gives a bounded window and something worth chasing.\n\nerror_class separates them: client means a caller asked wrongly, internal means the store failed on its own account.",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "bars", "fillOpacity": 60 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "sum by (database, error_class) (increase(surrealdb_query_total{outcome=\"error\"}[1h]))",
+            "legendFormat": "{{database}} / {{error_class}}",
+            "refId": "A"
+          }]
         }
       ]
     }
