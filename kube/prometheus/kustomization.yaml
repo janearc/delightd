@@ -19,3 +19,8 @@ resources:
   - deployment.yaml
   - exporters.yaml
   - ingressroute.yaml
+  # Alertmanager lives here rather than in meubilair.yaml because Prometheus
+  # does too: the metrics stack is one kustomization, and the furnish pieces
+  # are the things delightd converges on the operator's behalf. Splitting them
+  # would mean two places to look when alerting breaks.
+  - alertmanager.yaml

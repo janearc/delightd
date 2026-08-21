@@ -182,11 +182,36 @@ data:
           # Names the CAUSE rather than the symptom. logstash's restarts were
           # visible; that they were OOMKills was not, and that was the whole
           # diagnosis.
+          # nanoleaf: "true" -- one of exactly TWO rules that reach the lights.
+          # See alertmanager.yaml. Routing is opt-in per rule on purpose: if
+          # everything lights it up, nothing does.
           - alert: ContainerOOMKilled
             expr: increase(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[30m]) > 0
-            labels: { severity: warning }
+            labels: { severity: warning, nanoleaf: "true" }
             annotations:
               summary: "{{ $labels.namespace }}/{{ $labels.pod }} was OOMKilled -- its limit is too low for its real footprint"
+
+          # THE OTHER LIGHT. This is the kubelet's own DiskPressure condition,
+          # not a threshold we picked -- it is the literal signal that evicted
+          # 30 pods on 2026-08-20, reported by the component that made the
+          # decision. NodeDiskFillingUp above is the early warning at 80%; this
+          # is "it is happening now", which is why this one earns a light and
+          # the warning does not.
+          #
+          # Verified against the live store rather than assumed: this series
+          # exists (3 of them, one per node condition). Two rules in this file
+          # were written against series that never existed -- one matched
+          # mountpoint="/" which node-exporter never reports in a container,
+          # and ContainerWithoutMemoryLimit is written as `== 0`, which matches
+          # nothing because an unlimited container emits no series at all
+          # (issue #137, still open). A rule nobody queried is a rule nobody
+          # knows is dead.
+          - alert: NodeUnderDiskPressure
+            expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+            for: 2m
+            labels: { severity: critical, nanoleaf: "true" }
+            annotations:
+              summary: "node {{ $labels.node }} is under DiskPressure -- the kubelet is evicting pods"
 
           # A pod that should be running and is not. Deliberately excludes
           # Succeeded and Failed, because a finished pod is not a sick one --
