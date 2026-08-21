@@ -26,11 +26,29 @@ data:
   datasources.yaml: |
     apiVersion: 1
     datasources:
+      # Prometheus is DEFAULT, and Elasticsearch is not, because the questions
+      # this estate actually needs answered are metric-shaped: how full is the
+      # disk, what is restarting, what got OOMKilled. On 2026-08-20 all three
+      # of those were found by a human reading a pod list, because grafana's
+      # only datasource was an ES index pattern that has never existed --
+      # fleet-logs-* is created by Logstash, and Logstash has never indexed a
+      # document. A dashboard pointed at an empty store looks like working
+      # observability and is not.
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        jsonData:
+          timeInterval: "30s"
+      # Kept, not default. It becomes useful the moment something feeds it --
+      # either Logstash gets an input or obs-svc-agg keeps carrying kafka to
+      # ES. Until then it is an honest empty source rather than a broken one.
       - name: Elasticsearch
         type: elasticsearch
         access: proxy
         url: http://elasticsearch:9200
-        isDefault: true
+        isDefault: false
         jsonData:
           index: "fleet-logs-*"
           timeField: "@timestamp"

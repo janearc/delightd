@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: fleet
+data:
+  prometheus.yml: |
+    # Scrape config for a ONE-NODE LAPTOP CLUSTER. Every number here is sized
+    # for that and would be wrong for a real fleet.
+    #
+    # 30s interval, not 15s: this exists to answer "is the disk filling" and
+    # "what is restarting", questions that move over minutes and hours. Halving
+    # the interval doubles the series volume and the memory to hold it, and
+    # buys resolution nobody will look at.
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+      external_labels:
+        cluster: fleet
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      # Prometheus itself. If this stops, nothing else is trustworthy either.
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # THE NODE. Host and node disk, memory, cpu, load. This is the job that
+      # would have caught the DiskPressure that evicted 30 pods.
+      - job_name: node-exporter
+        static_configs:
+          - targets: ['node-exporter.fleet.svc.cluster.local:9100']
+
+      # THE OBJECTS. Restarts, phases, evictions, deployment readiness.
+      # kube_pod_container_status_restarts_total is the series that would have
+      # named logstash's 88 OOMKills on day one instead of day 59.
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ['kube-state-metrics.fleet.svc.cluster.local:8080']
+
+      # THE KUBELET. Per-container memory and cpu, and the cadvisor filesystem
+      # series -- the closest thing to real per-volume usage this cluster has,
+      # since local-path makes the kubelet's per-PVC stats report the node
+      # filesystem identically for every claim.
+      - job_name: kubelet
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+      # THE ESTATE'S OWN SERVICES, opt-in by annotation. A pod carrying
+      # prometheus.io/scrape: "true" is scraped; everything else is left alone.
+      #
+      # Opt-in rather than scrape-everything on purpose: most pods here serve
+      # no metrics, and a scrape config that hammers every port in the namespace
+      # generates noise, failed-target alerts, and load nobody asked for.
+      # dodo, albatross and kestrel already emit the exposition format from
+      # their health ports -- they need the annotation, not new code.
+      - job_name: fleet-services
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: fleet
+data:
+  fleet.yml: |
+    # Rules named for the three faults that actually happened on 2026-08-20,
+    # every one of which was found by a human squinting at a list rather than
+    # by anything telling them.
+    #
+    # NO PAGER. These fire into Prometheus and Grafana, which is the right
+    # ceiling for a personal estate: the alert surface is the thing the
+    # operator already looks at, not a phone call at 03:20.
+    groups:
+      - name: fleet
+        rules:
+          # The one that evicted 30 pods. 85% is where the kubelet starts
+          # evicting by default, so 80% is a warning with room to act.
+          - alert: NodeDiskFillingUp
+            expr: |
+              100 - ((node_filesystem_avail_bytes{mountpoint="/"} * 100)
+                     / node_filesystem_size_bytes{mountpoint="/"}) > 80
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "node disk above 80% -- eviction starts at 85%"
+
+          # The one that hid behind a 1/1 for 59 days. Rate, not total: a pod
+          # with 88 lifetime restarts that is now stable should not alert
+          # forever, and one restarting three times an hour should.
+          - alert: PodRestartingRepeatedly
+            expr: increase(kube_pod_container_status_restarts_total[1h]) > 3
+            for: 15m
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ $labels.pod }} restarted more than 3 times in an hour"
+
+          # Names the CAUSE rather than the symptom. logstash's restarts were
+          # visible; that they were OOMKills was not, and that was the whole
+          # diagnosis.
+          - alert: ContainerOOMKilled
+            expr: increase(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[30m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ $labels.pod }} was OOMKilled -- its limit is too low for its real footprint"
+
+          # A pod that should be running and is not. Deliberately excludes
+          # Succeeded and Failed, because a finished pod is not a sick one --
+          # three completed pods from July read as a broken delightd.
+          - alert: PodNotReady
+            expr: kube_pod_status_ready{condition="false"} * on(pod, namespace)
+                  group_left kube_pod_status_phase{phase="Running"} > 0
+            for: 15m
+            labels: { severity: warning }
+            annotations:
+              summary: "{{ $labels.namespace }}/{{ $labels.pod }} has been not-ready for 15 minutes"
+
+          # The exposure the judge flagged: a container with no limit can take
+          # the whole node, where a bounded one merely dies.
+          - alert: ContainerWithoutMemoryLimit
+            expr: count(kube_pod_container_resource_limits{resource="memory"} == 0)
+                  or count(kube_pod_container_info) - count(kube_pod_container_resource_limits{resource="memory"}) > 0
+            for: 1h
+            labels: { severity: info }
+            annotations:
+              summary: "containers are running with no memory limit -- unbounded, they can take the node"

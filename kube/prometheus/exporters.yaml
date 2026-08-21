@@ -1,0 +1,188 @@
+# The two things that actually produce numbers.
+#
+# Prometheus stores and queries; it measures nothing itself. Without these it
+# is an empty database with a nice query language -- which is precisely the
+# state grafana was in before today: running, configured, and pointed at an
+# index that never existed.
+#
+#   node-exporter        the HOST: disk, memory, cpu, load, filesystems
+#   kube-state-metrics   the OBJECTS: restarts, phases, OOMKills, limits
+#
+# Between them they cover every fault found by eye on 2026-08-20.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: node-exporter
+    app.kubernetes.io/part-of: fleet
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-exporter
+        app.kubernetes.io/part-of: fleet
+    spec:
+      # DaemonSet and host namespaces because the point is to measure the NODE,
+      # not the container. A node-exporter confined to its own namespace
+      # reports the container's view of the filesystem, which is not the number
+      # that fills up and evicts things.
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+            # Ignore the pseudo-filesystems: without this, every container
+            # overlay mount becomes its own filesystem series and the disk
+            # graphs are unreadable.
+            - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/kubelet/.+)($|/)
+          ports:
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100
+          volumeMounts:
+            - { name: proc, mountPath: /host/proc, readOnly: true }
+            - { name: sys, mountPath: /host/sys, readOnly: true }
+            - { name: root, mountPath: /host/root, readOnly: true, mountPropagation: HostToContainer }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - { name: proc, hostPath: { path: /proc } }
+        - { name: sys, hostPath: { path: /sys } }
+        - { name: root, hostPath: { path: / } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: node-exporter
+    app.kubernetes.io/part-of: fleet
+spec:
+  selector:
+    app.kubernetes.io/name: node-exporter
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: fleet
+# Read-only over the object kinds it reports on. Notably NOT secrets: this
+# reports that objects exist and what state they are in, never what they hold.
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "services", "persistentvolumeclaims", "persistentvolumes", "resourcequotas"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: fleet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: fleet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-state-metrics
+        app.kubernetes.io/part-of: fleet
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.14.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: telemetry, containerPort: 8081 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: telemetry }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: telemetry }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    app.kubernetes.io/part-of: fleet
+spec:
+  selector:
+    app.kubernetes.io/name: kube-state-metrics
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: telemetry, port: 8081, targetPort: telemetry }
