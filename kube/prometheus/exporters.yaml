@@ -166,12 +166,25 @@ spec:
           ports:
             - { name: http, containerPort: 8080 }
             - { name: telemetry, containerPort: 8081 }
+          # The two ports do NOT serve the same endpoints, and the split is not
+          # symmetric: 8080 serves /healthz and /livez, 8081 serves /readyz.
+          # Asking either port for the other port endpoint returns 404, and a
+          # 404 is a probe FAILURE -- so a misaimed liveness probe kills a
+          # process that is answering correctly on the port beside it.
+          #
+          # That is exactly what happened: /healthz on telemetry returned 404
+          # every 30s and the kubelet restarted a healthy collector 47 times in
+          # three hours. Readiness kept passing during each 90s window, so the
+          # scrape did not fail outright -- it sawtoothed, and the object
+          # metrics arrived in bursts with five-minute holes. Gappy data under
+          # an increase() rule is worse than absent data, because the rule
+          # still evaluates and still looks configured.
           readinessProbe:
             httpGet: { path: /readyz, port: telemetry }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: telemetry }
+            httpGet: { path: /livez, port: http }
             initialDelaySeconds: 10
             periodSeconds: 30
           resources:
