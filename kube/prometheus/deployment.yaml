@@ -55,7 +55,8 @@ spec:
           image: prom/prometheus:v3.1.0
           imagePullPolicy: IfNotPresent
           args:
-            - --config.file=/etc/prometheus/prometheus.yml
+            # /conf, not /etc/prometheus directly: see the volumeMounts note.
+            - --config.file=/etc/prometheus/conf/prometheus.yml
             - --storage.tsdb.path=/prometheus
             # SEVEN DAYS, deliberately. Long enough to see a trend and to look
             # back at last night; short enough that the TSDB cannot quietly
@@ -82,9 +83,21 @@ spec:
             - name: http
               containerPort: 9090
           volumeMounts:
+            # NOT subPath, and this is the whole point of the change. A
+            # ConfigMap mounted with subPath NEVER receives updates -- the file
+            # is frozen at pod start. So `kubectl apply` on the ConfigMap
+            # changes nothing inside the pod, and POST /-/reload cheerfully
+            # re-reads the same stale file and answers 200. The operator gets a
+            # success response and no new behaviour, which is the worst way for
+            # a config change to fail. Mounted as a DIRECTORY the kubelet keeps
+            # it in sync, which is what makes --web.enable-lifecycle mean
+            # anything at all.
+            #
+            # Its own subdirectory rather than /etc/prometheus, because `rules`
+            # already mounts at /etc/prometheus/rules; nesting one mount inside
+            # another works but is a second trap for whoever edits this next.
             - name: config
-              mountPath: /etc/prometheus/prometheus.yml
-              subPath: prometheus.yml
+              mountPath: /etc/prometheus/conf
             - name: rules
               mountPath: /etc/prometheus/rules
             - name: data
