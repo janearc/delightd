@@ -107,7 +107,15 @@ spec:
               value: "true"
             # served at root behind the edge route.
             - name: GF_SERVER_ROOT_URL
-              value: http://grafana.local
+              value: http://grafana.localhost:8800
+            # Allow the dodo admin pane to embed panels in an iframe. Grafana
+            # sends X-Frame-Options: deny by default, which silently blanks an
+            # embed -- the page loads, the frame is empty, and nothing says
+            # why. Safe here only BECAUSE anonymous access is already the
+            # trust model (see the header): embedding grants no capability
+            # that visiting the URL did not already grant.
+            - name: GF_SECURITY_ALLOW_EMBEDDING
+              value: "true"
           ports:
             - name: http
               containerPort: 3000
@@ -193,7 +201,7 @@ spec:
     - kind: Rule
       # Identity-safe internal hostname; the real public hostname is set at
       # cloudflared/go-live, not baked in here.
-      match: Host(`grafana.local`)
+      match: Host(`grafana.localhost`) || Host(`grafana.local`) || Host(`grafana.mesh`)
       services:
         - kind: Service
           name: grafana
