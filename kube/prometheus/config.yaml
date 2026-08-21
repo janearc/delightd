@@ -24,25 +24,28 @@ data:
     # OTLP INGESTION. Claude Code sessions push here rather than being scraped;
     # the receiver flag in deployment.yaml carries the reasoning.
     #
-    # A resource attribute does NOT become a label unless it is named below,
-    # and that default is the one we want. The attributes Claude Code attaches
-    # by default include user.email, user.id, user.account_uuid and
-    # organization.id. Promoting those would stamp an identity onto every
-    # sample of every metric, and from there into every dashboard, every alert,
-    # and anything either is ever exported to. They stay unpromoted
-    # deliberately -- not as an oversight to be tidied up later.
+    # A resource attribute does NOT become a label unless it is named below.
     #
-    # session.id is left out for a duller reason: one series per session is
-    # unbounded cardinality for a value nobody queries by.
+    # user.email, user.id, user.account_uuid and organization.id ride on every
+    # metric the SDK emits, and are deliberately NOT promoted. Not for privacy
+    # -- this is a single-operator laptop -- but because each holds one value
+    # forever. A label that never varies distinguishes nothing and costs
+    # storage on every sample of every series.
+    #
+    # session.id IS promoted, and it is the one that earns its cardinality.
+    # One Claude Code session is one judge invocation, so session.id is what
+    # separates two rulings on the SAME pull request, and repeat rulings are
+    # ordinary: PR 131 was judged twice on 2026-08-21. mesh.pr collapses those
+    # into a single series; session.id keeps them apart. holden is the largest
+    # consumer of the allotment, so breaking its usage out per run is the
+    # point of this exercise rather than a nicety on top of it.
     #
     # mesh.* are ours, set through OTEL_RESOURCE_ATTRIBUTES by whatever spawns
-    # the session, so a judge run can be attributed to the repo and PR it
-    # ruled on. mesh.pr costs one series per PR; at this estate's rate against
-    # 7d retention that is tens of series, and it is what makes "what did that
-    # ruling cost" answerable at all.
+    # the session, so a run can be attributed to the repo and PR it ruled on.
     otlp:
       promote_resource_attributes:
         - service.name
+        - session.id
         - mesh.component
         - mesh.repo
         - mesh.pr
