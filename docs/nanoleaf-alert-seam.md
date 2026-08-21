@@ -6,12 +6,16 @@ receiver. Neither reaches into the other.
 
 ## What earns a light
 
-Two things, ruled by the operator on 2026-08-21:
+Two conditions, ruled by the operator on 2026-08-21 -- OOM kills, and disk
+pressure. Disk is expressed as a three-rung ladder rather than one rule, for the
+reason given under "what the light does":
 
-| Alert | Fires when |
-|---|---|
-| `ContainerOOMKilled` | a container was killed for exceeding its memory limit in the last 30m |
-| `NodeUnderDiskPressure` | the kubelet reports `DiskPressure` on a node for 2m |
+| Alert | Fires when | `nanoleaf_effect` |
+|---|---|---|
+| `ContainerOOMKilled` | a container was killed for exceeding its memory limit in the last 30m | `oom-bounce` |
+| `NodeDiskFillingUp` | node disk above 80% for 10m | `disk-throb-slow` |
+| `NodeDiskFillingFast` | node disk above 90% for 5m | `disk-throb-medium` |
+| `NodeUnderDiskPressure` | the kubelet reports `DiskPressure` for 2m | `disk-throb-fast` |
 
 Nothing else, and this is the load-bearing decision rather than a starting
 point to expand from. **If everything lights it up, nothing does.** A light that
@@ -24,9 +28,57 @@ add a light; someone has to decide it earned one. Everything else routes to a
 receiver named `blackhole` that does nothing — the alert is still visible in
 Prometheus and Grafana. Not routed is not the same as not recorded.
 
-`NodeDiskFillingUp` (disk above 80%) deliberately does **not** light. It is the
-early warning; `NodeUnderDiskPressure` is "it is happening now". Lighting both
-would train you to ignore the one that matters.
+## What the light does
+
+Two behaviours, one per condition, named by the `nanoleaf_effect` label. delightd
+says **which effect**; lights owns what the effect *is* -- which panels, which
+colours, the timing. The name is the whole contract. That split is deliberate:
+if delightd carried RGB values, changing a colour would mean an image rebuild, a
+holden ruling and a control-plane restart, and the colour would never get
+changed.
+
+**`oom-bounce`** -- OOM kills. The operator's words: *scary as fuck*. Chosen
+panels alternate between red and their colour in the current scene, so it reads
+as bouncing. Something is actively broken and wants a human.
+
+**`disk-throb-slow` / `-medium` / `-fast`** -- the disk ladder. The current scene
+throbbing slowly down to dark and back, **faster as the disk fills**. Less
+alarming than the bounce on purpose: disk fills over hours and you have time.
+
+### Why three disk effects instead of one with a speed parameter
+
+Because an Alertmanager label is a static string from the rule. A value that
+changes cannot ride in a label without minting a new alert for every new value,
+which would re-notify constantly and blow up cardinality. So the ramp is
+expressed as buckets: three rules, three effect names, rising urgency.
+
+**Exactly one lights at a time.** A node at 95% under DiskPressure satisfies all
+three rules, so `inhibit_rules` in alertmanager.yaml suppress the lower rungs --
+`fast` silences `medium` and `slow`, `medium` silences `slow`, matched on `node`
+so one node's crisis never silences another's warning. Three effects arriving
+together would fight over the same panels and the light would show whichever
+webhook landed last, which is worse than showing nothing because it looks
+deliberate.
+
+### Both effects are RELATIVE, and that is the hard part
+
+"alternate with the current scene" and "throb down from the current scene" are
+not expressible as stored Nanoleaf effects. The device's `animData` is a flat
+string of **absolute** RGBW values per panel per frame -- `numPanels panelId
+numFrames R G B W transTime ...` -- addressed by hardware panel ID. There is no
+"whatever is playing right now" primitive.
+
+So these cannot be stored on the device and triggered by name. lights has to
+**compose** them at alert time against whatever scene is active, then restore
+that scene on resolve. That is why the effect name is a contract and not a
+pointer to a device-stored effect.
+
+lights already has the vocabulary for this: `src/animation.ts` defines
+`AnimationIntent`, a device-independent description of what a light is trying to
+do over time, with per-device adapters. And `src/indicators.ts` already binds a
+named indicator to a chosen panel with operator-editable config persisted in
+`~/.config/lights/`. An alert is another indicator source -- pushed rather than
+polled.
 
 ## What lights actually receives
 
@@ -66,8 +118,9 @@ translator nobody asked for. Alertmanager POSTs its standard webhook v4 body:
 - **`status`** — `"firing"` or `"resolved"`. `send_resolved: true` is set, so
   lights gets told when it is over. **A light that only knows how to turn on is
   half a light.**
-- **`alerts[].labels.alertname`** — which of the two it is, so OOM and disk can
-  differ in colour.
+- **`alerts[].labels.nanoleaf_effect`** — the effect to play. This is the field
+  to key on, not `alertname`: it is the contract, and it is what lets the disk
+  ladder add a rung without lights changing.
 - **`alerts[].status`** — the per-alert state. Do not read the top-level
   `status` alone: one notification can carry a mix, where some alerts in the
   group have resolved and others have not.
@@ -83,7 +136,7 @@ key if lights tracks state per alert rather than per group.
   true re-notifies twice a day. The receiver must be idempotent — re-lighting an
   already-lit light must be a no-op, not a queued animation.
 - **Grouping means one POST can carry several alerts.** `group_by` is
-  `alertname, namespace, pod`, so ten OOM kills in one pod arrive as one
+  `alertname, namespace, pod, node`, so ten OOM kills in one pod arrive as one
   notification, but two different pods arrive as two.
 - **`groupKey` is opaque.** Do not parse it. Use labels.
 

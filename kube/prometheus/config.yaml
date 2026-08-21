@@ -160,14 +160,34 @@ data:
           # This mountpoint is also the semantically honest one: local-path
           # PVCs and container storage both live under it, so it is genuinely
           # the thing that fills.
+          # THE DISK LADDER. Three rules, one signal, rising urgency -- because
+          # the light for disk is a throb that speeds up as pressure rises, and
+          # an Alertmanager label is a static string. A value that changes
+          # cannot ride in a label without minting a new alert for every new
+          # value, so the ramp is expressed as BUCKETS instead. Operator
+          # ruling, 2026-08-21.
+          #
+          # Only one lights at a time. The overlap is resolved by inhibit_rules
+          # in alertmanager.yaml rather than by PromQL gymnastics here: a node
+          # at 95% under DiskPressure genuinely satisfies all three, and three
+          # effects arriving at once would fight over the same panels.
           - alert: NodeDiskFillingUp
             expr: |
               100 - ((node_filesystem_avail_bytes{mountpoint="/var/lib/rancher/k3s"} * 100)
                      / node_filesystem_size_bytes{mountpoint="/var/lib/rancher/k3s"}) > 80
             for: 10m
-            labels: { severity: warning }
+            labels: { severity: warning, nanoleaf: "true", nanoleaf_effect: "disk-throb-slow" }
             annotations:
               summary: "node disk above 80% -- eviction starts at 85%"
+
+          - alert: NodeDiskFillingFast
+            expr: |
+              100 - ((node_filesystem_avail_bytes{mountpoint="/var/lib/rancher/k3s"} * 100)
+                     / node_filesystem_size_bytes{mountpoint="/var/lib/rancher/k3s"}) > 90
+            for: 5m
+            labels: { severity: warning, nanoleaf: "true", nanoleaf_effect: "disk-throb-medium" }
+            annotations:
+              summary: "node disk above 90% -- past the eviction threshold, pods are at risk"
 
           # The one that hid behind a 1/1 for 59 days. Rate, not total: a pod
           # with 88 lifetime restarts that is now stable should not alert
@@ -187,7 +207,7 @@ data:
           # everything lights it up, nothing does.
           - alert: ContainerOOMKilled
             expr: increase(kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}[30m]) > 0
-            labels: { severity: warning, nanoleaf: "true" }
+            labels: { severity: warning, nanoleaf: "true", nanoleaf_effect: "oom-bounce" }
             annotations:
               summary: "{{ $labels.namespace }}/{{ $labels.pod }} was OOMKilled -- its limit is too low for its real footprint"
 
@@ -209,7 +229,7 @@ data:
           - alert: NodeUnderDiskPressure
             expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
             for: 2m
-            labels: { severity: critical, nanoleaf: "true" }
+            labels: { severity: critical, nanoleaf: "true", nanoleaf_effect: "disk-throb-fast" }
             annotations:
               summary: "node {{ $labels.node }} is under DiskPressure -- the kubelet is evicting pods"
 

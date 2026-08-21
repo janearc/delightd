@@ -42,7 +42,10 @@ data:
       # pod are one notification rather than ten. group_by on alertname alone
       # would merge unrelated pods into one light, which loses the thing you
       # need to know.
-      group_by: ['alertname', 'namespace', 'pod']
+      # node is in here for the disk ladder: those alerts carry no pod, and
+      # grouping them without it would merge two nodes' disk states into one
+      # notification and one light.
+      group_by: ['alertname', 'namespace', 'pod', 'node']
       group_wait: 30s
       group_interval: 5m
       # Twelve hours, deliberately. A light that re-fires every five minutes for
@@ -63,6 +66,28 @@ data:
           receiver: 'nanoleaf'
           # continue: false is the default and is wanted here -- an alert that
           # earns a light does not also fall through to the blackhole.
+
+    # ONE RUNG OF THE DISK LADDER AT A TIME. A node at 95% under DiskPressure
+    # genuinely satisfies all three disk rules, and three effects arriving at
+    # once would fight over the same panels -- the light would show whichever
+    # webhook landed last, which is worse than showing nothing because it looks
+    # deliberate.
+    #
+    # Inhibition rather than PromQL gymnastics in the rules: expressing mutual
+    # exclusion with `unless` chains puts the ladder's shape in two places and
+    # they drift. Alertmanager owns "which of these do I actually deliver",
+    # which is exactly this question.
+    #
+    # `equal: [node]` matters -- a fast throb on one node must not silence a
+    # slow throb on a different one. There is one node today, and that is
+    # precisely when this sort of thing gets written wrong and nobody notices.
+    inhibit_rules:
+      - source_matchers: [ 'nanoleaf_effect = "disk-throb-fast"' ]
+        target_matchers: [ 'nanoleaf_effect =~ "disk-throb-(slow|medium)"' ]
+        equal: ['node']
+      - source_matchers: [ 'nanoleaf_effect = "disk-throb-medium"' ]
+        target_matchers: [ 'nanoleaf_effect = "disk-throb-slow"' ]
+        equal: ['node']
 
     receivers:
       - name: 'blackhole'
