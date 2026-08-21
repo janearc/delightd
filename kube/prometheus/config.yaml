@@ -21,6 +21,33 @@ data:
       external_labels:
         cluster: fleet
 
+    # OTLP INGESTION. Claude Code sessions push here rather than being scraped;
+    # the receiver flag in deployment.yaml carries the reasoning.
+    #
+    # A resource attribute does NOT become a label unless it is named below,
+    # and that default is the one we want. The attributes Claude Code attaches
+    # by default include user.email, user.id, user.account_uuid and
+    # organization.id. Promoting those would stamp an identity onto every
+    # sample of every metric, and from there into every dashboard, every alert,
+    # and anything either is ever exported to. They stay unpromoted
+    # deliberately -- not as an oversight to be tidied up later.
+    #
+    # session.id is left out for a duller reason: one series per session is
+    # unbounded cardinality for a value nobody queries by.
+    #
+    # mesh.* are ours, set through OTEL_RESOURCE_ATTRIBUTES by whatever spawns
+    # the session, so a judge run can be attributed to the repo and PR it
+    # ruled on. mesh.pr costs one series per PR; at this estate's rate against
+    # 7d retention that is tens of series, and it is what makes "what did that
+    # ruling cost" answerable at all.
+    otlp:
+      promote_resource_attributes:
+        - service.name
+        - mesh.component
+        - mesh.repo
+        - mesh.pr
+        - terminal.type
+
     rule_files:
       - /etc/prometheus/rules/*.yml
 

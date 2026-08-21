@@ -63,6 +63,21 @@ spec:
             # only alongside the claim above.
             - --storage.tsdb.retention.time=7d
             - --web.enable-lifecycle
+            # PUSH, alongside the pull. Everything else here is scraped, which
+            # works because everything else is a resident process at a stable
+            # address. Claude Code sessions are neither: they start, run for
+            # minutes, and exit, and several run at once. A scrape target that
+            # is gone by the time you scrape it reports nothing, and the
+            # Prometheus exporter each session would otherwise bind collides
+            # on one port the moment a second session starts.
+            #
+            # So those sessions PUSH over OTLP and Prometheus receives on
+            # /api/v1/otlp/v1/metrics. No collector in between: the collector
+            # image is a quarter of a gigabyte and this VM hit DiskPressure
+            # today, so the receiver Prometheus already ships is the cheaper
+            # correct answer. See the otlp block in prometheus.yml for which
+            # resource attributes become labels, and which deliberately do not.
+            - --web.enable-otlp-receiver
           ports:
             - name: http
               containerPort: 9090
