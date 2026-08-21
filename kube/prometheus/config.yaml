@@ -129,16 +129,38 @@ data:
       #   dodo      :15000 /metrics  the landing page HTML, not metrics
       #   dodo      :15090 /metrics  200, body EMPTY
       #
-      # albatross's src/ports.ts says "the web interfaces serve their own on
-      # their main port"; they do not. The exposition format exists in
+      # albatross's src/ports.ts claimed "the web interfaces serve their own on
+      # their main port"; they did not. The exposition format existed only in
       # src/health.ts and only a CLI pass ever starts that server, so the
-      # numbers live for the length of a nightly run and vanish. The annotation
-      # is necessary and it is not sufficient -- the resident services need
-      # code that serves /metrics before there is anything to keep.
+      # numbers lived for the length of a nightly run and vanished. The
+      # annotation was necessary and it was never sufficient.
       #
-      # Nothing here is wrong for the batch half either way: a nightly is not
-      # a scrape target at any address, in or out of the cluster. It pushes.
-      # See the otlp block above.
+      # SINCE FIXED on the resident half: albatross :15001 now serves the
+      # market families from src/market.ts -- open postings, arrivals, posting
+      # lifetime, demand by theme, ghost rate, reposting churn. So there is
+      # finally something worth scraping.
+      #
+      # No static target is added here for it, deliberately. albatross has no
+      # kubernetes manifests yet only because it was split out of dodo on
+      # 2026-08-20 and nobody has written them; the operator has ruled it
+      # belongs in the cluster. Once its Deployment exists carrying
+      #
+      #     prometheus.io/scrape: "true"
+      #     prometheus.io/port:   "15001"
+      #
+      # the job above discovers it with no change to this file. Pointing a
+      # static target at the host in the meantime would mean hard-coding
+      # 192.168.5.2 -- the lima host route, and the only address that crosses
+      # the VM boundary, since host.k3d.internal does not resolve here and
+      # 172.21.0.1 is the docker bridge gateway, i.e. the VM rather than the
+      # Mac. That is a real address and a temporary one, and a temporary
+      # address in a committed manifest outlives its reason every time.
+      #
+      # The batch half is different and stays different. A nightly is not at
+      # any address when the scrape arrives, in the cluster or out of it, so
+      # its counters -- including the Brave quota, cost and outcome series --
+      # PUSH over OTLP at the end of the pass. Two halves, two deliveries; the
+      # cluster move does not collapse them into one. See the otlp block above.
       - job_name: fleet-services
         kubernetes_sd_configs:
           - role: pod

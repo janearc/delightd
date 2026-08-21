@@ -345,3 +345,128 @@ data:
         }
       ]
     }
+  job-market.json: |
+    {
+      "uid": "job-market",
+      "title": "job market",
+      "tags": ["albatross", "market"],
+      "timezone": "browser",
+      "refresh": "1m",
+      "time": { "from": "now-7d", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "id": 1,
+          "title": "open postings",
+          "description": "Postings seen within the last seven days. The nightly re-harvests every employer's board, so a live posting is re-seen every night and a week of silence is a closed role rather than a missed run.",
+          "gridPos": { "h": 6, "w": 5, "x": 0, "y": 0 },
+          "targets": [{ "expr": "albatross_postings_open", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 2,
+          "title": "new in the last day",
+          "description": "Postings first seen in the last 24 hours. This is the arrival rate -- what the market put up since yesterday, not what is up in total.",
+          "gridPos": { "h": 6, "w": 5, "x": 5, "y": 0 },
+          "targets": [{ "expr": "albatross_postings_new_1d", "refId": "A" }]
+        },
+        {
+          "type": "gauge",
+          "id": 3,
+          "title": "ghost rate",
+          "description": "Share of checked employers keeping postings on a rented board their own site links from NOWHERE -- so an ordinary visitor clicking Careers never sees them. See ghosts.ts for why that signature is checkable. This is the number that says how much of a search is spent on roles nobody is reading. It was 85 of 193 checked employers on 2026-08-21, which is not a rounding error.",
+          "gridPos": { "h": 6, "w": 5, "x": 10, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 20 },
+                { "color": "red", "value": 40 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 * albatross_boards_ghost / clamp_min(albatross_boards_checked, 1)",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "stat",
+          "id": 4,
+          "title": "median posting lifetime",
+          "description": "Days a posting stays up, measured ONLY over postings that have closed -- counting still-open ones would report how long they have been up so far and drag the median toward zero every time a batch arrives. It needs closed postings to mean anything, and on 2026-08-21 there were four of them, so read this as not-yet-answerable rather than as a fast market. It becomes real after a few harvest cycles.",
+          "gridPos": { "h": 6, "w": 4, "x": 15, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "d" } },
+          "targets": [{ "expr": "albatross_posting_lifetime_days{quantile=\"0.5\"}", "refId": "A" }]
+        },
+        {
+          "type": "stat",
+          "id": 5,
+          "title": "postings the classifier cannot type",
+          "description": "READ THIS BEFORE THE THEME PANELS. Live postings matching no demand theme at all, as a share of live postings. Theme membership is mechanical substring matching on titles, so a low match rate means the keyword sets have stopped covering the corpus rather than that the market went quiet. On 2026-08-21 this was 14646 of 14761 -- over 99 percent -- which means the theme breakdown below currently describes under one percent of what is up. Rediscovering the theme index is what fixes it.",
+          "gridPos": { "h": 6, "w": 5, "x": 19, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 25 },
+                { "color": "red", "value": 60 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 * albatross_jobs_untyped / clamp_min(albatross_jobs_live, 1)",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "bargauge",
+          "id": 6,
+          "title": "demand by theme, now",
+          "description": "Live postings per demand theme -- what employers are trying to get done, not job families. A posting belongs to every theme whose keywords its title contains, so these deliberately OVERLAP and must not be summed or compared against the total.",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 },
+          "options": { "displayMode": "gradient", "orientation": "horizontal" },
+          "targets": [{
+            "expr": "topk(15, albatross_postings_by_theme)",
+            "legendFormat": "{{theme}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 7,
+          "title": "theme drift",
+          "description": "The same series over time: is infra showing up more, is golang showing up more. NOTE THE CEILING -- Prometheus keeps seven days here, so this answers 'what moved this week' and can never answer 'what moved since June'. The long view needs the store, which has first_seen on every posting and does not forget.",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 },
+          "targets": [{
+            "expr": "topk(10, albatross_postings_by_theme)",
+            "legendFormat": "{{theme}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "id": 8,
+          "title": "arrivals per day",
+          "description": "New postings per day beside the running total of what is open. The two moving together is a growing market; arrivals steady while open climbs means postings are not closing, which is the shape ghost boards make.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "targets": [
+            { "expr": "albatross_postings_new_1d", "legendFormat": "new in last day", "refId": "A" },
+            { "expr": "albatross_postings_open", "legendFormat": "open", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "id": 9,
+          "title": "board posture, and reposting churn",
+          "description": "broadcast means the employer publishes structured postings its own site links; quiet means it does not. Churn counts titles seen going down and back up again -- a role genuinely being filled does not do that, so churn is a second, independent signal of the same thing the ghost rate measures.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "targets": [
+            { "expr": "albatross_boards_posture", "legendFormat": "{{posture}}", "refId": "A" },
+            { "expr": "albatross_reposting_churn", "legendFormat": "reposting churn", "refId": "B" }
+          ]
+        }
+      ]
+    }
