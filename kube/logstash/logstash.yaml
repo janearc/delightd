@@ -63,7 +63,33 @@ metadata:
     app.kubernetes.io/name: logstash
     app.kubernetes.io/part-of: fleet
 spec:
-  replicas: 1
+  # PARKED AT ZERO, 2026-08-20, deliberately. This is NOT abandonment, and the
+  # Deployment must NOT be deleted -- the operator intends to use Logstash once
+  # it has an input. Everything is kept so turning it back on is one command:
+  #
+  #     kubectl -n fleet scale deploy/logstash --replicas=1
+  #
+  # WHY IT IS PARKED. Logstash has never indexed a document: Elasticsearch holds
+  # no fleet-logs-* index at all. Nothing sends it Beats data on 5044, and by
+  # this file's own header it deliberately does not consume the Kafka bus yet
+  # (the fleet publishes Confluent-framed Protobuf; stock Logstash cannot decode
+  # that without the codec plugin and compiled descriptors -- a build, tracked,
+  # not silently half-wired). So it was holding ~630Mi of an 11.65 GiB node in
+  # exchange for nothing.
+  #
+  # WHY REPLICAS AND NOT A DELETE. The pipeline, the node settings, the Service
+  # and the resource sizing are all correct and some of it was expensive to
+  # learn -- the memory limit below cost 88 OOMKills over 59 days to get right.
+  # Deleting would throw that away and the next person would rediscover it.
+  #
+  # WHY IN THE MANIFEST AND NOT `kubectl scale`. A live scale is undone by the
+  # next `kubectl apply -k`, which would silently resurrect a pod somebody
+  # deliberately parked. If it is a decision, it belongs in the file.
+  #
+  # The judge declined to rule on this when ratifying the memory fix, on the
+  # grounds that "should logstash exist yet" is intent and therefore the
+  # operator's call rather than a reviewer's. She ruled: park it.
+  replicas: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: logstash
