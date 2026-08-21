@@ -116,10 +116,24 @@ data:
         rules:
           # The one that evicted 30 pods. 85% is where the kubelet starts
           # evicting by default, so 80% is a warning with room to act.
+          #
+          # The mountpoint is /var/lib/rancher/k3s and NOT "/", which is not a
+          # detail. node-exporter runs in a container: it never sees a mount
+          # called "/" for the node's disk, and reports that filesystem under
+          # whichever bind mounts exist -- /etc/hosts, /etc/hostname,
+          # /var/lib/kubelet, /var/lib/rancher/k3s -- all the same 52.5GB ext4
+          # device. A rule written against "/" matches NOTHING and fires never,
+          # which is the worst failure an alert can have: it looks configured
+          # and stays silent. The first version of this file had exactly that
+          # bug and it was caught by querying, not by reading.
+          #
+          # This mountpoint is also the semantically honest one: local-path
+          # PVCs and container storage both live under it, so it is genuinely
+          # the thing that fills.
           - alert: NodeDiskFillingUp
             expr: |
-              100 - ((node_filesystem_avail_bytes{mountpoint="/"} * 100)
-                     / node_filesystem_size_bytes{mountpoint="/"}) > 80
+              100 - ((node_filesystem_avail_bytes{mountpoint="/var/lib/rancher/k3s"} * 100)
+                     / node_filesystem_size_bytes{mountpoint="/var/lib/rancher/k3s"}) > 80
             for: 10m
             labels: { severity: warning }
             annotations:
