@@ -308,6 +308,64 @@ data:
         # albatross's side; scraping faster than the cache just serves the same
         # numbers back. The data moves when a nightly pass runs, once a day.
         scrape_interval: 60s
+
+      # TRAEFIK. Every request into this estate crosses it, and it has been
+      # exporting Prometheus metrics since the cluster was built with nothing
+      # collecting them. Per-route request rates, latencies and response codes,
+      # produced and discarded for weeks.
+      #
+      # WHY THIS ONE IS DIFFERENT FROM EVERY OTHER TARGET HERE: the rest of the
+      # estate tells you a service is UNHEALTHY. traefik is the only thing that
+      # tells you someone TRIED TO REACH one and what happened to them. A .mesh
+      # name that does not resolve, an IngressRoute pointing at a service that
+      # no longer exists, a backend that started refusing -- none of those show
+      # up as an unhealthy pod, because the pod is fine and the request never
+      # arrives. grafana was unreachable for 59 days behind exactly that blind
+      # spot.
+      #
+      # POD DISCOVERY, NOT A STATIC TARGET, and this is the part that catches
+      # people. traefik's Service exposes only web:80 and websecure:443 --
+      # measured -- so a static target at the ClusterIP cannot reach 9100 at
+      # all. Two sessions independently checked that the metrics entrypoint
+      # existed and neither checked whether the Service published it. The port
+      # is on the POD, so the pod is what gets discovered.
+      #
+      # Kept to kube-system rather than discovering cluster-wide: this job wants
+      # exactly one workload, and a namespace filter is cheaper than asking the
+      # apiserver for every pod in the cluster and throwing nearly all of them
+      # away.
+      #
+      # Filtered on the container port NAME rather than the number. role: pod
+      # yields one target per declared container port -- traefik declares four
+      # (metrics 9100, traefik 8080, web 8000, websecure 8443) -- so without
+      # this the job scrapes all four and three of them fail forever. The name
+      # also survives the chart renumbering the port, which a hardcoded 9100
+      # would not.
+      - job_name: traefik
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['kube-system']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: traefik
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: metrics
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metric_relabel_configs:
+          # traefik emits a full Go runtime surface -- goroutines, GC pauses,
+          # every heap bucket -- on top of the routing metrics. On a laptop
+          # TSDB with a 5Gi claim that is a lot of series describing the
+          # ingress's garbage collector, which nobody has ever needed. The
+          # routing signal is what this job exists for.
+          - source_labels: [__name__]
+            action: drop
+            regex: 'go_.*|process_.*|promhttp_.*'
 ---
 apiVersion: v1
 kind: ConfigMap
