@@ -151,6 +151,18 @@ spec:
         - name: kube-state-metrics
           image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.14.0
           imagePullPolicy: IfNotPresent
+          args:
+            # Collect ONLY what the ClusterRole above grants. By default
+            # kube-state-metrics tries every resource kind it knows, including
+            # configmaps, replicationcontrollers and webhook configurations --
+            # none of which are granted here, deliberately, because a metrics
+            # collector has no business reading ConfigMap contents.
+            #
+            # Without this it still serves metrics but floods its log with
+            # forbidden-list errors on a watch loop and the scrape flaps. The
+            # fix is to narrow the COLLECTOR to the grant, never to widen the
+            # grant to match the collector's defaults.
+            - --resources=pods,nodes,namespaces,services,persistentvolumeclaims,persistentvolumes,resourcequotas,deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs
           ports:
             - { name: http, containerPort: 8080 }
             - { name: telemetry, containerPort: 8081 }
