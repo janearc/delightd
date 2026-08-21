@@ -1,0 +1,166 @@
+# Dashboards, provisioned as code.
+#
+# Clicked-together dashboards do not survive a rebuild, cannot be reviewed, and
+# have no history. These are files: they land with the manifest, they diff, and
+# a cluster rebuilt from git comes back with the same views.
+#
+# The panels are chosen from what actually went wrong on 2026-08-20 rather than
+# from what a dashboard usually shows. Every row here answers a question that
+# was asked by a human squinting at a pod list that day.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: fleet
+        orgId: 1
+        folder: fleet
+        type: file
+        disableDeletion: false
+        # allow edits in the UI, but the file is the source of truth and wins
+        # on every restart. Experiment freely; commit what you want to keep.
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-fleet
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: fleet
+data:
+  fleet.json: |
+    {
+      "uid": "fleet-overview",
+      "title": "fleet overview",
+      "tags": ["fleet"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "panels": [
+        {
+          "type": "gauge",
+          "title": "node disk used",
+          "description": "The 52.5GB ext4 the whole cluster shares. Kubelet evicts at 85% -- that is what took 30 pods out. Mountpoint is /var/lib/rancher/k3s, not /, because node-exporter runs in a container and never sees a mount called / for the node disk.",
+          "gridPos": { "h": 7, "w": 6, "x": 0, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 70 },
+                { "color": "red", "value": 85 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/var/lib/rancher/k3s\"} * 100) / node_filesystem_size_bytes{mountpoint=\"/var/lib/rancher/k3s\"})",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "gauge",
+          "title": "node memory used",
+          "description": "11.65 GiB allocatable, which is far less than the Mac's memory and is the number that actually constrains limits.",
+          "gridPos": { "h": 7, "w": 6, "x": 6, "y": 0 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent", "min": 0, "max": 100,
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 75 },
+                { "color": "red", "value": 90 }
+              ]}
+            }
+          },
+          "targets": [{
+            "expr": "100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "containers with NO memory limit",
+          "description": "An unbounded container can take the whole node; a bounded one merely dies. This is the node's real exposure -- logstash was bounded and visibly OOMKilling, which is the safe failure.",
+          "gridPos": { "h": 7, "w": 6, "x": 12, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "mode": "absolute", "steps": [
+              { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+            ]}}
+          },
+          "targets": [{
+            "expr": "count(kube_pod_container_info) - count(kube_pod_container_resource_limits{resource=\"memory\"})",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "topics producing into the void",
+          "description": "hall-monitor's absence ledger. A producer with zero live consumer groups is refusal-class: the mesh once ran a week like this with every artifact gate green, which is why hm exists. It emitted this metric for 116 ticks before anything scraped it.",
+          "gridPos": { "h": 7, "w": 6, "x": 18, "y": 0 },
+          "fieldConfig": {
+            "defaults": { "thresholds": { "mode": "absolute", "steps": [
+              { "color": "green", "value": null }, { "color": "red", "value": 1 }
+            ]}}
+          },
+          "targets": [{ "expr": "count(hm_void_topics_total)", "refId": "A" }]
+        },
+        {
+          "type": "timeseries",
+          "title": "container restarts (1h rate)",
+          "description": "Rate, not lifetime total. logstash sat at 88 lifetime restarts behind a green 1/1 for 59 days -- a total would alarm forever after a pod recovers, and a rate says what is wrong NOW.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+          "targets": [{
+            "expr": "increase(kube_pod_container_status_restarts_total[1h]) > 0",
+            "legendFormat": "{{namespace}}/{{pod}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "memory by pod",
+          "description": "Working set per pod. Watch for a pod climbing toward its limit rather than sitting under it -- that is the shape of the next OOMKill.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [{
+            "expr": "topk(10, sum by (pod) (container_memory_working_set_bytes{pod!=\"\"}))",
+            "legendFormat": "{{pod}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "hall-monitor: records seen per topic",
+          "description": "What is actually crossing the wire. hm reads the broker's own metadata, so this is observed traffic rather than what a service claims to publish.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [{
+            "expr": "increase(hm_records_total[5m])",
+            "legendFormat": "{{topic}}",
+            "refId": "A"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "node disk free",
+          "description": "The absolute number, beside the percentage gauge. A percentage hides how much room is actually left when the denominator is only 52.5GB.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "fieldConfig": { "defaults": { "unit": "bytes" } },
+          "targets": [{
+            "expr": "node_filesystem_avail_bytes{mountpoint=\"/var/lib/rancher/k3s\"}",
+            "legendFormat": "free",
+            "refId": "A"
+          }]
+        }
+      ]
+    }
