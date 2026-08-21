@@ -314,8 +314,9 @@ data:
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
           "fieldConfig": { "defaults": { "unit": "Bps" } },
           "targets": [
-            { "expr": "sum(rate(surrealdb_transaction_value_bytes_read_total[5m]))", "legendFormat": "read", "refId": "A" },
-            { "expr": "sum(rate(surrealdb_transaction_value_bytes_written_total[5m]))", "legendFormat": "written", "refId": "B" }
+            { "expr": "sum(rate(surrealdb_transaction_value_bytes_read_bytes_total[5m]))", "legendFormat": "values read", "refId": "A" },
+            { "expr": "sum(rate(surrealdb_transaction_value_bytes_written_bytes_total[5m]))", "legendFormat": "values written", "refId": "B" },
+            { "expr": "sum(rate(surrealdb_transaction_key_bytes_read_bytes_total[5m]))", "legendFormat": "keys read", "refId": "C" }
           ]
         },
         {
@@ -334,14 +335,14 @@ data:
         {
           "type": "timeseries",
           "id": 12,
-          "title": "active sessions",
-          "description": "Open sessions by protocol. dodo's db.ts re-signs every 20 minutes because a signin token expires around an hour and a long-running pane otherwise goes quietly anonymous; a sawtooth here is that refresh working as intended.",
+          "title": "store growth: keys held, and live data on disk",
+          "description": "The closest thing surreal reports to LOGICAL growth. estimate_num_keys is rocksdb's own count of keys held -- not rows, since one record spans several keys, but it moves with the estate rather than with process memory, and it is the only native series that does. Beside it, the live data size after compaction.\n\nThis panel replaced an active-sessions panel written from the published metrics catalogue: surrealdb_session_active does not exist in 3.2.0. The whole session family is absent from what this server actually renders, which is why every panel here was re-checked against a live scrape rather than against the documentation.",
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
-          "targets": [{
-            "expr": "sum by (protocol, service) (surrealdb_session_active)",
-            "legendFormat": "{{protocol}} {{service}}",
-            "refId": "A"
-          }]
+          "fieldConfig": { "defaults": { "custom": { "axisPlacement": "auto" } } },
+          "targets": [
+            { "expr": "surrealdb_storage_rocksdb_estimate_num_keys", "legendFormat": "keys held (estimate)", "refId": "A" },
+            { "expr": "surrealdb_storage_rocksdb_estimate_live_data_size", "legendFormat": "live data bytes", "refId": "B" }
+          ]
         }
       ]
     }
