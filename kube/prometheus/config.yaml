@@ -165,21 +165,31 @@ data:
       # lifetime, demand by theme, ghost rate, reposting churn. So there is
       # finally something worth scraping.
       #
-      # No static target is added here for it, deliberately. albatross has no
-      # kubernetes manifests yet only because it was split out of dodo on
-      # 2026-08-20 and nobody has written them; the operator has ruled it
-      # belongs in the cluster. Once its Deployment exists carrying
+      # ALBATROSS IS DISCOVERED BY THIS JOB, as of 2026-08-21. Its jobs pane
+      # runs as a pod carrying
       #
       #     prometheus.io/scrape: "true"
       #     prometheus.io/port:   "15001"
       #
-      # the job above discovers it with no change to this file. Pointing a
-      # static target at the host in the meantime would mean hard-coding
-      # 192.168.5.2 -- the lima host route, and the only address that crosses
-      # the VM boundary, since host.k3d.internal does not resolve here and
-      # 172.21.0.1 is the docker bridge gateway, i.e. the VM rather than the
-      # Mac. That is a real address and a temporary one, and a temporary
-      # address in a committed manifest outlives its reason every time.
+      # so it needs no job of its own and this file knows nothing about it.
+      #
+      # It briefly did. For one day after being split out of dodo it ran as a
+      # host process, collected by a static target at 192.168.5.2 -- the lima
+      # host route, and the only address that crosses the VM boundary, since
+      # host.k3d.internal does not resolve here and 172.21.0.1 is the docker
+      # bridge gateway, the VM rather than the Mac. That target was argued
+      # against on the grounds that a temporary address in a committed manifest
+      # outlives its reason every time, added anyway because the operator ruled
+      # the signal was worth more that night, and removed the same day once the
+      # manifests existed. The obligation to delete it was written into three
+      # places precisely so it would not be the counterexample to its own
+      # argument.
+      #
+      # This paragraph is rewritten rather than appended to, because the
+      # version it replaces said "no static target is added here, deliberately"
+      # and "albatross has no kubernetes manifests yet" -- both true when
+      # written, both false within a day, and a comment that reads as current
+      # and is not is the fault this estate spent a whole session chasing.
       #
       # The batch half is different and stays different. A nightly is not at
       # any address when the scrape arrives, in the cluster or out of it, so
@@ -263,51 +273,6 @@ data:
           # is a question that gets asked.
           - action: labeldrop
             regex: user
-
-      # ALBATROSS, the resident half. The job market as numbers: open postings,
-      # arrivals per day, posting lifetime, demand by theme, ghost rate, board
-      # posture, reposting churn.
-      #
-      # THIS TARGET IS TEMPORARY AND SHOULD BE DELETED. It points at the host
-      # because albatross runs as a host process today, and it runs as a host
-      # process only because it was split out of dodo on 2026-08-20 and nobody
-      # has written its manifests yet. The operator has ruled it belongs in the
-      # cluster. The moment its Deployment exists carrying
-      #
-      #     prometheus.io/scrape: "true"
-      #     prometheus.io/port:   "15001"
-      #
-      # the fleet-services job above discovers it and THIS BLOCK MUST GO. Two
-      # targets for one service means one of them is silently wrong.
-      #
-      # 192.168.5.2 is the lima host route and it is the ONLY address that
-      # crosses the VM boundary from inside this cluster. Measured 2026-08-21:
-      # host.k3d.internal does not resolve (CoreDNS NodeHosts carries exactly
-      # one line, the node itself), host.docker.internal does not resolve, and
-      # 172.21.0.1 is the k3d docker bridge gateway -- which is the colima VM,
-      # one layer below the Mac, and refuses the connection. Only 192.168.5.2
-      # answers.
-      #
-      # Recording the disagreement rather than losing it: this was argued
-      # against as temporary cleverness in a committed manifest, on the grounds
-      # that a temporary address outlives its reason every time. The operator
-      # ruled that the signal tonight is worth more than the tidiness, which is
-      # a fair call on a personal estate. The comment above is the mitigation --
-      # whoever writes the manifests owns deleting this.
-      #
-      # Only 15001. The resume estate on 15006 serves no metrics, and a target
-      # that 404s forever is worse than no target. The nightly is not here at
-      # all and never will be: a batch job is not at any address when the
-      # scrape arrives, so its counters PUSH over OTLP at end of pass.
-      - job_name: albatross
-        static_configs:
-          - targets: ['192.168.5.2:15001']
-            labels:
-              mesh_component: albatross
-        # The market queries read three whole tables and are cached for 60s on
-        # albatross's side; scraping faster than the cache just serves the same
-        # numbers back. The data moves when a nightly pass runs, once a day.
-        scrape_interval: 60s
 
       # TRAEFIK. Every request into this estate crosses it, and it has been
       # exporting Prometheus metrics since the cluster was built with nothing
