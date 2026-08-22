@@ -395,7 +395,7 @@ data:
           "type": "gauge",
           "id": 3,
           "title": "ghost rate",
-          "description": "Share of checked employers keeping postings on a rented board their own site links from NOWHERE -- so an ordinary visitor clicking Careers never sees them. See ghosts.ts for why that signature is checkable. This is the number that says how much of a search is spent on roles nobody is reading. It was 85 of 193 checked employers on 2026-08-21, which is not a rounding error.",
+          "description": "Share of checked employers keeping postings on a rented board their own site links from NOWHERE -- so an ordinary visitor clicking Careers never sees them. See ghosts.ts for why that signature is checkable. This is the number that says how much of a search is spent on roles nobody is reading. It is one estate-wide figure -- ghost boards summed over checked boards summed -- so it stays a single number no matter how many albatross replicas are scraped; the old query divided the two per instance and drew one identical bar per pod. It was 85 of 193 on 2026-08-21 and 93 of 219 live, which is not a rounding error.",
           "gridPos": { "h": 6, "w": 5, "x": 10, "y": 0 },
           "fieldConfig": {
             "defaults": {
@@ -408,7 +408,7 @@ data:
             }
           },
           "targets": [{
-            "expr": "100 * albatross_boards_ghost / clamp_min(albatross_boards_checked, 1)",
+            "expr": "100 * sum(albatross_boards_ghost) / clamp_min(sum(albatross_boards_checked), 1)",
             "refId": "A"
           }]
         },
@@ -416,16 +416,16 @@ data:
           "type": "stat",
           "id": 4,
           "title": "median posting lifetime",
-          "description": "Days a posting stays up, measured ONLY over postings that have closed -- counting still-open ones would report how long they have been up so far and drag the median toward zero every time a batch arrives. It needs closed postings to mean anything, and on 2026-08-21 there were four of them, so read this as not-yet-answerable rather than as a fast market. It becomes real after a few harvest cycles.",
+          "description": "Days a posting stays up, measured ONLY over postings that have closed -- counting still-open ones would report how long they have been up so far and drag the median toward zero every time a batch arrives. It needs closed postings to mean anything: there were four closures on 2026-08-22, so this panel now shows nothing -- reading \"not yet answerable\" -- until at least 20 have closed, rather than drawing a confident zero over rows that have barely opened. It becomes a real median after a few harvest cycles.",
           "gridPos": { "h": 6, "w": 4, "x": 15, "y": 0 },
-          "fieldConfig": { "defaults": { "unit": "d" } },
-          "targets": [{ "expr": "albatross_posting_lifetime_days{quantile=\"0.5\"}", "refId": "A" }]
+          "fieldConfig": { "defaults": { "unit": "d", "noValue": "not yet answerable -- too few closed postings" } },
+          "targets": [{ "expr": "albatross_posting_lifetime_days{quantile=\"0.5\"} and on(instance, pod) (albatross_posting_lifetime_closed >= 20)", "refId": "A" }]
         },
         {
           "type": "stat",
           "id": 5,
           "title": "postings not yet classified",
-          "description": "READ THIS BEFORE THE THEME PANELS. Live postings carrying no demand theme, as a share of live postings.\n\nThe backfill has RUN. On 2026-08-21 this read 14646 of 14761 -- over 99 percent -- because themes are assigned at ingest and nothing is ever re-analyzed, so every posting harvested before the theme index landed on 2026-08-20 carried none. Running the theme pass over the corpus took it to 7088 of 14761, classifying 7673 postings and bringing all 22 themes into use where 19 had any members at all.\n\nSo what is left is no longer a backlog. Every job row has now been through assignThemes, which means the remaining 48 percent are titles containing no keyword from any of the 22 themes -- a genuine coverage limit rather than work not yet done. THAT is the number a rediscovery run would address, and it could only be read honestly once the backfill had drained the other kind. Backfill first, then judge coverage; the two look identical from outside and have opposite remedies.\n\nThe panel keeps its place ahead of the theme charts because the breakdown below still describes about half the corpus, and half is worth knowing about before reading it as the whole.",
+          "description": "READ THIS BEFORE THE THEME PANELS. Live postings carrying no demand theme, as a share of live postings.\n\nThe backfill has RUN. On 2026-08-21 this read 14646 of 14761 -- over 99 percent -- because themes are assigned at ingest and nothing is ever re-analyzed, so every posting harvested before the theme index landed on 2026-08-20 carried none. Running the theme pass over the corpus took it to 7088 of 14761, classifying 7673 postings and bringing all 22 themes into use where 19 had any members at all.\n\nSo what is left is no longer a backlog. Every job row has now been through assignThemes, and the nightly theme-read has drained the backlog: this reads 2915 of 15280, about 19 percent, which matches the store exactly (12365 of 15280 carry a theme). What remains are titles containing no keyword from any of the 22 themes -- a genuine coverage limit rather than work not yet done. THAT is the number a rediscovery run would address, and it could only be read honestly once the backfill had drained the other kind. Backfill first, then judge coverage; the two look identical from outside and have opposite remedies.\n\nThe panel keeps its place ahead of the theme charts because the breakdown below still omits this share, and it is worth knowing before reading the breakdown as the whole.",
           "gridPos": { "h": 6, "w": 5, "x": 19, "y": 0 },
           "fieldConfig": {
             "defaults": {
@@ -453,7 +453,10 @@ data:
             "expr": "topk(15, albatross_postings_by_theme)",
             "legendFormat": "{{theme}}",
             "refId": "A"
-          }]
+          }],
+          "transformations": [
+            { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Value", "desc": true }] } }
+          ]
         },
         {
           "type": "timeseries",
