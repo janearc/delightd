@@ -57,6 +57,36 @@ spec:
             httpGet:
               path: /health
               port: http
+          # MEMORY BOUNDS, the operator's call of 2026-08-22, sized from the
+          # store's own working set rather than guessed. Closes issue 136.
+          #
+          # Before this block the container had NO request and NO limit:
+          # Best-Effort QoS, which on a node under pressure means FIRST in line
+          # to be evicted -- the database dies before the dashboards do. And
+          # it was the only unbounded thing on the node: elasticsearch (2Gi),
+          # kafka (1536Mi) and kibana (1536Mi) all carry limits.
+          #
+          # The trend that forced it: working set 1.67 -> 1.79 -> 2.10 -> 3.12
+          # -> 3.64 GiB across 2026-08-21, doubling in the last twelve hours
+          # as four enrichment passes and the theme backfill wrote into it,
+          # with the first full nightly harvest still ahead. 8 GiB tonight is
+          # a projection from that curve, not a fear.
+          #
+          # request 6Gi: above today's 3.6 so the scheduler reserves what it
+          # actually uses, and it becomes Burstable -- evicted after the
+          # Best-Effort pods, not before them. limit 9Gi: one GiB over the
+          # projection; past it the container is OOM-killed and RESTARTED
+          # with its durable store intact, which is a visible event rather
+          # than a node that quietly runs out. Both numbers want the VM at
+          # 16 GiB: on the 12 GiB node this cluster had until tonight, 9Gi
+          # here plus 5Gi of the other three ceilings over-commits the node.
+          # Re-measure the curve after the first week of nightlies.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 6Gi
+            limits:
+              memory: 9Gi
           livenessProbe:
             httpGet:
               path: /health
