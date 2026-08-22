@@ -1,34 +1,39 @@
-# Valhalla's tile store: the routing graph it builds once from an OSM extract
-# and then mmaps on every start. This claim is the whole reason the piece is
-# stateful -- throw it away and the next start re-downloads 650MB of PBF and
-# spends the better part of an hour rebuilding tiles and elevation.
+# Valhalla's tile store: the routing graph it builds once and then mmaps on
+# every start, plus the clipped OSM extract and the GTFS feed it was built
+# from. This claim is the whole reason the piece is stateful -- throw it away
+# and the next start re-fetches 650MB of norcal, re-clips it, and spends the
+# better part of an hour rebuilding tiles, elevation and transit.
 #
-# SIZING, measured rather than guessed (2026-08-22):
-#   norcal-latest.osm.pbf   0.65Gi   (Geofabrik, Content-Length verified)
-#   routing tiles           ~4Gi     (norcal, admins + time zones on)
-#   elevation tiles         ~2Gi     (the norcal bbox, roughly 36 one-degree tiles)
-#   511 regional GTFS       ~1Gi     (unzipped, under gtfs_feeds/)
-#   transit tiles           ~1Gi     (built from that feed)
+# SIZING (2026-08-22). The extract is clipped to the Bay Area bbox in an
+# initContainer (see deployment.yaml), which is where most of this went:
+#   clipped bayarea.osm.pbf  ~0.2Gi   (from a 0.65Gi norcal, measured)
+#   routing tiles            ~1.2Gi
+#   elevation tiles          ~0.4Gi   (bbox spans ~6 one-degree tiles, not ~36)
+#   511 regional GTFS        ~1Gi     (unzipped, under gtfs_feeds/)
+#   transit tiles            ~0.8Gi
 #   ------------------------------------------------------------------
-#   total                   ~9Gi     against 18Gi free on the VM data disk
-# 12Gi is that estimate plus room for one tile rebuild landing beside the old
-# set. The two transit lines are the softest numbers here -- the only ones not
-# taken from a measured artifact -- so watch the first build with transit on.
+#   total                    ~3.6Gi   against 18Gi free on the VM data disk
+#
+# 5Gi is that estimate plus room for one rebuild landing beside the old set.
+# Be clear about the provenance: only the norcal PBF figure is measured. Every
+# other line is an estimate, and the post-clip ones are estimates scaled off
+# earlier estimates, which is the weakest kind. Watch the first build and
+# correct these numbers from what actually lands.
+#
+# The unclipped norcal build would have been ~9Gi. Clipping is what took it to
+# ~3.6Gi, and the reason it was worth an initContainer: 12Gi is not ruinous on
+# its own, but a fleet acquires furniture, and "not ruinous on its own" is how
+# a shared 18Gi disappears.
 #
 # DISK EXCEPTION, the same shape as surrealdb's: local-path does NOT enforce
 # this request. It provisions a plain directory under
-# /var/lib/rancher/k3s/storage with no quota, and the real ceiling is the colima
-# VM data disk -- /dev/vdb1, 57Gi total and 37Gi used as of this writing, shared
-# by every PVC, all images, and etcd. 9Gi out of an 18Gi remainder is a real
-# bite. Two levers if it gets tight, in order of preference:
-#   1. `docker system prune` -- ~12Gi was reclaimable at authoring time.
-#   2. Clip the PBF to the Bay Area bbox before the build (roughly
-#      -122.6,37.2,-121.7,37.9). That cuts tiles and elevation to well under
-#      2Gi total, at the cost of an osmium step in front of the build. It is
-#      deliberately NOT done here: the unclipped extract has a stable URL and no
-#      moving parts, which is what "stand it up and forget it" requires.
-# As with surrealdb, the mitigation is monitoring, not a quota local-path cannot
-# give. The growth risk ships named, not silent.
+# /var/lib/rancher/k3s/storage with no quota, and the real ceiling is the
+# colima VM data disk -- /dev/vdb1, 57Gi total and 37Gi used as of this
+# writing, shared by every PVC, all images, and etcd. The lever if it gets
+# tight is `docker system prune`; ~12Gi was reclaimable at authoring time,
+# which is more than this whole piece costs. As with surrealdb, the mitigation
+# is monitoring, not a quota local-path cannot give. The growth risk ships
+# named, not silent.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -43,4 +48,4 @@ spec:
   storageClassName: local-path
   resources:
     requests:
-      storage: 12Gi
+      storage: 5Gi

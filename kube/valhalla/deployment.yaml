@@ -22,6 +22,84 @@ spec:
         app.kubernetes.io/name: valhalla
         app.kubernetes.io/part-of: fleet
     spec:
+      # THE CLIP. Geofabrik's smallest California cut is norcal, which reaches
+      # Redding and eats roughly 6Gi of tiles and elevation for geography this
+      # will never route through. There is no ready-made Bay Area extract worth
+      # using: BBBike publishes SanFrancisco and SanJose, but they stop at
+      # 37.54 and start at 37.46 respectively, leaving a hole over the
+      # mid-Peninsula that Redwood City and Palo Alto fall straight into.
+      #
+      # So: fetch norcal once, clip it to the bbox, hand the result to valhalla
+      # and throw the source away. The image builds from whatever PBF it finds
+      # in /custom_files ("you could create custom_files on your host before
+      # starting the container with all necessary files you want to be
+      # respected, e.g. the OSM PBF files" -- upstream README), which is what
+      # makes this work without patching the image.
+      #
+      # BBOX -122.60,37.05,-121.55,37.84 -- west to east, south to north:
+      #   south 37.05  below Morgan Hill and San Martin, above Gilroy (37.006),
+      #                which is the stated southern limit. This does cut
+      #                Caltrain's Gilroy terminus.
+      #   north 37.84  all of SF including Treasure Island; no Marin.
+      #   west -122.60 ocean, past Pacifica and Half Moon Bay.
+      #   east -121.55 clear of San Jose's eastern edge and Morgan Hill
+      #                (-121.654), which a tighter cut would clip in half.
+      # A rectangle over this geography necessarily includes the East Bay
+      # shoreline -- the bay is a notch in the middle of it, not an edge. That
+      # is not waste: it gives BART's Oakland and Fremont branches a pedestrian
+      # network to connect their stops to.
+      #
+      # Idempotent by two guards, because this must not re-download 650MB on
+      # every pod restart: it exits early if tiles already exist, and again if
+      # the clipped PBF is already on the claim. It fails HARD rather than
+      # soft, unlike the usual fail-soft network stance -- there is no useful
+      # degraded mode where valhalla starts with no graph and no PBF to build
+      # one from. That strictness only ever applies to the very first start.
+      initContainers:
+        - name: clip-extract
+          # debian-slim plus the Debian osmium-tool package, because no osmium
+          # image publishes linux/arm64 (checked ghcr.io/osgeo, stefda,
+          # iboates -- 2026-08-22). The apt install is a one-time cost paid on
+          # first build only; every later start hits a guard and exits.
+          image: debian:bookworm-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PBF=/custom_files/bayarea.osm.pbf
+              if [ -f /custom_files/valhalla_tiles.tar ] || [ -d /custom_files/valhalla_tiles ]; then
+                echo "clip: tiles already built, nothing to do"
+                exit 0
+              fi
+              if [ -f "$PBF" ]; then
+                echo "clip: $PBF already present, nothing to do"
+                exit 0
+              fi
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends osmium-tool ca-certificates curl
+              echo "clip: fetching norcal extract"
+              curl -fsSL -o /scratch/norcal.osm.pbf \
+                https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf
+              echo "clip: extracting bbox"
+              # complete_ways keeps every node of a way that crosses the
+              # boundary, so roads are not severed at the bbox edge. The
+              # default simple strategy would leave dangling geometry that
+              # routes badly along the border.
+              osmium extract --bbox -122.60,37.05,-121.55,37.84 \
+                --strategy complete_ways \
+                -o "$PBF.part" /scratch/norcal.osm.pbf
+              mv "$PBF.part" "$PBF"
+              rm -f /scratch/norcal.osm.pbf
+              echo "clip: done"
+              ls -l "$PBF"
+          volumeMounts:
+            - name: tiles
+              mountPath: /custom_files
+            # The 650MB source lands on node ephemeral storage, never the
+            # claim: it is deleted the moment the clip succeeds, and sizing the
+            # claim for a file that exists for four minutes would be silly.
+            - name: scratch
+              mountPath: /scratch
       containers:
         - name: valhalla
           # Pinned point release, never a rolling tag, per the surrealdb
@@ -39,13 +117,10 @@ spec:
           # tens of minutes into hours.
           image: ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1
           env:
-            # Northern California from Geofabrik: 649,518,710 bytes as of
-            # 2026-08-21, a stable URL that is re-cut nightly. It covers SF,
-            # the Peninsula and the South Bay with room north, and needs no
-            # clipping step -- see pvc.yaml for the disk trade and the bbox to
-            # use if the claim ever needs to shrink.
-            - name: tile_urls
-              value: "https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf"
+            # No tile_urls, deliberately. The initContainer has already put a
+            # clipped PBF in /custom_files and the image builds from whatever
+            # PBF it finds there. Setting tile_urls would pull the unclipped
+            # norcal extract down on top of it and quietly undo the clip.
             # Elevation on, deliberately. It is the largest single contributor
             # to the tile footprint, and bike routing in this geography is
             # close to meaningless without grade: a 25-minute bike isochrone
@@ -191,3 +266,6 @@ spec:
         - name: tiles
           persistentVolumeClaim:
             claimName: valhalla-tiles
+        # Node ephemeral, for the unclipped source extract only.
+        - name: scratch
+          emptyDir: {}
