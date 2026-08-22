@@ -58,11 +58,20 @@ spec:
             # /conf, not /etc/prometheus directly: see the volumeMounts note.
             - --config.file=/etc/prometheus/conf/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            # SEVEN DAYS, deliberately. Long enough to see a trend and to look
-            # back at last night; short enough that the TSDB cannot quietly
-            # become the thing that fills the disk it is watching. Raise it
-            # only alongside the claim above.
-            - --storage.tsdb.retention.time=7d
+            # TWENTY-EIGHT DAYS, the operator's ruling of 2026-08-22. Seven was
+            # long enough to see a trend and not long enough to see a WEEK --
+            # a store that forgets on day eight cannot answer "what does
+            # Tuesday look like", and periodicity by day-of-week and hour has
+            # historically mattered in this estate. Four weeks shows four
+            # Tuesdays.
+            #
+            # Sized against the claim, not guessed: seven days of this
+            # cluster's series was 212MB on disk at the time of the change, so
+            # 28 days is under 1GiB against the 5Gi claim above. The TSDB
+            # still cannot quietly become the thing that fills the disk it is
+            # watching. Raise the claim before going past ~120 days at today's
+            # series count, and re-measure if the series count grows.
+            - --storage.tsdb.retention.time=28d
             - --web.enable-lifecycle
             # PUSH, alongside the pull. Everything else here is scraped, which
             # works because everything else is a resident process at a stable
