@@ -36,18 +36,36 @@ spec:
       # respected, e.g. the OSM PBF files" -- upstream README), which is what
       # makes this work without patching the image.
       #
-      # BBOX -122.60,37.05,-121.55,37.84 -- west to east, south to north:
-      #   south 37.05  below Morgan Hill and San Martin, above Gilroy (37.006),
-      #                which is the stated southern limit. This does cut
-      #                Caltrain's Gilroy terminus.
-      #   north 37.84  all of SF including Treasure Island; no Marin.
-      #   west -122.60 ocean, past Pacifica and Half Moon Bay.
-      #   east -121.55 clear of San Jose's eastern edge and Morgan Hill
-      #                (-121.654), which a tighter cut would clip in half.
-      # A rectangle over this geography necessarily includes the East Bay
-      # shoreline -- the bay is a notch in the middle of it, not an edge. That
-      # is not waste: it gives BART's Oakland and Fremont branches a pedestrian
-      # network to connect their stops to.
+      # BBOX -122.60,36.95,-121.50,38.07, and it is DERIVED FROM THE TRANSIT
+      # STOPS, not from where anyone wants to live. That distinction is the
+      # whole reason this box is bigger than the search area.
+      #
+      # Valhalla binds every transit stop into the road graph during its
+      # `enhance` stage. A stop with no road near it is not skipped --
+      # valhalla_build_tiles SEGFAULTS. Measured on the fleet 2026-08-22 with
+      # an earlier, tighter box: "Adding 9 transit tiles to the local graph...
+      # Could not find connection point for in/egress near: 37.905567,
+      # -122.067623" (Pleasant Hill BART), then a segmentation fault and a
+      # CrashLoopBackOff. The extract MUST cover every stop in every feed that
+      # gets loaded.
+      #
+      # Sized from the feeds themselves rather than guessed:
+      #   BART      287 stops   W-122.469 S37.368 E-121.780 N38.019
+      #   Caltrain  106 stops   W-122.412 S37.003 E-121.566 N37.776
+      #   union                 W-122.469 S37.003 E-121.566 N38.019
+      # plus roughly 5km of margin, because a stop needs road AROUND it to
+      # attach to, not merely road at it.
+      #
+      # This reaches Antioch and Richmond in the north-east and Gilroy in the
+      # south. Gilroy is deliberately outside the SEARCH area (jobs and housing
+      # stop short of it) and deliberately inside the ROUTING area, because
+      # Caltrain serves it and three of its stops would otherwise crash the
+      # build. Routing coverage and display scope are different questions; only
+      # the first is settled here.
+      #
+      # Cost of the wider box: about 48% more area than the search-shaped one,
+      # against a measured 755M footprint -- call it 1.1-1.3Gi, still a small
+      # fraction of the claim. Cheap insurance against a segfault.
       #
       # Idempotent by two guards, because this must not re-download 650MB on
       # every pod restart: it exits early if tiles already exist, and again if
@@ -99,7 +117,7 @@ spec:
               # the write atomic defeats that inference outright: "Could not
               # detect file format for filename '...osm.pbf.part'". Found by
               # running it, not by reading it.
-              osmium extract --bbox -122.60,37.05,-121.55,37.84 \
+              osmium extract --bbox -122.60,36.95,-121.50,38.07 \
                 --strategy complete_ways \
                 -f pbf \
                 -o "$PBF.part" "$SRC"
@@ -163,10 +181,18 @@ spec:
             # So activation is a deliberate two-step, in this order:
             #   1. furnish with this False. Roads, elevation, admins and time
             #      zones build; the piece comes up serving car/bike/foot.
-            #   2. put the feed on the claim, flip this to True, restart:
+            #   2. put the feed on the claim, set this to Force, restart:
             #        curl 'http://api.511.org/transit/datafeeds?api_key=KEY&operator_id=RG' -o rg.zip
             #        unzip rg.zip -d <claim>/gtfs_feeds/regional/
             #        kubectl -n fleet rollout restart deploy/valhalla
+            #
+            # FORCE, not True, learned the hard way. `True` builds transit tiles
+            # but leaves existing routing tiles alone -- and stops are bound into
+            # the graph during the ROUTING build, which therefore never happens.
+            # It looks like success, and then every multimodal route returns
+            # "Locations are in unconnected regions". `Force` discards both
+            # tilesets so they rebuild in the right order: transit first, roads
+            # on top. Costs a full rebuild, about 3 minutes here.
             #
             # operator_id=RG is the CONSOLIDATED regional feed -- Caltrain,
             # BART, Muni, VTA, SamTrans, AC Transit and the ferries in one
