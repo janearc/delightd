@@ -4,26 +4,32 @@
 # and the next start re-fetches 650MB of norcal, re-clips it, and spends the
 # better part of an hour rebuilding tiles, elevation and transit.
 #
-# SIZING (2026-08-22). The extract is clipped to the Bay Area bbox in an
-# initContainer (see deployment.yaml), which is where most of this went:
-#   clipped bayarea.osm.pbf  ~0.2Gi   (from a 0.65Gi norcal, measured)
-#   routing tiles            ~1.2Gi
-#   elevation tiles          ~0.4Gi   (bbox spans ~6 one-degree tiles, not ~36)
-#   511 regional GTFS        ~1Gi     (unzipped, under gtfs_feeds/)
-#   transit tiles            ~0.8Gi
+# SIZING -- MEASURED on the fleet 2026-08-22, after a real build. The earlier
+# numbers here were estimates and they were wrong by about 5x, high:
+#   valhalla_tiles.tar        206M
+#   valhalla_tiles/           206M   (the tar is kept alongside the tree)
+#   bayarea.osm.pbf           141M   (clipped, from a 649MB norcal)
+#   timezone_data             123M
+#   elevation_data             75M
+#   admin_data                6.8M
 #   ------------------------------------------------------------------
-#   total                    ~3.6Gi   against 18Gi free on the VM data disk
+#   total                     755M   roads, elevation, admins, time zones
 #
-# 5Gi is that estimate plus room for one rebuild landing beside the old set.
-# Be clear about the provenance: only the norcal PBF figure is measured. Every
-# other line is an estimate, and the post-clip ones are estimates scaled off
-# earlier estimates, which is the weakest kind. Watch the first build and
-# correct these numbers from what actually lands.
+# Two surprises worth keeping. Elevation cost 75M, not the ~400M projected --
+# it was talked about as the expensive switch and it is nearly the cheapest
+# thing here. And timezone_data at 123M is the second-largest single item,
+# which nobody would have guessed.
 #
-# The unclipped norcal build would have been ~9Gi. Clipping is what took it to
-# ~3.6Gi, and the reason it was worth an initContainer: 12Gi is not ruinous on
-# its own, but a fleet acquires furniture, and "not ruinous on its own" is how
-# a shared 18Gi disappears.
+# STILL UNMEASURED: the 511 regional GTFS and the transit tiles built from it,
+# because transit does not build until the feed is on the claim (see
+# deployment.yaml). That is the entire reason this claim is not cut to 1Gi.
+#
+# 5Gi stays despite 755M of measured use, for two reasons rather than inertia.
+# A bound PVC cannot be shrunk -- kubernetes rejects a decrease outright, so
+# lowering this number would break `furnish up` against any cluster where the
+# piece already exists. And local-path does not enforce the request anyway, so
+# the number costs nothing real. Cut it at the next clean rebuild, once transit
+# has been measured too.
 #
 # DISK EXCEPTION, the same shape as surrealdb's: local-path does NOT enforce
 # this request. It provisions a plain directory under

@@ -77,19 +77,34 @@ spec:
               fi
               apt-get update -qq
               apt-get install -y -qq --no-install-recommends osmium-tool ca-certificates curl
-              echo "clip: fetching norcal extract"
-              curl -fsSL -o /scratch/norcal.osm.pbf \
-                https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf
+              SRC=/scratch/norcal.osm.pbf
+              # emptyDir outlives a container restart within the same pod, so a
+              # retry after a failed clip reuses the download instead of pulling
+              # 650MB again. Costs one -s test; saves a lot of somebody's link.
+              if [ -s "$SRC" ]; then
+                echo "clip: source extract already in scratch, reusing"
+              else
+                echo "clip: fetching norcal extract"
+                curl -fsSL -o "$SRC" \
+                  https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf
+              fi
               echo "clip: extracting bbox"
               # complete_ways keeps every node of a way that crosses the
               # boundary, so roads are not severed at the bbox edge. The
               # default simple strategy would leave dangling geometry that
               # routes badly along the border.
+              #
+              # -f pbf is load-bearing, not decorative. osmium infers the output
+              # format from the file extension, and the .part suffix that makes
+              # the write atomic defeats that inference outright: "Could not
+              # detect file format for filename '...osm.pbf.part'". Found by
+              # running it, not by reading it.
               osmium extract --bbox -122.60,37.05,-121.55,37.84 \
                 --strategy complete_ways \
-                -o "$PBF.part" /scratch/norcal.osm.pbf
+                -f pbf \
+                -o "$PBF.part" "$SRC"
               mv "$PBF.part" "$PBF"
-              rm -f /scratch/norcal.osm.pbf
+              rm -f "$SRC"
               echo "clip: done"
               ls -l "$PBF"
           volumeMounts:
@@ -135,52 +150,48 @@ spec:
               value: "True"
             - name: build_time_zones
               value: "True"
-            # GTFS ON. The interactive question -- "draw a 45-minute transit
-            # radius from Atherton and show me the jobs inside it" -- is served
-            # by /isochrone with `costing=multimodal`, which Valhalla does
-            # support: "the isochrone service uses the auto, bicycle,
-            # pedestrian, and multimodal and all other costing models"
-            # (valhalla docs/docs/api/isochrone.md, verified 2026-08-22).
+            # TRANSIT IS OFF UNTIL THE FEED IS ON THE CLAIM, and that ordering
+            # is measured, not assumed. An earlier revision of this file set
+            # True and claimed it was safe to ship ahead of the feeds because
+            # the flag "only builds transit tiles if none exist yet". Running it
+            # says otherwise: with build_transit=True and an empty /gtfs_feeds
+            # the container dies with "Couldn't find any usable GTFS feeds" and
+            # CrashLoopBackOffs. Worse, it attempts transit BEFORE the routing
+            # tiles, so the failure costs you the road graph too -- nothing
+            # builds at all. (Verified on the fleet 2026-08-22.)
             #
-            # Note the asymmetry, because it decides the whole shape of the
-            # consumer: multimodal works on /route and /isochrone and is
-            # explicitly NOT supported on /sources_to_targets. So transit is an
-            # isochrone-and-intersect question, never a matrix bake. Ask for a
-            # contour, convert it to H3 cells, intersect with the job cells.
-            # Departure-time only -- date_time types 0 and 1; type 2 (arrival)
-            # is unimplemented for multimodal.
-            #
-            # THE FEEDS ARE NOT FETCHED HERE, ON PURPOSE. The image reads
-            # unzipped GTFS as subfolders under /gtfs_feeds and does not
-            # download anything itself. The 511.org regional feed needs an API
-            # key, and a key belongs to the operator, not to a manifest, an
-            # argv, or a Secret this file could name. So feed population is a
-            # deliberate host-side step:
-            #
-            #   curl 'http://api.511.org/transit/datafeeds?api_key=KEY&operator_id=RG' -o rg.zip
-            #   unzip rg.zip -d <claim>/gtfs_feeds/regional/
-            #   kubectl -n fleet rollout restart deploy/valhalla
+            # So activation is a deliberate two-step, in this order:
+            #   1. furnish with this False. Roads, elevation, admins and time
+            #      zones build; the piece comes up serving car/bike/foot.
+            #   2. put the feed on the claim, flip this to True, restart:
+            #        curl 'http://api.511.org/transit/datafeeds?api_key=KEY&operator_id=RG' -o rg.zip
+            #        unzip rg.zip -d <claim>/gtfs_feeds/regional/
+            #        kubectl -n fleet rollout restart deploy/valhalla
             #
             # operator_id=RG is the CONSOLIDATED regional feed -- Caltrain,
             # BART, Muni, VTA, SamTrans, AC Transit and the ferries in one
             # GTFS. That matters more than convenience: an inter-operator
             # transfer (Caltrain to BART at Millbrae) resolves properly inside
             # one feed, where separate per-operator feeds leave Valhalla
-            # guessing at the connection.
+            # guessing at the connection. The key belongs to the operator and
+            # never to this file, an argv, or a Secret named here -- which is
+            # also why the pod does not fetch the feed itself.
             #
-            # `True` builds transit tiles only if none exist yet, so this is
-            # safe to ship ahead of the feeds: furnish now and it builds roads
-            # alone, drop the feed in later and restart to get transit. Use
-            # `Force` to discard existing transit AND routing tiles, which is a
-            # full re-cut and costs the whole build again.
+            # What it buys, once on: /isochrone with costing=multimodal, which
+            # is what answers "draw a 45-minute transit radius from Atherton".
+            # Note the asymmetry -- multimodal works on /route and /isochrone
+            # and is explicitly NOT supported on /sources_to_targets, so
+            # transit is an isochrone-and-intersect question and never a matrix
+            # bake. Departure-time only; date_time type 2 (arrival) is
+            # unimplemented for multimodal.
             #
-            # One honest caveat: Valhalla's transit routing is less battle-worn
-            # than OpenTripPlanner's or r5's, and multi-operator transfers are
-            # the hardest part of it. Before trusting an isochrone, route one
-            # trip whose answer you already know -- Sequoia Station to
-            # Embarcadero, 08:00 on a weekday -- and check it against reality.
+            # One caveat to test rather than trust: Valhalla's transit routing
+            # is less battle-worn than OpenTripPlanner's or r5's, and
+            # multi-operator transfers are its hardest case. Before believing an
+            # isochrone, route Sequoia Station to Embarcadero at 08:00 on a
+            # weekday and check it against reality.
             - name: build_transit
-              value: "True"
+              value: "False"
             # The set-and-forget switches. With these False the container
             # reuses whatever is already on the claim; flip one by hand (and
             # only by hand) to force a re-cut against a newer extract.
@@ -251,9 +262,12 @@ spec:
           # the container is OOM-killed, which on first start means a restart
           # into a partial build rather than a quiet wedge.
           #
-          # These numbers are an estimate, not a measurement -- unlike
-          # surrealdb's, which came off a real curve. Re-measure after the first
-          # successful build and tighten. cpu has a request and no limit on
+          # MEASURED 2026-08-22, serving roads after a real build: 291Mi
+          # resident, 55m cpu. The 512Mi request is about right for the steady
+          # state. The 6Gi limit is build headroom and is generous by a wide
+          # margin -- the build finished well inside it -- but limits are not
+          # reserved, so the ceiling costs nothing until a transit build has
+          # been watched too. cpu has a request and no limit on
           # purpose: the build is embarrassingly parallel and CPU is
           # compressible, so a ceiling there buys nothing but a slower build.
           resources:
