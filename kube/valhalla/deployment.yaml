@@ -60,8 +60,30 @@ spec:
               value: "True"
             - name: build_time_zones
               value: "True"
-            # No GTFS. Transit would need feeds wired in and kept fresh, and
-            # the modes actually being asked for are walk, bike and car.
+            # No GTFS -- and the reason is upstream's, not a preference.
+            # Valhalla supports multimodal (transit + walking) costing on
+            # /route and on /isochrone, but NOT on the matrix: "multimodal
+            # costing is not supported for the time-distance matrix service at
+            # this time" (valhalla docs/docs/api/matrix.md, verified
+            # 2026-08-22). The cell-pair bake is a matrix job, so transit tiles
+            # would buy nothing on the one path this piece exists to serve.
+            #
+            # They WOULD serve a per-job detail view, where a multimodal
+            # /isochrone answers "what is reachable by train plus a walk" --
+            # note only date_time types 0 and 1 (departure) work there; type 2
+            # (arrival) is not implemented for multimodal. If that view gets
+            # built, flip this to True and feed it the 511.org regional GTFS
+            # (Caltrain, BART, Muni, VTA, SamTrans, AC Transit), with the API
+            # key in a Secret and never in this file.
+            #
+            # Two costs come attached. The tiles need periodic re-ingestion as
+            # feeds change, which spends this piece's stand-it-up-and-forget-it
+            # property. And a single departure time is a poor summary of a
+            # 30-to-60-minute headway: off-peak Caltrain makes "transit time
+            # from A to B" a number that swings by half an hour depending on
+            # the minute you ask. For transit travel-time MATRICES with
+            # departure-window percentiles, r5 is the purpose-built tool and
+            # this is not it.
             - name: build_transit
               value: "False"
             # The set-and-forget switches. With these False the container
