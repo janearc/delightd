@@ -687,3 +687,132 @@ data:
         }
       ]
     }
+  peacock-client.json: |
+    {
+      "uid": "peacock",
+      "title": "peacock",
+      "tags": ["peacock", "viewer"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "description": "The viewer's own hot path, posted by web/app.js every 5 s and exposed on peacock's /metrics as peacock_client_*. Every series is labelled by camera band (globe, national, regional, metro, street); the per-frame gauges also by view and by whether a census ground layer is on. A hidden tab reports nothing, so a flat gap is a closed or hidden viewer, not a fast one. Built from the C1 profile of 2026-08-22 (sprint findings/peacock-C1-profile.md): an idle tab redrew 60 frames/s at 2.5-5.4 ms each and hover doubled the GPU; these panels are the before/after for every fix.",
+      "panels": [
+        {
+          "type": "timeseries", "id": 1,
+          "title": "main-thread ms per redrawn frame, by band",
+          "description": "deck.gl's cpuTimePerFrame. At 60 redraws/s, 3 ms here is 180 ms of every second on the main thread before the browser does anything else. The idle-loop fix is judged on this line going down while the viewer sits still.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [{ "expr": "max by (band) (peacock_client_cpu_ms_per_frame)", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 2,
+          "title": "frames redrawn per second, by band",
+          "description": "How often deck.gl repainted the whole scene. Before the idle-loop fix this was 60 regardless of input; a still viewer should sit far below it and rise only while the camera moves.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+          "targets": [{ "expr": "max by (band) (peacock_client_frames_drawn_per_second)", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 3,
+          "title": "picking ms per second, by band",
+          "description": "Main-thread time spent in hover picking: each pick is a render of the pickable layers plus a synchronous readPixels. 20 picks/s at 3-4 ms each is what moving the mouse over the map cost before the hover fix.",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [{ "expr": "max by (band) (peacock_client_pick_ms_per_second)", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 4,
+          "title": "attribute regeneration ms per second, by band",
+          "description": "Time rebuilding layer attribute buffers. Before the fix the two traffic layers rebuilt their positions every frame (~60 ms/s at regional zoom and finer). Anything above a few ms/s while the camera is still is a layer being rebuilt that did not change.",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [{ "expr": "max by (band) (peacock_client_attribute_update_ms_per_second)", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 5,
+          "title": "JS heap, MB, by band",
+          "description": "Heap in use. A sawtooth between ~300 MB and ~1 GB is per-frame garbage (positions and objects allocated every tick) being collected; the amplitude is the number to watch after the idle-loop fix.",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "decmbytes", "min": 0 } },
+          "targets": [{ "expr": "max by (band) (peacock_client_heap_mb)", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 6,
+          "title": "bundle parse time, p50 and p95, by kind",
+          "description": "JSON.parse wall time on the main thread per bundle, by what the bundle was for (econ header, econ chunk, decoration layer, metro layer, table...). The 39 MB res6 census bundle parses in ~180 ms as a single task; arriving at metro zoom queued ~0.9 s of these. The viewer stutters for exactly this long.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [
+            { "expr": "histogram_quantile(0.5, sum by (kind, le) (rate(peacock_client_parse_ms_bucket[15m])))", "legendFormat": "p50 {{kind}}", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum by (kind, le) (rate(peacock_client_parse_ms_bucket[15m])))", "legendFormat": "p95 {{kind}}", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries", "id": 7,
+          "title": "layers() rebuild time, p50 and p95, by band",
+          "description": "Wall time of one rebuild of the whole layer list (every zoom-band crossing, toggle, resolution change or chunk arrival). 3-6 ms at every band with no ground layer on; the number to watch when a census carpet is selected at res 5-6.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [
+            { "expr": "histogram_quantile(0.5, sum by (band, le) (rate(peacock_client_layers_ms_bucket[15m])))", "legendFormat": "p50 {{band}}", "refId": "A" },
+            { "expr": "histogram_quantile(0.95, sum by (band, le) (rate(peacock_client_layers_ms_bucket[15m])))", "legendFormat": "p95 {{band}}", "refId": "B" }
+          ]
+        },
+        {
+          "type": "timeseries", "id": 8,
+          "title": "long tasks, ms per minute, by band",
+          "description": "Main-thread tasks over 50 ms (the browser's own longtask observer), as ms per minute. These are the frames the viewer sees freeze. Parses and the first tessellation of a big layer land here.",
+          "gridPos": { "h": 7, "w": 8, "x": 0, "y": 24 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [{ "expr": "sum by (band) (increase(peacock_client_long_task_ms_total[1m]))", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 9,
+          "title": "worst frame gap, p95, by band",
+          "description": "Longest gap between two animation frames in each 5 s window, p95 over 15 m. 8.3 ms is a 120 Hz display at full rate, 16.7 ms is 60 Hz; anything over 33 ms is a visible hitch.",
+          "gridPos": { "h": 7, "w": 8, "x": 8, "y": 24 },
+          "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } },
+          "targets": [{ "expr": "histogram_quantile(0.95, sum by (band, le) (rate(peacock_client_worst_frame_ms_bucket[15m])))", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "timeseries", "id": 10,
+          "title": "viewer seconds per minute, by band",
+          "description": "Where viewers actually spend their time. Band seconds accumulate only while a tab is visible and reporting, so this is also the signal that anyone is looking at the map at all.",
+          "gridPos": { "h": 7, "w": 8, "x": 16, "y": 24 },
+          "fieldConfig": { "defaults": { "unit": "s", "min": 0 } },
+          "targets": [{ "expr": "sum by (band) (increase(peacock_client_band_seconds_total[1m]))", "legendFormat": "{{band}}", "refId": "A" }]
+        },
+        {
+          "type": "stat", "id": 11,
+          "title": "GPU memory deck.gl accounts for",
+          "description": "Buffers plus textures, MB, latest report. 250 MB of it at boot is the world relief image (6144x6124 RGBA, resident at every zoom) plus the CONUS relief and the two water textures.",
+          "gridPos": { "h": 5, "w": 6, "x": 0, "y": 31 },
+          "fieldConfig": { "defaults": { "unit": "decmbytes" } },
+          "targets": [{ "expr": "max(peacock_client_gpu_memory_mb)", "refId": "A" }]
+        },
+        {
+          "type": "stat", "id": 12,
+          "title": "telemetry posts rejected",
+          "description": "Reports the server dropped as malformed (size, JSON, shape). Non-zero means a viewer and server version disagree.",
+          "gridPos": { "h": 5, "w": 6, "x": 6, "y": 31 },
+          "targets": [{ "expr": "sum(peacock_telemetry_requests_total{outcome=\"rejected\"})", "refId": "A" }]
+        },
+        {
+          "type": "stat", "id": 13,
+          "title": "reports in the last hour",
+          "description": "One per five seconds per visible viewer. Zero means nobody has the map open, not that it is fast.",
+          "gridPos": { "h": 5, "w": 6, "x": 12, "y": 31 },
+          "targets": [{ "expr": "sum(increase(peacock_client_reports_total[1h]))", "refId": "A" }]
+        },
+        {
+          "type": "stat", "id": 14,
+          "title": "atlas age",
+          "description": "Seconds since the aggregate was built. The in-cluster refresh fires 6 h after pod start; the workstation nightly is 10:30 UTC.",
+          "gridPos": { "h": 5, "w": 6, "x": 18, "y": 31 },
+          "fieldConfig": { "defaults": { "unit": "s" } },
+          "targets": [{ "expr": "peacock_atlas_age_seconds", "refId": "A" }]
+        }
+      ],
+      "schemaVersion": 39
+    }
