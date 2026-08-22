@@ -60,32 +60,52 @@ spec:
               value: "True"
             - name: build_time_zones
               value: "True"
-            # No GTFS -- and the reason is upstream's, not a preference.
-            # Valhalla supports multimodal (transit + walking) costing on
-            # /route and on /isochrone, but NOT on the matrix: "multimodal
-            # costing is not supported for the time-distance matrix service at
-            # this time" (valhalla docs/docs/api/matrix.md, verified
-            # 2026-08-22). The cell-pair bake is a matrix job, so transit tiles
-            # would buy nothing on the one path this piece exists to serve.
+            # GTFS ON. The interactive question -- "draw a 45-minute transit
+            # radius from Atherton and show me the jobs inside it" -- is served
+            # by /isochrone with `costing=multimodal`, which Valhalla does
+            # support: "the isochrone service uses the auto, bicycle,
+            # pedestrian, and multimodal and all other costing models"
+            # (valhalla docs/docs/api/isochrone.md, verified 2026-08-22).
             #
-            # They WOULD serve a per-job detail view, where a multimodal
-            # /isochrone answers "what is reachable by train plus a walk" --
-            # note only date_time types 0 and 1 (departure) work there; type 2
-            # (arrival) is not implemented for multimodal. If that view gets
-            # built, flip this to True and feed it the 511.org regional GTFS
-            # (Caltrain, BART, Muni, VTA, SamTrans, AC Transit), with the API
-            # key in a Secret and never in this file.
+            # Note the asymmetry, because it decides the whole shape of the
+            # consumer: multimodal works on /route and /isochrone and is
+            # explicitly NOT supported on /sources_to_targets. So transit is an
+            # isochrone-and-intersect question, never a matrix bake. Ask for a
+            # contour, convert it to H3 cells, intersect with the job cells.
+            # Departure-time only -- date_time types 0 and 1; type 2 (arrival)
+            # is unimplemented for multimodal.
             #
-            # Two costs come attached. The tiles need periodic re-ingestion as
-            # feeds change, which spends this piece's stand-it-up-and-forget-it
-            # property. And a single departure time is a poor summary of a
-            # 30-to-60-minute headway: off-peak Caltrain makes "transit time
-            # from A to B" a number that swings by half an hour depending on
-            # the minute you ask. For transit travel-time MATRICES with
-            # departure-window percentiles, r5 is the purpose-built tool and
-            # this is not it.
+            # THE FEEDS ARE NOT FETCHED HERE, ON PURPOSE. The image reads
+            # unzipped GTFS as subfolders under /gtfs_feeds and does not
+            # download anything itself. The 511.org regional feed needs an API
+            # key, and a key belongs to the operator, not to a manifest, an
+            # argv, or a Secret this file could name. So feed population is a
+            # deliberate host-side step:
+            #
+            #   curl 'http://api.511.org/transit/datafeeds?api_key=KEY&operator_id=RG' -o rg.zip
+            #   unzip rg.zip -d <claim>/gtfs_feeds/regional/
+            #   kubectl -n fleet rollout restart deploy/valhalla
+            #
+            # operator_id=RG is the CONSOLIDATED regional feed -- Caltrain,
+            # BART, Muni, VTA, SamTrans, AC Transit and the ferries in one
+            # GTFS. That matters more than convenience: an inter-operator
+            # transfer (Caltrain to BART at Millbrae) resolves properly inside
+            # one feed, where separate per-operator feeds leave Valhalla
+            # guessing at the connection.
+            #
+            # `True` builds transit tiles only if none exist yet, so this is
+            # safe to ship ahead of the feeds: furnish now and it builds roads
+            # alone, drop the feed in later and restart to get transit. Use
+            # `Force` to discard existing transit AND routing tiles, which is a
+            # full re-cut and costs the whole build again.
+            #
+            # One honest caveat: Valhalla's transit routing is less battle-worn
+            # than OpenTripPlanner's or r5's, and multi-operator transfers are
+            # the hardest part of it. Before trusting an isochrone, route one
+            # trip whose answer you already know -- Sequoia Station to
+            # Embarcadero, 08:00 on a weekday -- and check it against reality.
             - name: build_transit
-              value: "False"
+              value: "True"
             # The set-and-forget switches. With these False the container
             # reuses whatever is already on the claim; flip one by hand (and
             # only by hand) to force a re-cut against a newer extract.
@@ -104,6 +124,13 @@ spec:
           volumeMounts:
             - name: tiles
               mountPath: /custom_files
+            # The GTFS drop, on the same claim under a subPath rather than a
+            # second volume: the feeds are build-time input that belongs with
+            # the tiles they produce, and one claim is one thing to back up,
+            # inspect, and reason about.
+            - name: tiles
+              mountPath: /gtfs_feeds
+              subPath: gtfs_feeds
           # THE PROBE THAT MATTERS IS THE STARTUP ONE. First start downloads
           # 650MB and then builds routing tiles, admins, time zones and
           # elevation before the HTTP server ever binds 8002 -- tens of minutes,

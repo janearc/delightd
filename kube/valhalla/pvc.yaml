@@ -7,17 +7,19 @@
 #   norcal-latest.osm.pbf   0.65Gi   (Geofabrik, Content-Length verified)
 #   routing tiles           ~4Gi     (norcal, admins + time zones on)
 #   elevation tiles         ~2Gi     (the norcal bbox, roughly 36 one-degree tiles)
+#   511 regional GTFS       ~1Gi     (unzipped, under gtfs_feeds/)
+#   transit tiles           ~1Gi     (built from that feed)
 #   ------------------------------------------------------------------
-#   total                   ~7Gi     against 18Gi free on the VM data disk
-# 10Gi is that estimate plus room for one tile rebuild landing beside the old
-# set. If the estimate is wrong it will be wrong upward, so watch the first
-# build.
+#   total                   ~9Gi     against 18Gi free on the VM data disk
+# 12Gi is that estimate plus room for one tile rebuild landing beside the old
+# set. The two transit lines are the softest numbers here -- the only ones not
+# taken from a measured artifact -- so watch the first build with transit on.
 #
 # DISK EXCEPTION, the same shape as surrealdb's: local-path does NOT enforce
 # this request. It provisions a plain directory under
 # /var/lib/rancher/k3s/storage with no quota, and the real ceiling is the colima
 # VM data disk -- /dev/vdb1, 57Gi total and 37Gi used as of this writing, shared
-# by every PVC, all images, and etcd. 7Gi out of an 18Gi remainder is a real
+# by every PVC, all images, and etcd. 9Gi out of an 18Gi remainder is a real
 # bite. Two levers if it gets tight, in order of preference:
 #   1. `docker system prune` -- ~12Gi was reclaimable at authoring time.
 #   2. Clip the PBF to the Bay Area bbox before the build (roughly
@@ -41,4 +43,4 @@ spec:
   storageClassName: local-path
   resources:
     requests:
-      storage: 10Gi
+      storage: 12Gi

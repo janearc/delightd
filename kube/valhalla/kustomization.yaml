@@ -22,9 +22,20 @@ resources:
 # geography work: travel time between H3 cells by car, bike and foot, which is
 # the expensive input to everything downstream.
 #
-# The consumption pattern is worth stating because it shapes what this piece
-# owes anyone. Valhalla is a BUILD-TIME dependency, not a request-path one: the
-# cell-pair matrices get baked once per (mode, time bucket) into a flat array
-# and served from memory thereafter. Nothing user-facing goes dark when this
-# piece is down -- only re-bakes block. That is why it carries no replica count
-# above one, no PodDisruptionBudget, and no particular urgency in its probes.
+# It serves two consumption patterns, and they want different things from it.
+#
+# BUILD-TIME, for car/bike/foot: cell-pair matrices come off /sources_to_targets
+# once per (mode, time bucket), bake into a flat array, and are served from
+# memory thereafter. Nothing goes dark if this piece is down; only re-bakes
+# block.
+#
+# REQUEST-PATH, for transit: multimodal is not supported on the matrix endpoint,
+# so a transit radius cannot be baked. It is asked live -- /isochrone with
+# costing=multimodal, from whatever origin the operator clicked -- and the
+# contour is converted to H3 cells and intersected against the job cells. That
+# path DOES go dark when this piece is down.
+#
+# The second pattern is why the probes are worth keeping honest. It still runs
+# one replica with no PodDisruptionBudget: the consumer is a workstation tool,
+# and a few seconds of unavailability during a rollout is not worth the machinery
+# to avoid. Revisit if anything unattended ever depends on the live path.
