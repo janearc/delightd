@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fleet
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: fleet
+
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingressroute.yaml
+
+# Valhalla: an OSM routing engine, furniture in the strict meubilair sense --
+# third-party, registers with nothing, speaks no delightd contract, answers
+# plain HTTP.
+#
+# It is here to serve isochrones and origin-destination matrices for the job
+# geography work: travel time between H3 cells by car, bike and foot, which is
+# the expensive input to everything downstream.
+#
+# The consumption pattern is worth stating because it shapes what this piece
+# owes anyone. Valhalla is a BUILD-TIME dependency, not a request-path one: the
+# cell-pair matrices get baked once per (mode, time bucket) into a flat array
+# and served from memory thereafter. Nothing user-facing goes dark when this
+# piece is down -- only re-bakes block. That is why it carries no replica count
+# above one, no PodDisruptionBudget, and no particular urgency in its probes.

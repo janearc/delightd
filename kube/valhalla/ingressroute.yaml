@@ -1,0 +1,30 @@
+# The workstation path to the router. traefik's web entrypoint sits on the k3d
+# loadbalancer's host port 8800 and macOS resolves *.localhost to loopback
+# natively, so http://valhalla.localhost:8800/status reaches the server with no
+# /etc/hosts entry and no port-forward.
+#
+# `.localhost` rather than grafana/kibana's `.local` placeholder, following
+# surrealdb: the only intended caller is this machine. The matrix bake is a
+# host-side job that will hammer /sources_to_targets for an hour or two, and
+# a port-forward is the wrong thing to hang that off.
+#
+# No authentication, same as the other fleet edges -- valhalla has none to
+# offer, and the trust boundary here is the loopback TLD.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: valhalla
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: valhalla
+    app.kubernetes.io/part-of: fleet
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`valhalla.localhost`)
+      services:
+        - kind: Service
+          name: valhalla
+          port: 8002
+          passHostHeader: true

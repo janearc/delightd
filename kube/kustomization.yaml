@@ -35,6 +35,10 @@ resources:
   - kibana
   - logstash
   - grafana
+  # OSM routing: isochrones and origin-destination matrices. Depends on nothing
+  # else in this list -- it reads an extract off the internet at first start and
+  # is self-contained after that.
+  - valhalla
   # metrics collection: prometheus, node-exporter, kube-state-metrics.
   # Last in the list because it watches everything above it.
   - prometheus

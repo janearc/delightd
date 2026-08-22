@@ -178,3 +178,23 @@ meubilair:
     source_manifest:
       repo: delightd
       path: kube/logstash/logstash.yaml
+
+  - name: valhalla
+    endpoints:
+      - scheme: http
+        address: "valhalla.fleet.svc.cluster.local:8002"
+      # Also fronted at the edge (Host `valhalla.localhost`, the loopback TLD
+      # for the same reason surrealdb uses it: the workstation is the only
+      # intended caller, and the matrix bake runs there).
+    probe:
+      # /status answers 200 with the version and tileset timestamp once the
+      # graph is loaded and the server can route; it needs no credentials.
+      # Note that the manifest ALSO carries a startupProbe on this path with a
+      # two-hour grace, because first start builds tiles before binding the
+      # port -- readiness here is the steady-state gate, not the cold one.
+      httpGet:
+        path: /status
+        port: 8002
+    source_manifest:
+      repo: delightd
+      path: kube/valhalla/deployment.yaml

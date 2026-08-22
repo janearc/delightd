@@ -1,0 +1,144 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valhalla
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: valhalla
+    app.kubernetes.io/part-of: fleet
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate, for the same reason surrealdb is: the tile
+  # volume is ReadWriteOnce and a rolling replacement deadlocks -- the new pod
+  # cannot mount the claim while the old one still holds it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: valhalla
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valhalla
+        app.kubernetes.io/part-of: fleet
+    spec:
+      containers:
+        - name: valhalla
+          # Pinned point release, never a rolling tag, per the surrealdb
+          # precedent: the piece must mean the same thing on every converge.
+          #
+          # gis-ops/docker-valhalla rather than the upstream valhalla/valhalla
+          # image: upstream ships the binaries and leaves tile construction to
+          # you, while this one takes a PBF URL and builds the graph on first
+          # start, then reuses it. That first-start build is the entire reason
+          # this piece can be stood up and forgotten.
+          #
+          # linux/arm64 is published for this tag (verified 2026-08-22), so it
+          # runs native on the Apple Silicon colima VM. An amd64-only image
+          # would run under emulation and turn the one-time tile build from
+          # tens of minutes into hours.
+          image: ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1
+          env:
+            # Northern California from Geofabrik: 649,518,710 bytes as of
+            # 2026-08-21, a stable URL that is re-cut nightly. It covers SF,
+            # the Peninsula and the South Bay with room north, and needs no
+            # clipping step -- see pvc.yaml for the disk trade and the bbox to
+            # use if the claim ever needs to shrink.
+            - name: tile_urls
+              value: "https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf"
+            # Elevation on, deliberately. It is the largest single contributor
+            # to the tile footprint, and bike routing in this geography is
+            # close to meaningless without grade: a 25-minute bike isochrone
+            # drawn on flat-earth assumptions will happily put Twin Peaks and
+            # the Embarcadero the same distance away.
+            - name: build_elevation
+              value: "True"
+            # Admin regions, and time zones on top of them. Time zones are what
+            # make departure-time-dependent routing answer correctly, which the
+            # drive matrices want; admins are their prerequisite.
+            - name: build_admins
+              value: "True"
+            - name: build_time_zones
+              value: "True"
+            # No GTFS. Transit would need feeds wired in and kept fresh, and
+            # the modes actually being asked for are walk, bike and car.
+            - name: build_transit
+              value: "False"
+            # The set-and-forget switches. With these False the container
+            # reuses whatever is already on the claim; flip one by hand (and
+            # only by hand) to force a re-cut against a newer extract.
+            - name: force_rebuild
+              value: "False"
+            - name: force_rebuild_elevation
+              value: "False"
+            # Once tiles exist, serve them without re-reading the PBF.
+            - name: use_tiles_ignore_pbf
+              value: "True"
+            - name: server_threads
+              value: "4"
+          ports:
+            - name: http
+              containerPort: 8002
+          volumeMounts:
+            - name: tiles
+              mountPath: /custom_files
+          # THE PROBE THAT MATTERS IS THE STARTUP ONE. First start downloads
+          # 650MB and then builds routing tiles, admins, time zones and
+          # elevation before the HTTP server ever binds 8002 -- tens of minutes,
+          # plausibly longer on a busy node. A liveness probe with no
+          # startupProbe in front of it would find nothing listening, restart
+          # the pod, and discard the partial build; the piece would rebuild
+          # forever and never come up. kubelet suppresses both other probes
+          # until this one passes.
+          #
+          # 30s x 240 = two hours of grace. That is deliberately far past the
+          # expected build: the cost of being generous is a slow failure
+          # signal on a genuinely broken build, and the cost of being tight is
+          # an infinite rebuild loop.
+          startupProbe:
+            httpGet:
+              path: /status
+              port: http
+            periodSeconds: 30
+            failureThreshold: 240
+          # /status answers 200 with the version and tileset timestamp once the
+          # graph is loaded and the server can route. It needs no credentials
+          # and does no tile walking (that is /status?verbose=true), so it is
+          # cheap enough to poll.
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          # Two different workloads share one container. The BUILD is the peak:
+          # it holds graph structures in memory while it cuts tiles. SERVING is
+          # cheap by comparison -- valhalla mmaps its tiles, so resident size
+          # stays well under the build's high-water mark and the page cache
+          # does the rest.
+          #
+          # request 512Mi is sized for the steady state, so the scheduler is not
+          # holding build-sized memory hostage for the 99.9% of this piece's
+          # life that is serving. limit 6Gi is headroom for the build; past it
+          # the container is OOM-killed, which on first start means a restart
+          # into a partial build rather than a quiet wedge.
+          #
+          # These numbers are an estimate, not a measurement -- unlike
+          # surrealdb's, which came off a real curve. Re-measure after the first
+          # successful build and tighten. cpu has a request and no limit on
+          # purpose: the build is embarrassingly parallel and CPU is
+          # compressible, so a ceiling there buys nothing but a slower build.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 6Gi
+      volumes:
+        - name: tiles
+          persistentVolumeClaim:
+            claimName: valhalla-tiles

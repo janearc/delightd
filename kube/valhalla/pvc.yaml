@@ -1,0 +1,44 @@
+# Valhalla's tile store: the routing graph it builds once from an OSM extract
+# and then mmaps on every start. This claim is the whole reason the piece is
+# stateful -- throw it away and the next start re-downloads 650MB of PBF and
+# spends the better part of an hour rebuilding tiles and elevation.
+#
+# SIZING, measured rather than guessed (2026-08-22):
+#   norcal-latest.osm.pbf   0.65Gi   (Geofabrik, Content-Length verified)
+#   routing tiles           ~4Gi     (norcal, admins + time zones on)
+#   elevation tiles         ~2Gi     (the norcal bbox, roughly 36 one-degree tiles)
+#   ------------------------------------------------------------------
+#   total                   ~7Gi     against 18Gi free on the VM data disk
+# 10Gi is that estimate plus room for one tile rebuild landing beside the old
+# set. If the estimate is wrong it will be wrong upward, so watch the first
+# build.
+#
+# DISK EXCEPTION, the same shape as surrealdb's: local-path does NOT enforce
+# this request. It provisions a plain directory under
+# /var/lib/rancher/k3s/storage with no quota, and the real ceiling is the colima
+# VM data disk -- /dev/vdb1, 57Gi total and 37Gi used as of this writing, shared
+# by every PVC, all images, and etcd. 7Gi out of an 18Gi remainder is a real
+# bite. Two levers if it gets tight, in order of preference:
+#   1. `docker system prune` -- ~12Gi was reclaimable at authoring time.
+#   2. Clip the PBF to the Bay Area bbox before the build (roughly
+#      -122.6,37.2,-121.7,37.9). That cuts tiles and elevation to well under
+#      2Gi total, at the cost of an osmium step in front of the build. It is
+#      deliberately NOT done here: the unclipped extract has a stable URL and no
+#      moving parts, which is what "stand it up and forget it" requires.
+# As with surrealdb, the mitigation is monitoring, not a quota local-path cannot
+# give. The growth risk ships named, not silent.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valhalla-tiles
+  namespace: fleet
+  labels:
+    app.kubernetes.io/name: valhalla
+    app.kubernetes.io/part-of: fleet
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
