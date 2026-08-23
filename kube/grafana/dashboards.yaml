@@ -684,3 +684,479 @@ data:
         }
       ]
     }
+  maps.json: |
+    {
+      "uid": "maps",
+      "title": "maps",
+      "tags": [
+        "kingfisher",
+        "maps"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "panels": [
+        {
+          "id": 100,
+          "type": "row",
+          "title": "what exists",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "map data on disk",
+          "description": "Every byte under every mount, read by walking the trees. This is the estate's map footprint in one number.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            }
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 5,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kingfisher_mount_bytes)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "tiles on disk",
+          "description": "Chunk files that exist, as opposed to chunks that were served. A tile is a file under a resN/ directory; a manifest is not one.",
+          "gridPos": {
+            "h": 4,
+            "w": 5,
+            "x": 5,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kingfisher_mount_tiles)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "series",
+          "description": "Distinct data series across all mounts, counted from the manifests themselves rather than declared anywhere, so it cannot drift from what is actually published.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 10,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kingfisher_mount_series)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "mounts",
+          "description": "Data roots kingfisher is serving. One namespace per source.",
+          "gridPos": {
+            "h": 4,
+            "w": 3,
+            "x": 14,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_mounts",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "files",
+          "description": "Every file under every mount, tiles and manifests and loose geometry alike.",
+          "gridPos": {
+            "h": 4,
+            "w": 3,
+            "x": 17,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kingfisher_mount_files)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "cache generation",
+          "description": "Bumped by /reload, which is the only thing that invalidates a cached tile. A step here means somebody published new map data.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 20,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_generation",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "bargauge",
+          "title": "disk by mount",
+          "description": "Where the map footprint actually is. Census chunks dominate; line geometry is small by comparison.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            }
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 0,
+            "y": 5
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_mount_bytes",
+              "legendFormat": "{{mount}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "bargauge",
+          "title": "tiles by mount",
+          "description": "A mount with zero tiles is not broken -- line geometry and point sets are not chunked, so they have files but no tiles.",
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 8,
+            "y": 5
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_mount_tiles",
+              "legendFormat": "{{mount}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "declared chunks against tiles on disk",
+          "description": "An invariant worth watching. The manifests say how many chunks exist; the walk counts how many files there are. They should be equal, and a gap means a regeneration wrote a manifest without its chunks or the other way round.",
+          "gridPos": {
+            "h": 6,
+            "w": 8,
+            "x": 16,
+            "y": 5
+          },
+          "targets": [
+            {
+              "expr": "sum(kingfisher_mount_chunks)",
+              "legendFormat": "declared",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(kingfisher_mount_tiles)",
+              "legendFormat": "on disk",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 200,
+          "type": "row",
+          "title": "what moved",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 11
+          }
+        },
+        {
+          "id": 10,
+          "type": "stat",
+          "title": "tiles per second",
+          "description": "The rate the SERVER is emitting at, which is the honest version of the question. A counter in a browser tab is a claim about that tab.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 0,
+            "y": 12
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kingfisher_tiles_total[1m]))",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "stat",
+          "title": "bytes per second",
+          "description": "Map data off the disk and onto the wire. A res-8 chunk is about 1.3MB, so this moves in lumps rather than smoothly.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps"
+            }
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 4,
+            "y": 12
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kingfisher_tile_bytes_total[1m]))",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "stat",
+          "title": "tiles served, total",
+          "description": "Monotonic since the process started. Difference it yourself; a rate computed server-side would be wall-clock.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 8,
+            "y": 12
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_tiles_total",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "in flight",
+          "description": "Requests being served right now. The viewer fetches several chunks at once, so this should spike and settle, not sit high.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 12,
+            "y": 12
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_inflight_requests",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "stat",
+          "title": "cache hit rate",
+          "description": "Share of requests answered 304 with no body. Map data does not change between regenerations, so a client that revalidates should almost always get this. A low number means somebody is not sending If-None-Match.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit"
+            }
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 16,
+            "y": 12
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kingfisher_responses_total{status=\"304\"}[5m])) / clamp_min(sum(rate(kingfisher_responses_total[5m])), 0.0001)",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "errors",
+          "description": "Responses of 400 or worse. A missing mount shows up here as 404s rather than as silence, which is the point of failing loud.",
+          "gridPos": {
+            "h": 4,
+            "w": 4,
+            "x": 20,
+            "y": 12
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_errors_total",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "latency, p50 / p95 / p99",
+          "description": "Time to serve a request, from the histogram rather than an average. The mean hides the tail, which is the only part worth knowing. Sub-millisecond is the page cache, tens of milliseconds is real IO, past a second means something is wrong rather than busy. The introspection endpoints are excluded so polling this dashboard does not flatter it.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(kingfisher_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(kingfisher_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(kingfisher_request_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "mean latency by kind",
+          "description": "A res-8 chunk and a res-8 manifest are different animals and averaging them together says nothing. Measured on the laptop: chunks about 1.8ms, manifests about 1.0ms, everything else about 0.2ms.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            }
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "targets": [
+            {
+              "expr": "rate(kingfisher_kind_duration_seconds_sum[5m]) / rate(kingfisher_kind_duration_seconds_count[5m])",
+              "legendFormat": "{{kind}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "tiles per second by kind",
+          "description": "Which resolution is actually being pulled. A viewer panning at metro zoom should be almost entirely res8; a run of manifest fetches means something is re-reading the catalogue.",
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 0,
+            "y": 24
+          },
+          "targets": [
+            {
+              "expr": "rate(kingfisher_tiles_by_kind_total[1m])",
+              "legendFormat": "{{kind}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "tiles per second by mount",
+          "description": "Which source is being read, so load can be attributed to a dataset rather than to the server as a whole.",
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 8,
+            "y": 24
+          },
+          "targets": [
+            {
+              "expr": "rate(kingfisher_tiles_by_mount_total[1m])",
+              "legendFormat": "{{mount}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "responses by status",
+          "description": "200 against 304 against everything else. A steady trickle of 404s usually means a client asking for a chunk outside the footprint, which is ordinary; a step change means a mount went away.",
+          "gridPos": {
+            "h": 7,
+            "w": 8,
+            "x": 16,
+            "y": 24
+          },
+          "targets": [
+            {
+              "expr": "rate(kingfisher_responses_total[5m])",
+              "legendFormat": "{{status}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "uptime",
+          "description": "Seconds since start. Every counter above is monotonic and resets only here, so a drop in a rate that coincides with a drop here is a restart and not a slowdown.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            }
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 24,
+            "x": 0,
+            "y": 31
+          },
+          "targets": [
+            {
+              "expr": "kingfisher_uptime_seconds",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
