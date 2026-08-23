@@ -904,26 +904,32 @@ data:
         },
         {
           "id": 10,
-          "type": "stat",
-          "title": "tiles per second",
-          "description": "The rate the SERVER is emitting at, which is the honest version of the question. A counter in a browser tab is a claim about that tab.",
+          "type": "timeseries",
+          "title": "tiles/sec against requests/sec (1m rate)",
+          "description": "Tiles against requests. Once a client revalidates properly, the second pass over already-fetched ground sends nothing: tiles/sec falls to zero while requests/sec does not, because a 304 is a request that emitted no tile. That gap is the cache working, not an instrument dying.",
           "gridPos": {
             "h": 4,
-            "w": 4,
+            "w": 8,
             "x": 0,
             "y": 12
           },
           "targets": [
             {
               "expr": "sum(rate(kingfisher_tiles_total[1m]))",
-              "refId": "A"
+              "refId": "A",
+              "legendFormat": "tiles"
+            },
+            {
+              "expr": "sum(rate(kingfisher_requests_total[1m]))",
+              "legendFormat": "requests",
+              "refId": "B"
             }
           ]
         },
         {
           "id": 11,
           "type": "stat",
-          "title": "bytes per second",
+          "title": "bytes/sec (1m rate)",
           "description": "Map data off the disk and onto the wire. A res-8 chunk is about 1.3MB, so this moves in lumps rather than smoothly.",
           "fieldConfig": {
             "defaults": {
@@ -933,7 +939,7 @@ data:
           "gridPos": {
             "h": 4,
             "w": 4,
-            "x": 4,
+            "x": 8,
             "y": 12
           },
           "targets": [
@@ -951,7 +957,7 @@ data:
           "gridPos": {
             "h": 4,
             "w": 4,
-            "x": 8,
+            "x": 12,
             "y": 12
           },
           "targets": [
@@ -969,7 +975,7 @@ data:
           "gridPos": {
             "h": 4,
             "w": 4,
-            "x": 12,
+            "x": 16,
             "y": 12
           },
           "targets": [
@@ -982,7 +988,7 @@ data:
         {
           "id": 14,
           "type": "stat",
-          "title": "cache hit rate",
+          "title": "cache hit rate (5m)",
           "description": "Share of requests answered 304 with no body. Map data does not change between regenerations, so a client that revalidates should almost always get this. A low number means somebody is not sending If-None-Match.",
           "fieldConfig": {
             "defaults": {
@@ -991,8 +997,8 @@ data:
           },
           "gridPos": {
             "h": 4,
-            "w": 4,
-            "x": 16,
+            "w": 2,
+            "x": 20,
             "y": 12
           },
           "targets": [
@@ -1009,8 +1015,8 @@ data:
           "description": "Responses of 400 or worse. A missing mount shows up here as 404s rather than as silence, which is the point of failing loud.",
           "gridPos": {
             "h": 4,
-            "w": 4,
-            "x": 20,
+            "w": 2,
+            "x": 22,
             "y": 12
           },
           "targets": [
@@ -1023,7 +1029,7 @@ data:
         {
           "id": 16,
           "type": "timeseries",
-          "title": "latency, p50 / p95 / p99",
+          "title": "latency p50 / p95 / p99 (5m)",
           "description": "Time to serve a request, from the histogram rather than an average. The mean hides the tail, which is the only part worth knowing. Sub-millisecond is the page cache, tens of milliseconds is real IO, past a second means something is wrong rather than busy. The introspection endpoints are excluded so polling this dashboard does not flatter it.",
           "fieldConfig": {
             "defaults": {
@@ -1057,7 +1063,7 @@ data:
         {
           "id": 17,
           "type": "timeseries",
-          "title": "mean latency by kind",
+          "title": "mean latency by kind (5m)",
           "description": "A res-8 chunk and a res-8 manifest are different animals and averaging them together says nothing. Measured on the laptop: chunks about 1.8ms, manifests about 1.0ms, everything else about 0.2ms.",
           "fieldConfig": {
             "defaults": {
@@ -1081,7 +1087,7 @@ data:
         {
           "id": 18,
           "type": "timeseries",
-          "title": "tiles per second by kind",
+          "title": "tiles/sec by kind (1m rate)",
           "description": "Which resolution is actually being pulled. A viewer panning at metro zoom should be almost entirely res8; a run of manifest fetches means something is re-reading the catalogue.",
           "gridPos": {
             "h": 7,
@@ -1100,7 +1106,7 @@ data:
         {
           "id": 19,
           "type": "timeseries",
-          "title": "tiles per second by mount",
+          "title": "tiles/sec by mount (1m rate)",
           "description": "Which source is being read, so load can be attributed to a dataset rather than to the server as a whole.",
           "gridPos": {
             "h": 7,
@@ -1119,7 +1125,7 @@ data:
         {
           "id": 20,
           "type": "timeseries",
-          "title": "responses by status",
+          "title": "responses/sec by status (5m)",
           "description": "200 against 304 against everything else. A steady trickle of 404s usually means a client asking for a chunk outside the footprint, which is ordinary; a step change means a mount went away.",
           "gridPos": {
             "h": 7,
