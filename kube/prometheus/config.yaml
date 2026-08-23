@@ -448,13 +448,21 @@ data:
           # the mac's real 77GB, so the 50GiB rule was un-alertable, not merely
           # un-alerted.
           #
-          # NO nanoleaf LABELS HERE, deliberately. The light vocabulary and the
-          # inhibit_rules in alertmanager.yaml are built around the node ladder;
-          # putting a second, unrelated disk on the same effect would have two
-          # machines fighting over one panel, which is the exact failure the
-          # ladder's own comment says the buckets exist to avoid. Which effect
-          # the workstation gets -- if any -- is the operator's to choose, and
-          # it wants an inhibit rule written at the same time.
+          # NO nanoleaf LABELS HERE, and that is the documented default rather
+          # than an omission. docs/nanoleaf-alert-seam.md: "Routing is opt-in
+          # per rule, not severity-based... Adding a new alert rule does not add
+          # a light; someone has to decide it earned one," and "If everything
+          # lights it up, nothing does." Unlabelled alerts route to the
+          # blackhole receiver and stay fully visible in Prometheus and Grafana
+          # -- not routed is not the same as not recorded.
+          #
+          # There is a second reason specific to these three. The effect
+          # vocabulary and the inhibit_rules in alertmanager.yaml are built
+          # around the node ladder; putting a second, unrelated disk on the same
+          # effect would have two machines fighting over one panel, which is the
+          # exact failure the ladder's own comment says the buckets exist to
+          # avoid. Which effect the workstation gets -- if any -- is the
+          # operator's to decide, and it wants an inhibit rule written with it.
           #
           # max() collapses the APFS double-count: `/` and
           # `/System/Volumes/Data` are one container reporting identical
