@@ -102,11 +102,55 @@ data:
         static_configs:
           - targets: ['localhost:9090']
 
-      # THE NODE. Host and node disk, memory, cpu, load. This is the job that
-      # would have caught the DiskPressure that evicted 30 pods.
+      # THE NODE, and ONLY the node. Disk, memory, cpu, load for the k3d node
+      # container. This is the job that would have caught the DiskPressure that
+      # evicted 30 pods.
+      #
+      # This comment used to say "Host and node". It never measured the host.
+      # node-exporter runs host-networked on the k3d node, whose "host" is the
+      # colima VM -- 4 CPUs and 16GiB -- not the workstation, which has 16 cores
+      # and 48GiB. Every dashboard built on this job is a VM dashboard.
+      #
+      # It is worse than incomplete on the virtiofs binds. Measured 2026-08-23:
+      #
+      #   node_filesystem_avail_bytes{mountpoint="/Users/jane/var"}
+      #     node-exporter says  19,750,503,579,648   (19.75 TB)
+      #     the mac's df says       77,006,356,480   (77 GB)
+      #
+      # virtiofs reports a fabricated size through the bind, so the 50GiB
+      # free-space rule is not merely un-alerted here, it is UN-ALERTABLE on
+      # this job. That is what the metricsd job below exists for.
       - job_name: node-exporter
         static_configs:
           - targets: ['node-exporter.fleet.svc.cluster.local:9100']
+
+      # THE WORKSTATION. The layer node-exporter cannot see: real load, the
+      # macOS memory breakdown (wired, compressed, the pressure level), swap,
+      # and the actual free space behind the 50GiB rule.
+      #
+      # metricsd runs on the mac and cannot move -- reading sysctl and vm_stat
+      # IS the job. It is SCRAPED, not pushed, which is the whole reason this
+      # stanza has to exist: a pushing daemon would need no config here.
+      #
+      # It has no pod, so the annotation-based discovery below cannot reach it.
+      # metricsd-host is a Service with no selector whose EndpointSlice names
+      # 192.168.5.2:9847 -- the same shape dodo-host already uses to reach dodo
+      # on the mac. 192.168.5.2 is colima's host alias; the docker bridge
+      # gateway (172.21.0.1) is the VM and refuses, which reads like a firewall
+      # and is really a wrong host. Manifest and the full probe live in
+      # janearc/metrics, deploy/kube/metricsd-host.yaml.
+      #
+      # Reading it: alert on metricsd_collector_up, never on the absence of a
+      # host series. The scheduler CLEARS a failed collector's gauges rather
+      # than serving a stale value, so a failure is `up 0` plus absent series --
+      # there is deliberately no number left behind to mistake for current.
+      #
+      # Mind the mountpoints. `/` and `/System/Volumes/Data` are one APFS
+      # container, so they report identical size and avail; summing them claims
+      # 1.99TB on a 1TB machine. Pin a mountpoint or take max().
+      - job_name: metricsd
+        static_configs:
+          - targets: ['metricsd-host.fleet.svc.cluster.local:9847']
 
       # THE OBJECTS. Restarts, phases, evictions, deployment readiness.
       # kube_pod_container_status_restarts_total is the series that would have
@@ -396,6 +440,59 @@ data:
             labels: { severity: warning, nanoleaf: "true", nanoleaf_effect: "disk-throb-medium" }
             annotations:
               summary: "node disk above 90% -- past the eviction threshold, pods are at risk"
+
+          # THE WORKSTATION LADDER. The ladder above is about the k3d node and
+          # its eviction thresholds. These are about the laptop, and until the
+          # metricsd job existed there was no series that could express them:
+          # node-exporter reads 19.75TB free through the virtiofs bind against
+          # the mac's real 77GB, so the 50GiB rule was un-alertable, not merely
+          # un-alerted.
+          #
+          # NO nanoleaf LABELS HERE, deliberately. The light vocabulary and the
+          # inhibit_rules in alertmanager.yaml are built around the node ladder;
+          # putting a second, unrelated disk on the same effect would have two
+          # machines fighting over one panel, which is the exact failure the
+          # ladder's own comment says the buckets exist to avoid. Which effect
+          # the workstation gets -- if any -- is the operator's to choose, and
+          # it wants an inhibit rule written at the same time.
+          #
+          # max() collapses the APFS double-count: `/` and
+          # `/System/Volumes/Data` are one container reporting identical
+          # figures, so without it this fires twice for one physical condition.
+          - alert: WorkstationDiskBelowFloor
+            expr: max(host_disk_free_below_floor) == 1
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "the workstation is at or under the 50GiB free-space floor"
+
+          # 1 normal, 2 warn, 4 critical. This is the macOS compressor telling
+          # you it is working, which shows up long before swap does.
+          - alert: WorkstationMemoryPressure
+            expr: max(host_memory_pressure_level) > 1
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "macOS memory pressure above normal on the workstation"
+
+          # THE ONE THAT MAKES THE REST TRUSTWORTHY. metricsd clears a failed
+          # collector's gauges rather than serving a stale value, so a failure
+          # is `up 0` plus ABSENT host series -- there is no number left behind
+          # to mistake for current. That is only a safety property if something
+          # watches the mark. Alert on this, never on a host series going away.
+          #
+          # `absent()` is the second arm on purpose: up == 0 covers a collector
+          # that ran and failed, absent() covers the whole target being
+          # unreachable -- the daemon stopped, or the hand-written EndpointSlice
+          # behind metricsd-host stopped pointing anywhere. Nothing repairs that
+          # slice; there is no controller behind it.
+          - alert: MetricsdNotCollecting
+            expr: |
+              max(metricsd_collector_up) == 0 or absent(metricsd_collector_up)
+            for: 10m
+            labels: { severity: warning }
+            annotations:
+              summary: "metricsd is not collecting -- host metrics are absent, not zero"
 
           # The one that hid behind a 1/1 for 59 days. Rate, not total: a pod
           # with 88 lifetime restarts that is now stable should not alert
